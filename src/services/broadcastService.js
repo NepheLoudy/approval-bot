@@ -1,62 +1,31 @@
 const config = require('../config');
-const bitableApi = require('../feishu/bitable');
+const approvalService = require('./approvalService');
 const { sendBroadcast } = require('../feishu/bot');
 
 /**
- * 获取审批统计信息
+ * 每周审批播报
+ *
+ * 触发：CRON_SCHEDULE（当前配置 0 0 18 * * 1，每周一 18:00）
+ * 内容：状态统计（含本周新增）+ 审批中列表（@当前处理人）
  */
-async function getApprovalStats() {
-  const all = await bitableApi.listAllRecords(config.bitable.approvalTableId);
+async function runWeeklyBroadcast(options = {}) {
+  console.log('[周播报] 开始执行播报...');
 
-  const stats = {
-    total: all.length,
-    pending: 0,
-    approved: 0,
-    rejected: 0,
-    other: 0,
-  };
+  const { stats } = await approvalService.getApprovalStats();
+  const pendingList = await approvalService.getPendingApprovals();
 
-  for (const item of all) {
-    const status = item.fields['申请状态'];
-    if (status === config.approvalStatus.PENDING) {
-      stats.pending++;
-    } else if (status === config.approvalStatus.APPROVED) {
-      stats.approved++;
-    } else if (status === config.approvalStatus.REJECTED) {
-      stats.rejected++;
-    } else {
-      stats.other++;
-    }
-  }
-
-  return { stats, all };
-}
-
-/**
- * 获取待审批列表
- */
-async function getPendingList() {
-  const filter = `CurrentValue.[申请状态] = "${config.approvalStatus.PENDING}"`;
-  return bitableApi.listAllRecords(config.bitable.approvalTableId, filter);
-}
-
-/**
- * 执行一次播报
- */
-async function runBroadcast(options = {}) {
-  console.log('[审批播报] 开始执行播报...');
-
-  const { stats } = await getApprovalStats();
-  const pendingList = await getPendingList();
-
-  console.log(`[审批播报] 统计: 总计=${stats.total} 待审批=${stats.pending} 已通过=${stats.approved} 已驳回=${stats.rejected}`);
+  console.log(
+    `[周播报] 统计: 总计=${stats.total} 审批中=${stats.pending} ` +
+    `已通过=${stats.approved} 已拒绝=${stats.rejected} 其他=${stats.other} 本周新增=${stats.weekNew}`
+  );
 
   const result = await sendBroadcast(stats, pendingList, {
     date: new Date().toLocaleDateString('zh-CN'),
+    weekNewCount: stats.weekNew,
     webhookUrl: options.webhookUrl || config.bot.webhookUrl,
   });
 
-  console.log('[审批播报] 播报完成');
+  console.log('[周播报] 播报完成');
 
   return {
     stats,
@@ -66,7 +35,5 @@ async function runBroadcast(options = {}) {
 }
 
 module.exports = {
-  getApprovalStats,
-  getPendingList,
-  runBroadcast,
+  runWeeklyBroadcast,
 };

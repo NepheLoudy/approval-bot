@@ -43,24 +43,34 @@ const commands = [
   { cmd: 'cd /opt/approval-bot && npm install --production', sudo: false },
   { cmd: `cat > /opt/approval-bot/.env << 'ENVEOF'
 PORT=3002
-# 飞书应用凭证 - 必须是 approval-bot 独立应用的凭证，不要复用 knowledge-tracker 的
-APP_ID=
-APP_SECRET=
-# 审批多维表格配置
-BITABLE_APP_TOKEN=
-BITABLE_APPROVAL_TABLE_ID=
+# 飞书应用配置（与所有 qianli 项目共用同一个应用）
+APP_ID=cli_aac7e6f6cdf8dcc0
+APP_SECRET=Z11s3UBWL2pivBCcc1zJnfJInKWmaYjN
+# 审批多维表格（采购申请/发票提交）
+BITABLE_APP_TOKEN=XrEjbPZn5aFcArsh03mc9QyCnlH
+BITABLE_APPROVAL_TABLE_ID=tblwwBsMZDdP1iSN
 # 飞书事件订阅配置（长连接模式，无需公网地址）
 FEISHU_VERIFICATION_TOKEN=
 FEISHU_ENCRYPT_KEY=
 FEISHU_USE_LONG_CONNECTION=true
-# 机器人配置 - 独立应用的群机器人 webhook
-BOT_NAME=审批机器人
-BOT_WEBHOOK_URL=
-BOT_CHAT_ID=
-# 审批者 open_id 列表（逗号分隔）
+# 机器人配置：自动播报 webhook + 唯一服务的目标群
+BOT_NAME=爆米花机_财务型
+BOT_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/d91361fc-b824-4a15-a8a3-a85b4344afba
+BOT_CHAT_ID=oc_1ea53731a8772400450da6ab107f8331
+# 活跃审批流程过滤（只播报该流程的记录）
+APPROVAL_PROCESS_NAMES=💸【27赛季】千里采购申请/发票提交
+# 对账轮询间隔（分钟）：共用应用长连接事件随机分发的兜底通道
+BITABLE_POLL_MINUTES=5
+# 审批者 open_id 列表（逗号分隔，提醒回落用）
 APPROVERS=
-# 定时播报（cron表达式，默认每天18:00）
-CRON_SCHEDULE=0 0 18 * * *
+# 每周播报（每周一 18:00）
+CRON_SCHEDULE=0 0 18 * * 1
+# 每日待审批提醒（每天 09:00）
+DAILY_INVOICE_REMINDER_SCHEDULE=0 0 9 * * *
+# 提醒 @ 目标（留空则回落到下面两位审批人）
+DAILY_REMINDER_MENTION_IDS=
+HE_YUNJIE_OPEN_ID=ou_54493ce1595583e02084309b3e81f6c7
+ZHANG_GUOHAO_OPEN_ID=ou_249993fe55916ccf549719ff6bf6f12d
 ENVEOF`, sudo: false },
   { cmd: 'pm2 delete approval-bot 2>/dev/null || true', sudo: false },
   { cmd: 'pm2 start /opt/approval-bot/src/index.js --name approval-bot', sudo: false },

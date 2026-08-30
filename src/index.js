@@ -2,22 +2,27 @@ const express = require('express');
 const cors = require('cors');
 const config = require('./config');
 const { startEventSubscription, processBitableEvent } = require('./feishu/eventSubscription');
-const { processChatMessage } = require('./services/chatService');
+const { processChatMessage, executeCommand } = require('./services/chatService');
 const approvalService = require('./services/approvalService');
-const { startCronJobs, runBroadcast, getCronStatus, getBroadcastHistory } = require('./cron');
+const { startCronJobs, runBroadcast, runReminder, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
+// ---------- 健康检查 ----------
+
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     time: new Date().toISOString(),
     botName: config.bot.name,
+    targetChatId: config.bot.chatId || null,
   });
 });
+
+// ---------- 审批数据查询 ----------
 
 app.get('/api/approvals', async (req, res) => {
   try {
@@ -39,6 +44,16 @@ app.get('/api/approvals/pending', async (req, res) => {
   }
 });
 
+app.get('/api/approvals/stats', async (req, res) => {
+  try {
+    const { stats } = await approvalService.getApprovalStats();
+    res.json(stats);
+  } catch (err) {
+    console.error('获取审批统计失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/approvals/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -53,6 +68,8 @@ app.get('/api/approvals/:id', async (req, res) => {
   }
 });
 
+// ---------- 机器人管理接口 ----------
+
 app.post('/api/bot/test-broadcast', async (req, res) => {
   try {
     const result = await runBroadcast();
@@ -63,13 +80,63 @@ app.post('/api/bot/test-broadcast', async (req, res) => {
   }
 });
 
+app.post('/api/bot/test-reminder', async (req, res) => {
+  try {
+    const result = await runReminder();
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('测试提醒失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/bot/sync', async (req, res) => {
+  try {
+    const result = await approvalService.scheduleSync('all');
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('手动对账失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/bot/cron-status', (req, res) => {
-  res.json(getCronStatus());
+  res.json({
+    ...getCronStatus(),
+    sync: approvalService.getSyncStatus(),
+  });
 });
 
 app.get('/api/bot/history', (req, res) => {
   res.json(getBroadcastHistory());
 });
+
+// ---------- 指令转发端点（bambu 同款契约） ----------
+// 共用飞书应用的长连接事件是随机分发的，指令消息可能不会到达本服务。
+// 爆米花机（project-management-robot）可在 chatService 中把 /approval-*
+// 指令转发到这里：POST http://localhost:3002/api/chat/command {command, args}
+
+app.post('/api/chat/command', async (req, res) => {
+  try {
+    const { command, args } = req.body;
+
+    if (!command) {
+      return res.status(400).json({ error: '指令不能为空' });
+    }
+
+    const reply = await executeCommand(command, args || []);
+    if (reply === null) {
+      return res.json({ reply: `❌ 未知指令：${command}` });
+    }
+
+    res.json({ reply });
+  } catch (err) {
+    console.error('处理转发指令失败:', err);
+    res.json({ reply: `❌ 指令执行失败：${err.message}` });
+  }
+});
+
+// ---------- 飞书 HTTP 回调（仅未启用长连接时使用） ----------
 
 app.post('/api/feishu/event', async (req, res) => {
   const { type, challenge, token, header, event } = req.body;
@@ -88,30 +155,19 @@ app.post('/api/feishu/event', async (req, res) => {
     return;
   }
 
-  if (header?.event_type === 'bitable.record.create' || header?.event_type === 'bitable.record.update') {
+  const eventType = header?.event_type;
+
+  if (eventType === 'drive.file.bitable_record_changed_v1') {
     setImmediate(async () => {
       try {
-        const tableId = event?.table_id;
-        const recordId = event?.record?.record_id;
-        const actionType = header?.event_type === 'bitable.record.create' ? 'create' : 'update';
-        const fields = event?.record?.fields;
-
-        if (tableId && recordId && fields) {
-          const bitableEvent = {
-            table_id: tableId,
-            record_id: recordId,
-            action_type: actionType,
-            fields: fields,
-          };
-          await processBitableEvent(bitableEvent);
-        }
+        await processBitableEvent(event || {});
       } catch (err) {
         console.error('处理飞书事件失败:', err);
       }
     });
   }
 
-  if (header?.event_type === 'im.message.receive_v1') {
+  if (eventType === 'im.message.receive_v1') {
     setImmediate(async () => {
       try {
         await processChatMessage(event);
@@ -124,14 +180,23 @@ app.post('/api/feishu/event', async (req, res) => {
   res.json({ code: 0, msg: 'success' });
 });
 
+// ---------- 启动 ----------
+
 function startServer() {
   const server = app.listen(config.port, () => {
     console.log(`🚀 审批机器人运行在 http://localhost:${config.port}`);
     console.log(`📚 API 健康检查: http://localhost:${config.port}/api/health`);
     console.log(`🤖 机器人名称: ${config.bot.name}`);
+    console.log(`🎯 目标群: ${config.bot.chatId || '(未配置 BOT_CHAT_ID!)'}`);
   });
 
   startCronJobs();
+
+  // 启动时先做一次静默对账，初始化快照（不播报历史记录）
+  approvalService.scheduleSync('all', undefined)
+    .then(() => console.log('✅ 启动快照初始化完成'))
+    .catch(err => console.error('❌ 启动快照初始化失败:', err.message));
+
   startEventSubscription();
 
   process.on('SIGINT', () => {

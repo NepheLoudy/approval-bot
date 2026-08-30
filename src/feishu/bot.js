@@ -1,161 +1,52 @@
 const config = require('../config');
 const { requestAPI } = require('./client');
 
-async function sendMessage(cardContent) {
-  const webhookUrl = config.bot.webhookUrl;
+// ============================================================
+// 消息发送层
+// - 自动播报（新申请/结果/提醒/周播报）走群自定义机器人 Webhook
+// - 指令回复走应用 IM API（回复消息 / 发送到指定群或私聊）
+// 卡片字段全部对应审批多维表格「表单」表的真实字段
+// ============================================================
 
+async function sendToWebhook(webhookUrl, payload) {
   if (!webhookUrl) {
-    console.warn('未配置机器人 Webhook URL，跳过消息发送');
+    console.warn('[机器人] 未配置 Webhook URL，跳过消息发送');
     return null;
   }
 
   const res = await fetch(webhookUrl, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      msg_type: 'interactive',
-      card: cardContent,
-    }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   });
 
   const data = await res.json();
-
   if (data.code !== 0 && data.StatusCode !== 0) {
-    throw new Error(`发送消息失败: ${JSON.stringify(data)}`);
+    throw new Error(`Webhook 发送失败: ${JSON.stringify(data)}`);
   }
-
   return data;
 }
 
-async function sendTextMessage(text) {
-  const webhookUrl = config.bot.webhookUrl;
-
-  if (!webhookUrl) {
-    console.warn('未配置机器人 Webhook URL，跳过消息发送');
-    return null;
-  }
-
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      msg_type: 'text',
-      content: {
-        text: text,
-      },
-    }),
+/**
+ * 通过群自定义机器人 Webhook 发送卡片
+ * @param {object} cardContent 卡片 JSON
+ * @param {string} [webhookUrl] 可覆盖默认 webhook
+ */
+async function sendMessage(cardContent, webhookUrl) {
+  return sendToWebhook(webhookUrl || config.bot.webhookUrl, {
+    msg_type: 'interactive',
+    card: cardContent,
   });
-
-  const data = await res.json();
-
-  if (data.code !== 0 && data.StatusCode !== 0) {
-    throw new Error(`发送消息失败: ${JSON.stringify(data)}`);
-  }
-
-  return data;
 }
 
-function buildAtTag(userId) {
-  if (!userId) return '';
-  return `<at id="${userId}"></at>`;
+async function sendTextMessage(text, webhookUrl) {
+  return sendToWebhook(webhookUrl || config.bot.webhookUrl, {
+    msg_type: 'text',
+    content: { text },
+  });
 }
 
-function buildApprovalAlertCard(approval) {
-  const applicantName = approval.fields['发起人']?.[0]?.name || '未知用户';
-  const applicantId = approval.fields['发起人']?.[0]?.id || '';
-  const startTime = approval.fields['发起时间'];
-  const approvalNo = approval.fields['申请编号'] || '未知编号';
-
-  return {
-    config: {
-      wide_screen_mode: true,
-      enable_forward: true,
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `**📋 新的审批申请**`,
-      },
-      { tag: 'hr' },
-      {
-        tag: 'markdown',
-        content: `${buildAtTag(applicantId)} **发起人**: ${applicantName}`,
-      },
-      {
-        tag: 'markdown',
-        content: `**申请编号**: ${approvalNo}`,
-      },
-      {
-        tag: 'markdown',
-        content: `**发起时间**: ${startTime || '未指定'}`,
-      },
-      { tag: 'hr' },
-      {
-        tag: 'markdown',
-        content: `**审批者**: 请在多维表格中查看详情并处理审批`,
-      },
-    ].filter(Boolean),
-    header: {
-      template: 'blue',
-      title: {
-        content: '📝 审批申请通知',
-        tag: 'plain_text',
-      },
-    },
-  };
-}
-
-function buildApprovalResultCard(approval, result, comment) {
-  const applicantName = approval.fields['发起人']?.[0]?.name || '未知用户';
-  const applicantId = approval.fields['发起人']?.[0]?.id || '';
-  const approvalNo = approval.fields['申请编号'] || '未知编号';
-
-  const isApproved = result === config.approvalStatus.APPROVED;
-
-  return {
-    config: {
-      wide_screen_mode: true,
-      enable_forward: true,
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: isApproved ? `**✅ 审批通过**` : `**❌ 审批驳回**`,
-      },
-      { tag: 'hr' },
-      {
-        tag: 'markdown',
-        content: `${buildAtTag(applicantId)} **发起人**: ${applicantName}`,
-      },
-      {
-        tag: 'markdown',
-        content: `**申请编号**: ${approvalNo}`,
-      },
-      {
-        tag: 'markdown',
-        content: `**审批意见**: ${comment || '无'}`,
-      },
-      { tag: 'hr' },
-      {
-        tag: 'markdown',
-        content: isApproved
-          ? '📝 您的申请已通过审批'
-          : '📝 您的申请被驳回，请修改后重新提交',
-      },
-    ],
-    header: {
-      template: isApproved ? 'green' : 'red',
-      title: {
-        content: '📝 审批结果通知',
-        tag: 'plain_text',
-      },
-    },
-  };
-}
+// ---------- IM API（应用身份） ----------
 
 async function sendTextToChat(chatId, text) {
   const res = await requestAPI(
@@ -167,11 +58,9 @@ async function sendTextToChat(chatId, text) {
       content: JSON.stringify({ text }),
     }
   );
-
   if (res.code !== 0) {
     throw new Error(`发送群消息失败: ${res.msg} (code: ${res.code})`);
   }
-
   return res.data;
 }
 
@@ -185,12 +74,260 @@ async function sendTextToUser(openId, text) {
       content: JSON.stringify({ text }),
     }
   );
-
   if (res.code !== 0) {
     throw new Error(`发送私聊消息失败: ${res.msg} (code: ${res.code})`);
   }
-
   return res.data;
+}
+
+async function replyTextMessage(messageId, text) {
+  const res = await requestAPI(
+    'POST',
+    `/im/v1/messages/${messageId}/reply`,
+    {
+      msg_type: 'text',
+      content: JSON.stringify({ text }),
+    }
+  );
+  if (res.code !== 0) {
+    throw new Error(`回复消息失败: ${res.msg} (code: ${res.code})`);
+  }
+  return res.data;
+}
+
+// ---------- 字段格式化（审批表真实字段） ----------
+
+function buildAtTag(openId) {
+  if (!openId) return '';
+  return `<at id="${openId}"></at>`;
+}
+
+/** 人员字段（User 数组）→ [{ id, name }] */
+function getUsers(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(Boolean)
+    .map(u => ({ id: u.id || '', name: u.name || u.text || '未知' }));
+}
+
+/** 取第一个人员的 open_id（用于 @） */
+function firstUserId(value) {
+  return getUsers(value)[0]?.id || '';
+}
+
+/** 取第一个人员姓名 */
+function firstUserName(value) {
+  return getUsers(value)[0]?.name || '未知';
+}
+
+/** DateTime 字段（毫秒时间戳）→ 可读时间 */
+function fmtTime(value) {
+  if (!value) return '未知';
+  const ms = typeof value === 'number' ? value : parseInt(value, 10);
+  if (Number.isNaN(ms)) return String(value);
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 总金额 + 币种 */
+function fmtMoney(fields) {
+  const amount = fields['总金额'];
+  if (amount === null || amount === undefined || amount === '') return '未填写';
+  const currency = fields['总金额-币种'] || '';
+  return `${amount}${currency ? ' ' + currency : ''}`;
+}
+
+function truncate(text, max = 60) {
+  const s = String(text || '').trim();
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+/** 附件/图片字段 → 摘要 */
+function fmtAttachment(value) {
+  if (!value) return '未上传';
+  if (Array.isArray(value)) return value.length > 0 ? `${value.length} 个附件` : '未上传';
+  return String(value);
+}
+
+// ---------- 卡片构建 ----------
+
+/**
+ * 新审批申请卡片（记录创建时推送）
+ */
+function buildNewApprovalCard(approval) {
+  const fields = approval.fields || {};
+  const applicantId = firstUserId(fields['发起人']);
+  const applicantName = firstUserName(fields['发起人']);
+  const department = fields['发起人部门'] || '未知部门';
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'blue',
+      title: { content: '📋 新的采购/发票申请', tag: 'plain_text' },
+    },
+    elements: [
+      {
+        tag: 'markdown',
+        content: `${buildAtTag(applicantId)} **${applicantName}**（${department}）提交了新申请`,
+      },
+      { tag: 'hr' },
+      { tag: 'markdown', content: `**申请编号**：${fields['申请编号'] || approval.record_id || '未知'}` },
+      { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
+      { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
+      { tag: 'markdown', content: `**项目**：${fields['项目'] || '未填写'}` },
+      { tag: 'markdown', content: `**付款方式**：${fields['付款人'] || '未填写'}` },
+      { tag: 'markdown', content: `**发起时间**：${fmtTime(fields['发起时间'])}` },
+      { tag: 'hr' },
+      { tag: 'markdown', content: `**审批节点**：${fields['审批节点'] || '待审批人处理'}` },
+    ],
+  };
+}
+
+/**
+ * 审批结果卡片（状态变为 已通过/已拒绝 时推送）
+ */
+function buildApprovalResultCard(approval, status) {
+  const fields = approval.fields || {};
+  const applicantId = firstUserId(fields['发起人']);
+  const applicantName = firstUserName(fields['发起人']);
+  const isApproved = status === config.approvalStatus.APPROVED;
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: isApproved ? 'green' : 'red',
+      title: {
+        content: isApproved ? '✅ 审批通过' : '❌ 审批被拒绝',
+        tag: 'plain_text',
+      },
+    },
+    elements: [
+      {
+        tag: 'markdown',
+        content: `${buildAtTag(applicantId)} **${applicantName}** 的申请已处理完成`,
+      },
+      { tag: 'hr' },
+      { tag: 'markdown', content: `**申请编号**：${fields['申请编号'] || approval.record_id || '未知'}` },
+      { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
+      { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
+      { tag: 'markdown', content: `**完成时间**：${fmtTime(fields['完成时间'] || fields['发起时间'])}` },
+      { tag: 'hr' },
+      {
+        tag: 'markdown',
+        content: isApproved
+          ? '💸 请按流程完成报销/转账等后续事项'
+          : '📄 详情请在多维表格或审批中心查看',
+      },
+    ],
+  };
+}
+
+/**
+ * 每日待审批提醒卡片（审批中记录 + @当前处理人）
+ * @param {Array} pendingList 审批中记录
+ * @param {string[]} fallbackMentionIds 当前处理人为空时的回落 @ 目标
+ */
+function buildReminderCard(pendingList, fallbackMentionIds = []) {
+  const handlerIds = new Set();
+  for (const item of pendingList) {
+    for (const u of getUsers(item.fields?.['当前处理人'])) {
+      if (u.id) handlerIds.add(u.id);
+    }
+  }
+  if (handlerIds.size === 0) {
+    for (const id of fallbackMentionIds) handlerIds.add(id);
+  }
+
+  const mentionLine = handlerIds.size > 0
+    ? [...handlerIds].map(id => buildAtTag(id)).join(' ')
+    : '';
+
+  const lines = pendingList.map((item, i) => {
+    const f = item.fields || {};
+    return `${i + 1}. **${f['申请编号'] || item.record_id}** | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${fmtTime(f['发起时间'])}`;
+  });
+
+  const elements = [
+    {
+      tag: 'markdown',
+      content: `**⏳ 每日待审批提醒**（${new Date().toLocaleDateString('zh-CN')}）`,
+    },
+    { tag: 'hr' },
+    {
+      tag: 'markdown',
+      content: `当前共有 **${pendingList.length} 条**申请处于「审批中」，请及时处理：`,
+    },
+  ];
+
+  if (mentionLine) {
+    elements.push({ tag: 'markdown', content: mentionLine });
+  }
+  elements.push({ tag: 'hr' });
+  elements.push({ tag: 'markdown', content: lines.join('\n') });
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'orange',
+      title: { content: '⏰ 待审批提醒', tag: 'plain_text' },
+    },
+    elements,
+  };
+}
+
+/**
+ * 每周播报卡片：审批统计 + 待审批列表
+ */
+function buildBroadcastCard(stats, pendingList, options = {}) {
+  const { date, weekNewCount } = options;
+  const elements = [
+    {
+      tag: 'markdown',
+      content: `**📊 审批周播报**\n${date || new Date().toLocaleDateString('zh-CN')}`,
+    },
+    { tag: 'hr' },
+    {
+      tag: 'markdown',
+      content: [
+        `**📈 审批统计**`,
+        `- 累计申请：${stats.total} 条`,
+        `- 审批中：${stats.pending} 条`,
+        `- 已通过：${stats.approved} 条`,
+        `- 已拒绝：${stats.rejected} 条`,
+        `- 其他（撤回/取消/终止/删除）：${stats.other} 条`,
+        weekNewCount !== undefined ? `- 本周新增：${weekNewCount} 条` : '',
+      ].filter(Boolean).join('\n'),
+    },
+  ];
+
+  if (pendingList && pendingList.length > 0) {
+    elements.push({ tag: 'hr' });
+    elements.push({
+      tag: 'markdown',
+      content: `**⏳ 待审批列表（${pendingList.length} 条）**`,
+    });
+    const lines = pendingList.map((item, i) => {
+      const f = item.fields || {};
+      const handler = firstUserName(f['当前处理人']);
+      const at = buildAtTag(firstUserId(f['当前处理人']));
+      return `${i + 1}. **${f['申请编号'] || item.record_id}** - ${at} ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)}\n   发起时间：${fmtTime(f['发起时间'])}${handler !== '未知' ? ` | 处理人：${handler}` : ''}`;
+    });
+    elements.push({ tag: 'markdown', content: lines.join('\n') });
+  } else if (stats.pending === 0) {
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: '✅ 暂无审批中的申请' });
+  }
+
+  return {
+    config: { wide_screen_mode: true },
+    elements,
+    header: {
+      template: stats.pending > 0 ? 'orange' : 'green',
+      title: { content: '📋 审批播报', tag: 'plain_text' },
+    },
+  };
 }
 
 async function sendCardToChat(chatId, cardContent) {
@@ -203,88 +340,37 @@ async function sendCardToChat(chatId, cardContent) {
       content: JSON.stringify(cardContent),
     }
   );
-
   if (res.code !== 0) {
     throw new Error(`发送群卡片消息失败: ${res.msg} (code: ${res.code})`);
   }
-
   return res.data;
 }
 
-function buildBroadcastCard(stats, pendingList, options = {}) {
-  const { date } = options;
-  const elements = [];
-
-  elements.push({
-    tag: 'markdown',
-    content: `**📢 审批每日播报**\n${date || new Date().toLocaleDateString('zh-CN')}`,
-  });
-
-  elements.push({ tag: 'hr' });
-
-  elements.push({
-    tag: 'markdown',
-    content: `**📊 审批统计**\n- 总计: ${stats.total} 条\n- 待审批: ${stats.pending} 条\n- 已通过: ${stats.approved} 条\n- 已驳回: ${stats.rejected} 条`,
-  });
-
-  if (pendingList && pendingList.length > 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({
-      tag: 'markdown',
-      content: `**⏳ 待审批列表（${pendingList.length}条）**`,
-    });
-
-    const lines = pendingList.map((item, index) => {
-      const no = item.fields['申请编号'] || '未知';
-      const applicant = item.fields['发起人']?.[0]?.name || '未知';
-      const time = item.fields['发起时间'] || '未知';
-      const applicantId = item.fields['发起人']?.[0]?.id || '';
-      const at = buildAtTag(applicantId);
-      return `${index + 1}. ${no} - ${at} ${applicant}\n   发起时间: ${time}`;
-    });
-
-    elements.push({
-      tag: 'markdown',
-      content: lines.join('\n'),
-    });
-  } else if (stats.pending === 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({
-      tag: 'markdown',
-      content: '✅ 暂无待审批的申请，继续保持！',
-    });
-  }
-
-  return {
-    config: {
-      wide_screen_mode: true,
-      enable_forward: true,
-    },
-    elements,
-    header: {
-      template: stats.pending > 0 ? 'orange' : 'green',
-      title: {
-        content: '📋 审批播报',
-        tag: 'plain_text',
-      },
-    },
-  };
-}
-
+/**
+ * 发送周播报（兼容旧接口签名）
+ */
 async function sendBroadcast(stats, pendingList, options = {}) {
-  const { webhookUrl } = options;
   const card = buildBroadcastCard(stats, pendingList, options);
-  return sendMessage(card, webhookUrl);
+  return sendMessage(card, options.webhookUrl);
 }
 
 module.exports = {
   sendMessage,
   sendTextMessage,
-  buildApprovalAlertCard,
-  buildApprovalResultCard,
-  buildBroadcastCard,
-  sendBroadcast,
   sendTextToChat,
   sendTextToUser,
+  replyTextMessage,
   sendCardToChat,
+  sendBroadcast,
+  buildNewApprovalCard,
+  buildApprovalResultCard,
+  buildReminderCard,
+  buildBroadcastCard,
+  // 字段格式化工具（供其他服务复用）
+  fmtTime,
+  fmtMoney,
+  getUsers,
+  firstUserId,
+  firstUserName,
+  truncate,
 };

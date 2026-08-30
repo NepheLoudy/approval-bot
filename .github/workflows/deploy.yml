@@ -31,6 +31,12 @@ jobs:
           BOT_CHAT_ID: ${{ secrets.BOT_CHAT_ID }}
           APPROVERS: ${{ secrets.APPROVERS }}
           CRON_SCHEDULE: ${{ secrets.CRON_SCHEDULE }}
+          APPROVAL_PROCESS_NAMES: ${{ secrets.APPROVAL_PROCESS_NAMES }}
+          BITABLE_POLL_MINUTES: ${{ secrets.BITABLE_POLL_MINUTES }}
+          DAILY_INVOICE_REMINDER_SCHEDULE: ${{ secrets.DAILY_INVOICE_REMINDER_SCHEDULE }}
+          DAILY_REMINDER_MENTION_IDS: ${{ secrets.DAILY_REMINDER_MENTION_IDS }}
+          HE_YUNJIE_OPEN_ID: ${{ secrets.HE_YUNJIE_OPEN_ID }}
+          ZHANG_GUOHAO_OPEN_ID: ${{ secrets.ZHANG_GUOHAO_OPEN_ID }}
         run: |
           ssh -o StrictHostKeyChecking=no -p $SERVER_PORT $SERVER_USER@$SERVER_HOST "
             if [ ! -d $DEPLOY_PATH ]; then
@@ -59,6 +65,12 @@ jobs:
           BOT_CHAT_ID=${BOT_CHAT_ID}
           APPROVERS=${APPROVERS}
           CRON_SCHEDULE=${CRON_SCHEDULE}
+          APPROVAL_PROCESS_NAMES=${APPROVAL_PROCESS_NAMES}
+          BITABLE_POLL_MINUTES=${BITABLE_POLL_MINUTES}
+          DAILY_INVOICE_REMINDER_SCHEDULE=${DAILY_INVOICE_REMINDER_SCHEDULE}
+          DAILY_REMINDER_MENTION_IDS=${DAILY_REMINDER_MENTION_IDS}
+          HE_YUNJIE_OPEN_ID=${HE_YUNJIE_OPEN_ID}
+          ZHANG_GUOHAO_OPEN_ID=${ZHANG_GUOHAO_OPEN_ID}
           EOF
 
             pm2 delete approval-bot 2>/dev/null || true
