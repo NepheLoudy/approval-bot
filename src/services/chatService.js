@@ -152,6 +152,8 @@ const commandHandlers = {
  * @returns {Promise<string|null>} 未匹配指令返回 null
  */
 async function executeCommand(command, args = []) {
+  // 审批群内 /help 即为财务帮助
+  if (command === '/help') command = '/approval-help';
   const handler = commandHandlers[command];
   if (!handler) return null;
   try {
@@ -200,8 +202,8 @@ async function processChatMessage(data) {
 
   const text = extractText(message);
 
-  // 目标群内：@机器人，或直接发送 /approval-* 前缀指令（命名空间隔离，无歧义）
-  if (!isMentionedBot(message) && !text.startsWith('/approval-')) {
+  // 目标群内：@机器人，或直接发送 /approval-* / /help（命名空间隔离，无歧义）
+  if (!isMentionedBot(message) && !text.startsWith('/approval-') && text !== '/help') {
     console.log('[对话服务] 跳过 - 目标群消息未@机器人且非审批指令');
     return { handled: false, reason: '未@机器人' };
   }
