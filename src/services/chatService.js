@@ -1,6 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const { sendTextToChat, replyTextMessage } = require('../feishu/bot');
+const { fieldText } = require('../utils/fields');
 
 // ============================================================
 // 指令与对话触发（仅面向审批群）
@@ -80,11 +81,12 @@ async function handleHelpCommand() {
 
 function briefLine(item, index, { withStatus = false } = {}) {
   const f = item.fields || {};
-  const no = f['申请编号'] || item.record_id;
+  const no = fieldText(f['申请编号']) || item.record_id;
   const applicant = (f['发起人']?.[0]?.name) || '未知';
-  const goods = String(f['购买物资名称'] || '未填写').slice(0, 20);
-  const money = f['总金额'] ? `${f['总金额']}${f['总金额-币种'] || ''}` : '未填写';
-  const status = f['申请状态'] || '未知';
+  const goods = fieldText(f['购买物资名称'], '未填写').slice(0, 20);
+  const amount = fieldText(f['总金额'], '');
+  const money = amount ? `${amount}${fieldText(f['总金额-币种'], '')}` : '未填写';
+  const status = fieldText(f['申请状态'], '未知');
   const parts = [`${index + 1}. ${no} | ${applicant} | ${goods} | ${money}`];
   if (withStatus) parts.push(status);
   return parts.join(' | ');

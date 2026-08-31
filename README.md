@@ -12,13 +12,15 @@
 - 其他群的消息、私聊消息一律跳过（留给爆米花机 project-management-robot 的正常对话能力），不回复、不记录
 - 自动播报通过审批群的**自定义机器人 Webhook**（`BOT_WEBHOOK_URL`）推送
 
-### 2. 事件竞争与轮询对账（重要）
-飞书对同一应用的多个长连接（本项目 / 爆米花机 / ticket-bot）是**随机分发**事件——每条事件只会投递给其中一条连接。因此：
+### 2. 事件接收方式与轮询对账（重要）
+事件统一由 **feishu-gateway**（`FEISHU_USE_LONG_CONNECTION=false`，本服务不开长连接）持有共用应用的唯一长连接并转发到本服务 `/api/feishu/event`，不再被其他项目的连接随机抢走。因此：
 
 - 多维表格播报**不直接消费事件体**，统一走「拉取记录 → 与内存快照 diff → 按迁移分支播报」
 - 事件到达时只作为**快速触发器**（立即回查对应记录）
-- 定时**对账轮询**（`BITABLE_POLL_MINUTES`，默认 5 分钟）兜底补漏，事件被其他项目抢走也不会漏播
-- 事件订阅还必须先调用「订阅云文档」接口（启动时自动调用，见 `eventSubscription.js`）
+- 定时**对账轮询**（`BITABLE_POLL_MINUTES`，默认 5 分钟）保留为兜底通道（网关宕机/重启窗口内不漏播）
+- 云文档订阅接口由网关启动时统一调用（本服务 `eventSubscription.js` 里的调用在长连接关闭时跳过）
+
+> 若网关不可用，可临时把 `FEISHU_USE_LONG_CONNECTION` 改回 `true` 回到旧的随机分发模式。
 
 首次启动的第一次对账只建快照、不播报（避免重启重放历史记录）。
 
@@ -120,7 +122,7 @@ curl http://localhost:3002/api/health
 | `/approval-status` | 查看审批统计 |
 | `/approval-sync` | 立即对账一次（排查漏播报） |
 
-指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。由于共用应用长连接的事件随机分发，指令消息**可能不会到达本服务**；此时可在爆米花机的 chatService 中把 `/approval-*` 指令转发到 `POST http://localhost:3002/api/chat/command`（bambu 打印服务同款转发契约）。
+指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。事件统一由 feishu-gateway 路由：`/approval-*` 消息由网关解析后转发到 `POST http://localhost:3002/api/chat/command`（bambu 打印服务同款转发契约，回复由网关代发）；爆米花机 chatService 中保留的同名转发作为兜底，二者幂等（本服务按 message_id/调用去重由指令本身幂等保证）。
 
 ## 八、部署到 NAS
 

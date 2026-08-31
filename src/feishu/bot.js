@@ -1,5 +1,6 @@
 const config = require('../config');
 const { requestAPI } = require('./client');
+const { fieldText } = require('../utils/fields');
 
 // ============================================================
 // 消息发送层
@@ -173,7 +174,7 @@ function buildNewApprovalCard(approval) {
         content: `${buildAtTag(applicantId)} **${applicantName}**（${department}）提交了新申请`,
       },
       { tag: 'hr' },
-      { tag: 'markdown', content: `**申请编号**：${fields['申请编号'] || approval.record_id || '未知'}` },
+      { tag: 'markdown', content: `**申请编号**：${fieldText(fields['申请编号']) || approval.record_id || '未知'}` },
       { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
       { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
       { tag: 'markdown', content: `**项目**：${fields['项目'] || '未填写'}` },
@@ -209,7 +210,7 @@ function buildApprovalResultCard(approval, status) {
         content: `${buildAtTag(applicantId)} **${applicantName}** 的申请已处理完成`,
       },
       { tag: 'hr' },
-      { tag: 'markdown', content: `**申请编号**：${fields['申请编号'] || approval.record_id || '未知'}` },
+      { tag: 'markdown', content: `**申请编号**：${fieldText(fields['申请编号']) || approval.record_id || '未知'}` },
       { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
       { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
       { tag: 'markdown', content: `**完成时间**：${fmtTime(fields['完成时间'] || fields['发起时间'])}` },
@@ -246,7 +247,7 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
 
   const lines = pendingList.map((item, i) => {
     const f = item.fields || {};
-    return `${i + 1}. **${f['申请编号'] || item.record_id}** | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${fmtTime(f['发起时间'])}`;
+    return `${i + 1}. **${fieldText(f['申请编号']) || item.record_id}** | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${fmtTime(f['发起时间'])}`;
   });
 
   const elements = [
