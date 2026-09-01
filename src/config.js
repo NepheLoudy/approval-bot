@@ -35,7 +35,7 @@ module.exports = {
   },
 
   bot: {
-    name: process.env.BOT_NAME || '审批机器人',
+    name: process.env.BOT_NAME || '爆米花机-对话型',
     webhookUrl: process.env.BOT_WEBHOOK_URL || '',
     // 本项目唯一服务的群聊：指令与对话触发只在该群生效，
     // 其他群的消息一律不处理（与正常其他群的对话能力分离）

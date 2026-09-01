@@ -17,8 +17,8 @@ const processedMessageIds = new Set();
 
 /**
  * 检测消息是否指向机器人（群聊场景）
- * 共用应用下机器人实际名称可能与 BOT_NAME 不一致，因此多信号判断：
- * mentioned_type=app / SDK self 标记 / 名称匹配 / /approval- 指令前缀
+ * 飞书事件中机器人 mention 的 mentioned_type 为 "bot"，
+ * 实际名称可能与配置名不一致，因此多信号判断
  */
 function isMentionedBot(message) {
   if (!message) return false;
@@ -28,7 +28,7 @@ function isMentionedBot(message) {
 
   return mentions.some(m => {
     if (m.id === 'self') return true;
-    if (m.mentioned_type === 'app') return true;
+    if (m.mentioned_type === 'app' || m.mentioned_type === 'bot') return true;
     if (m.name === botName) return true;
     return false;
   });
