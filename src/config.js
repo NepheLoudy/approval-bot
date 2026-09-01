@@ -8,12 +8,11 @@ function parseArrayConfig(value) {
 
 // ============================================================
 // 与所有 qianli 项目共用同一个飞书应用（APP_ID 相同）。
-// 飞书对同一应用的多个长连接是「随机分发」事件，每个事件只会投递给
-// 其中一条连接（PMR / ticket-bot / 本项目互相竞争），因此：
-//   1. 本项目的指令与对话只处理「目标群」，其余群一律跳过，
-//      留给正常的群对话能力（爆米花机）处理；
-//   2. 多维表格播报不能只依赖事件推送，必须由轮询对账兜底
-//      （见 services/approvalService.js 的快照同步）。
+// 事件由 feishu-gateway 唯一长连接接收并转发到 /api/feishu/event。
+// 本项目仅服务审批群（BOT_CHAT_ID），播报为纯定时任务：
+//   - 每周财务催办周报（催发票/催报销单/催转账 + 本周统计）
+//   - 每日待审批提醒（有「审批中」记录才发送）
+// 不做审批提交/审批结果的事件即时播报。
 // ============================================================
 
 module.exports = {
@@ -27,8 +26,6 @@ module.exports = {
   bitable: {
     appToken: process.env.BITABLE_APP_TOKEN || '',
     approvalTableId: process.env.BITABLE_APPROVAL_TABLE_ID || '',
-    // 对账轮询间隔（分钟）。事件被其他项目的长连接抢走时，靠它补上漏掉的变更
-    pollIntervalMinutes: Math.max(parseInt(process.env.BITABLE_POLL_MINUTES || '5', 10) || 5, 1),
   },
 
   feishuEvent: {

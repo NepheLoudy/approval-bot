@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const config = require('./config');
-const { startEventSubscription, processBitableEvent } = require('./feishu/eventSubscription');
+const { startEventSubscription } = require('./feishu/eventSubscription');
 const { processChatMessage, executeCommand } = require('./services/chatService');
 const approvalService = require('./services/approvalService');
 const { startCronJobs, runBroadcast, runReminder, getCronStatus, getBroadcastHistory } = require('./cron');
@@ -70,9 +70,10 @@ app.get('/api/approvals/:id', async (req, res) => {
 
 // ---------- 机器人管理接口 ----------
 
+// 手动触发一次周播报；body 传 { "dryRun": true } 时只构建卡片不发送（预览用）
 app.post('/api/bot/test-broadcast', async (req, res) => {
   try {
-    const result = await runBroadcast();
+    const result = await runBroadcast({ dryRun: !!req.body?.dryRun });
     res.json({ success: true, result });
   } catch (err) {
     console.error('测试播报失败:', err);
@@ -90,21 +91,8 @@ app.post('/api/bot/test-reminder', async (req, res) => {
   }
 });
 
-app.post('/api/bot/sync', async (req, res) => {
-  try {
-    const result = await approvalService.scheduleSync('all');
-    res.json({ success: true, result });
-  } catch (err) {
-    console.error('手动对账失败:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('/api/bot/cron-status', (req, res) => {
-  res.json({
-    ...getCronStatus(),
-    sync: approvalService.getSyncStatus(),
-  });
+  res.json(getCronStatus());
 });
 
 app.get('/api/bot/history', (req, res) => {
@@ -136,7 +124,7 @@ app.post('/api/chat/command', async (req, res) => {
   }
 });
 
-// ---------- 飞书 HTTP 回调（仅未启用长连接时使用） ----------
+// ---------- 飞书事件接收（feishu-gateway 转发 / 独立长连接 HTTP 回调） ----------
 
 app.post('/api/feishu/event', async (req, res) => {
   const { type, challenge, token, header, event } = req.body;
@@ -157,16 +145,7 @@ app.post('/api/feishu/event', async (req, res) => {
 
   const eventType = header?.event_type;
 
-  if (eventType === 'drive.file.bitable_record_changed_v1') {
-    setImmediate(async () => {
-      try {
-        await processBitableEvent(event || {});
-      } catch (err) {
-        console.error('处理飞书事件失败:', err);
-      }
-    });
-  }
-
+  // 播报为纯定时任务，这里只处理消息事件（指令与对话触发）
   if (eventType === 'im.message.receive_v1') {
     setImmediate(async () => {
       try {
@@ -191,12 +170,6 @@ function startServer() {
   });
 
   startCronJobs();
-
-  // 启动时先做一次静默对账，初始化快照（不播报历史记录）
-  approvalService.scheduleSync('all', undefined)
-    .then(() => console.log('✅ 启动快照初始化完成'))
-    .catch(err => console.error('❌ 启动快照初始化失败:', err.message));
-
   startEventSubscription();
 
   process.on('SIGINT', () => {

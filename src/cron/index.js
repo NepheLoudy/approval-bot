@@ -2,14 +2,11 @@ const cron = require('node-cron');
 const config = require('../config');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
-const approvalService = require('../services/approvalService');
 
 // ============================================================
-// 定时任务（共三个）：
-//   1. 每周播报   CRON_SCHEDULE                        (0 0 18 * * 1, 周一18:00)
-//   2. 每日提醒   DAILY_INVOICE_REMINDER_SCHEDULE      (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
-//   3. 对账轮询   BITABLE_POLL_MINUTES                 (默认每5分钟, 事件被其他项目
-//                                                     长连接抢走时的兜底播报通道)
+// 定时任务（共两个，播报只走定时，无事件即时播报）：
+//   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
+//   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 // ============================================================
 
 const broadcastHistory = [];
@@ -67,7 +64,7 @@ async function withRetry(taskName, taskFn) {
 
 function summarize(taskName, result) {
   if (taskName === 'weekly_broadcast') {
-    return { pendingCount: result.pendingCount, stats: result.stats };
+    return { counts: result.counts, stats: result.stats };
   }
   if (taskName === 'daily_reminder') {
     return { sent: result.sent, pendingCount: result.pendingCount };
@@ -79,21 +76,20 @@ function summarize(taskName, result) {
 
 let weeklyTask = null;
 let reminderTask = null;
-let pollTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
   stopCronJobs();
 
-  // 1. 每周播报
+  // 1. 每周财务催办周报
   weeklyTask = cron.schedule(config.cron.schedule, () => {
-    console.log('[定时任务] 触发每周审批播报');
+    console.log('[定时任务] 触发每周财务催办周报');
     withRetry('weekly_broadcast', () => runWeeklyBroadcast()).catch(err => {
-      console.error('[定时任务] 每周播报失败:', err.message);
+      console.error('[定时任务] 周播报失败:', err.message);
     });
   }, { timezone: 'Asia/Shanghai' });
 
-  console.log(`[定时任务] 每周播报已启动: ${config.cron.schedule} (Asia/Shanghai) -> 下次 ${getNextExecutionTime(config.cron.schedule)}`);
+  console.log(`[定时任务] 周播报已启动: ${config.cron.schedule} (Asia/Shanghai) -> 下次 ${getNextExecutionTime(config.cron.schedule)}`);
 
   // 2. 每日待审批提醒
   if (config.reminder.schedule) {
@@ -109,22 +105,12 @@ function startCronJobs() {
     console.log('[定时任务] 未配置 DAILY_INVOICE_REMINDER_SCHEDULE，每日提醒未启用');
   }
 
-  // 3. 多维表格对账轮询（兜底事件分发竞争）
-  pollTask = cron.schedule(`0 */${config.bitable.pollIntervalMinutes} * * * *`, () => {
-    approvalService.scheduleSync('all').catch(err => {
-      console.error('[定时任务] 对账轮询失败:', err.message);
-    });
-  }, { timezone: 'Asia/Shanghai' });
-
-  console.log(`[定时任务] 对账轮询已启动: 每 ${config.bitable.pollIntervalMinutes} 分钟`);
-
-  return { weeklyTask, reminderTask, pollTask };
+  return { weeklyTask, reminderTask };
 }
 
 function stopCronJobs() {
   if (weeklyTask) { weeklyTask.stop(); weeklyTask = null; }
   if (reminderTask) { reminderTask.stop(); reminderTask = null; }
-  if (pollTask) { pollTask.stop(); pollTask = null; }
 }
 
 function getNextExecutionTime(schedule) {
@@ -152,12 +138,10 @@ function getCronStatus() {
     running: {
       weeklyBroadcast: !!weeklyTask,
       dailyReminder: !!reminderTask,
-      poll: !!pollTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
       dailyReminder: config.reminder.schedule || '(未启用)',
-      pollMinutes: config.bitable.pollIntervalMinutes,
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
@@ -170,9 +154,9 @@ function getBroadcastHistory() {
   return broadcastHistory;
 }
 
-/** 手动触发一次每周播报（测试/管理接口用） */
-async function runBroadcast() {
-  return withRetry('weekly_broadcast', () => runWeeklyBroadcast());
+/** 手动触发一次周播报（测试/管理接口用；dryRun=true 只构建不发送） */
+async function runBroadcast(options = {}) {
+  return withRetry('weekly_broadcast', () => runWeeklyBroadcast(options));
 }
 
 module.exports = {

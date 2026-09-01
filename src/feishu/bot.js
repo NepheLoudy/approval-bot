@@ -4,7 +4,8 @@ const { fieldText } = require('../utils/fields');
 
 // ============================================================
 // 消息发送层
-// - 自动播报（新申请/结果/提醒/周播报）走群自定义机器人 Webhook
+// - 定时播报（周播报催办清单 / 每日待审批提醒）走群自定义机器人 Webhook
+//   （不做事件即时播报：审批提交/审批结果都不推）
 // - 指令回复走应用 IM API（回复消息 / 发送到指定群或私聊）
 // 卡片字段全部对应审批多维表格「表单」表的真实字段
 // ============================================================
@@ -128,100 +129,114 @@ function fmtTime(value) {
   if (Number.isNaN(ms)) return String(value);
   const d = new Date(ms);
   const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** 总金额 + 币种 */
 function fmtMoney(fields) {
-  const amount = fields['总金额'];
-  if (amount === null || amount === undefined || amount === '') return '未填写';
-  const currency = fields['总金额-币种'] || '';
+  const amount = fieldText(fields['总金额'], '');
+  if (!amount) return '未填写';
+  const currency = fieldText(fields['总金额-币种'], '');
   return `${amount}${currency ? ' ' + currency : ''}`;
 }
 
-function truncate(text, max = 60) {
-  const s = String(text || '').trim();
+function truncate(text, max = 40) {
+  const s = fieldText(text).trim();
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
-/** 附件/图片字段 → 摘要 */
-function fmtAttachment(value) {
-  if (!value) return '未上传';
-  if (Array.isArray(value)) return value.length > 0 ? `${value.length} 个附件` : '未上传';
-  return String(value);
+// ---------- 周播报卡片：财务催办清单 ----------
+
+/** 催办条目通用行 */
+function followUpLine(record, index, timeField) {
+  const f = record.fields || {};
+  const no = fieldText(f['申请编号']) || record.record_id;
+  const timeLabel = timeField === '完成时间' ? '完成' : '发起';
+  return `${index + 1}. ${no} | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${timeLabel}：${fmtTime(f[timeField] || f['发起时间'])}`;
 }
 
-// ---------- 卡片构建 ----------
-
-/**
- * 新审批申请卡片（记录创建时推送）
- */
-function buildNewApprovalCard(approval) {
-  const fields = approval.fields || {};
-  const applicantId = firstUserId(fields['发起人']);
-  const applicantName = firstUserName(fields['发起人']);
-  const department = fields['发起人部门'] || '未知部门';
-
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      template: 'blue',
-      title: { content: '📋 新的采购/发票申请', tag: 'plain_text' },
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `${buildAtTag(applicantId)} **${applicantName}**（${department}）提交了新申请`,
-      },
-      { tag: 'hr' },
-      { tag: 'markdown', content: `**申请编号**：${fieldText(fields['申请编号']) || approval.record_id || '未知'}` },
-      { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
-      { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
-      { tag: 'markdown', content: `**项目**：${fields['项目'] || '未填写'}` },
-      { tag: 'markdown', content: `**付款方式**：${fields['付款人'] || '未填写'}` },
-      { tag: 'markdown', content: `**发起时间**：${fmtTime(fields['发起时间'])}` },
-      { tag: 'hr' },
-      { tag: 'markdown', content: `**审批节点**：${fields['审批节点'] || '待审批人处理'}` },
-    ],
-  };
+/** 分段渲染（超过上限折叠，避免卡片超限） */
+function renderSection(elements, { title, records, timeField, cap = 15, note }) {
+  elements.push({ tag: 'hr' });
+  if (!records || records.length === 0) {
+    elements.push({ tag: 'markdown', content: `${title}：✅ 无` });
+    return;
+  }
+  elements.push({
+    tag: 'markdown',
+    content: `${title}（**${records.length} 条**）${note || ''}`,
+  });
+  const lines = records.slice(0, cap).map((r, i) => followUpLine(r, i, timeField));
+  if (records.length > cap) {
+    lines.push(`…其余 ${records.length - cap} 条请在多维表格中查看`);
+  }
+  elements.push({ tag: 'markdown', content: lines.join('\n') });
 }
 
 /**
- * 审批结果卡片（状态变为 已通过/已拒绝 时推送）
+ * 周播报卡片：财务催办清单
+ * 结构：@财务 → 三段催办（催发票/催报销单/催转账）→ 底部本周统计（仅本周结果）
+ * @param {object} followUp { missingInvoice, missingForm, missingTransfer }
+ * @param {object} stats 含 weekNew/weekApproved/weekRejected
  */
-function buildApprovalResultCard(approval, status) {
-  const fields = approval.fields || {};
-  const applicantId = firstUserId(fields['发起人']);
-  const applicantName = firstUserName(fields['发起人']);
-  const isApproved = status === config.approvalStatus.APPROVED;
+function buildWeeklyFinanceCard(followUp, stats, options = {}) {
+  const { date } = options;
+  const elements = [];
+
+  // 抬头：@财务负责人
+  const mentionIds = (options.mentionIds || []).filter(Boolean);
+  const mentionLine = mentionIds.length > 0
+    ? mentionIds.map(id => buildAtTag(id)).join(' ') + '\n'
+    : '';
+  elements.push({
+    tag: 'markdown',
+    content: `**🧾 财务催办周报**\n${date || new Date().toLocaleDateString('zh-CN')}\n${mentionLine}以下为「已通过」申请的后续财务环节待办：`,
+  });
+
+  // 1. 未交发票 → 催发票
+  renderSection(elements, {
+    title: '🧾 未交发票（需催发票）',
+    records: followUp.missingInvoice,
+    timeField: '发起时间',
+  });
+
+  // 2. 已有发票但未制单 → 做报销单
+  renderSection(elements, {
+    title: '📄 未制单（需做报销单）',
+    records: followUp.missingForm,
+    timeField: '发起时间',
+    note: '（已有发票，报销单未填写）',
+  });
+
+  // 3. 已有发票和报销单但未转账（完成超3个月）→ 提醒转账
+  renderSection(elements, {
+    title: '💸 未转账（需跟进转账）',
+    records: followUp.missingTransfer,
+    timeField: '完成时间',
+    note: '（完成时间已超 3 个月）',
+  });
+
+  // 底部：本周统计（仅本周结果，不放全量数据）
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content: [
+      `**📊 本周统计（近7天）**`,
+      `- 本周新增申请：${stats.weekNew ?? 0} 条`,
+      `- 本周通过：${stats.weekApproved ?? 0} 条`,
+      `- 本周拒绝：${stats.weekRejected ?? 0} 条`,
+    ].join('\n'),
+  });
+
+  const hasPendingWork = followUp.missingInvoice.length + followUp.missingForm.length + followUp.missingTransfer.length > 0;
 
   return {
     config: { wide_screen_mode: true },
+    elements,
     header: {
-      template: isApproved ? 'green' : 'red',
-      title: {
-        content: isApproved ? '✅ 审批通过' : '❌ 审批被拒绝',
-        tag: 'plain_text',
-      },
+      template: hasPendingWork ? 'orange' : 'green',
+      title: { content: '🧾 财务催办周报', tag: 'plain_text' },
     },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `${buildAtTag(applicantId)} **${applicantName}** 的申请已处理完成`,
-      },
-      { tag: 'hr' },
-      { tag: 'markdown', content: `**申请编号**：${fieldText(fields['申请编号']) || approval.record_id || '未知'}` },
-      { tag: 'markdown', content: `**物资名称**：${truncate(fields['购买物资名称']) || '未填写'}` },
-      { tag: 'markdown', content: `**总金额**：${fmtMoney(fields)}` },
-      { tag: 'markdown', content: `**完成时间**：${fmtTime(fields['完成时间'] || fields['发起时间'])}` },
-      { tag: 'hr' },
-      {
-        tag: 'markdown',
-        content: isApproved
-          ? '💸 请按流程完成报销/转账等后续事项'
-          : '📄 详情请在多维表格或审批中心查看',
-      },
-    ],
   };
 }
 
@@ -278,59 +293,6 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
   };
 }
 
-/**
- * 每周播报卡片：审批统计 + 待审批列表
- */
-function buildBroadcastCard(stats, pendingList, options = {}) {
-  const { date, weekNewCount } = options;
-  const elements = [
-    {
-      tag: 'markdown',
-      content: `**📊 审批周播报**\n${date || new Date().toLocaleDateString('zh-CN')}`,
-    },
-    { tag: 'hr' },
-    {
-      tag: 'markdown',
-      content: [
-        `**📈 审批统计**`,
-        `- 累计申请：${stats.total} 条`,
-        `- 审批中：${stats.pending} 条`,
-        `- 已通过：${stats.approved} 条`,
-        `- 已拒绝：${stats.rejected} 条`,
-        `- 其他（撤回/取消/终止/删除）：${stats.other} 条`,
-        weekNewCount !== undefined ? `- 本周新增：${weekNewCount} 条` : '',
-      ].filter(Boolean).join('\n'),
-    },
-  ];
-
-  if (pendingList && pendingList.length > 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({
-      tag: 'markdown',
-      content: `**⏳ 待审批列表（${pendingList.length} 条）**`,
-    });
-    const lines = pendingList.map((item, i) => {
-      const f = item.fields || {};
-      const handler = firstUserName(f['当前处理人']);
-      const at = buildAtTag(firstUserId(f['当前处理人']));
-      return `${i + 1}. **${f['申请编号'] || item.record_id}** - ${at} ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)}\n   发起时间：${fmtTime(f['发起时间'])}${handler !== '未知' ? ` | 处理人：${handler}` : ''}`;
-    });
-    elements.push({ tag: 'markdown', content: lines.join('\n') });
-  } else if (stats.pending === 0) {
-    elements.push({ tag: 'hr' });
-    elements.push({ tag: 'markdown', content: '✅ 暂无审批中的申请' });
-  }
-
-  return {
-    config: { wide_screen_mode: true },
-    elements,
-    header: {
-      template: stats.pending > 0 ? 'orange' : 'green',
-      title: { content: '📋 审批播报', tag: 'plain_text' },
-    },
-  };
-}
-
 async function sendCardToChat(chatId, cardContent) {
   const res = await requestAPI(
     'POST',
@@ -347,14 +309,6 @@ async function sendCardToChat(chatId, cardContent) {
   return res.data;
 }
 
-/**
- * 发送周播报（兼容旧接口签名）
- */
-async function sendBroadcast(stats, pendingList, options = {}) {
-  const card = buildBroadcastCard(stats, pendingList, options);
-  return sendMessage(card, options.webhookUrl);
-}
-
 module.exports = {
   sendMessage,
   sendTextMessage,
@@ -362,11 +316,8 @@ module.exports = {
   sendTextToUser,
   replyTextMessage,
   sendCardToChat,
-  sendBroadcast,
-  buildNewApprovalCard,
-  buildApprovalResultCard,
+  buildWeeklyFinanceCard,
   buildReminderCard,
-  buildBroadcastCard,
   // 字段格式化工具（供其他服务复用）
   fmtTime,
   fmtMoney,

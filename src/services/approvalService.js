@@ -1,207 +1,49 @@
 const config = require('../config');
 const bitableApi = require('../feishu/bitable');
-const { buildNewApprovalCard, buildApprovalResultCard, sendMessage } = require('../feishu/bot');
 
 // ============================================================
-// 审批播报引擎：快照对账 + 状态迁移分支
+// 审批数据服务
 //
-// 飞书对同一应用的多个长连接随机分发事件（本应用与 PMR/ticket-bot
-// 共用），多维表格事件可能被其他项目的连接抢走，因此播报不直接依赖
-// 事件体，而是统一走「拉取记录 → 与内存快照 diff → 按迁移分支播报」：
-//   - 事件到达（可能只到一半）→ 立即触发一次对账，快速反应
-//   - 定时对账（BITABLE_POLL_MINUTES，默认5分钟）→ 兜底补漏
-//
-// 判断分支（依据「申请状态」单选字段的真实取值）：
-//   记录新增（快照中不存在）：
-//     审批流程 ∉ 活跃流程列表        → 跳过（历史/测试流程静默）
-//     状态 = 审批中                  → 推送「新申请」卡片
-//     状态 ∈ {已通过, 已拒绝}        → 直接推送「结果」卡片
-//                                     （漏看了创建事件/快速审批的兜底）
-//     状态 ∈ 撤回/取消/终止/删除     → 静默，仅记录快照
-//   状态变更（prev ≠ next）：
-//     → 已通过                       → ✅ 结果卡片
-//     → 已拒绝                       → ❌ 结果卡片
-//     → 撤回/取消/终止/删除          → 静默（撤回类操作不打扰群）
-//     → 审批中                       → 静默（创建时已播报过）
-//
-// 首次启动的第一次对账只建快照、不播报（避免重启重放历史记录）。
+// 播报策略：不做事件即时播报（审批提交/审批结果都不推），
+// 播报只有定时任务（周播报催办清单 + 每日待审批提醒），
+// 因此这里只负责数据查询与催办分支计算。
 // ============================================================
 
-// record_id -> { status }（内存快照，重启后重建）
-let snapshot = null;
-// 对账互斥：事件触发与轮询可能并发，串行化避免重复播报
-let syncQueue = Promise.resolve();
-let lastSyncAt = null;
-let lastSyncError = null;
+// 完成后 N 个月仍未转账才开始提醒
+const TRANSFER_GRACE_MONTHS = 3;
 
-function enqueueSync(fn) {
-  const run = syncQueue.then(fn, fn);
-  // 防止队列因单次失败而卡死
-  syncQueue = run.catch(() => {});
-  return run;
+/** 拉取全部审批记录 */
+async function fetchAllApprovals() {
+  return bitableApi.listAllRecords(config.bitable.approvalTableId);
 }
 
 /** 审批流程是否为当前活跃流程（未配置则不过滤） */
 function isActiveProcess(fields) {
   if (!config.approvalProcesses.length) return true;
-  const processName = fields['审批流程'];
-  return config.approvalProcesses.includes(processName);
+  return config.approvalProcesses.includes(fields['审批流程']);
 }
 
-function isTerminal(status) {
-  return status === config.approvalStatus.APPROVED
-    || status === config.approvalStatus.REJECTED
-    || config.approvalStatus.SILENT_TERMINAL.includes(status);
+function hasAttachment(value) {
+  if (value === null || value === undefined || value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
-/** 拉取全部记录（仅保留当前表） */
-async function fetchAllApprovals() {
-  return bitableApi.listAllRecords(config.bitable.approvalTableId);
+/** 完成时间是否已超过 N 个月（无完成时间返回 false，不提醒） */
+function isOlderThanMonths(timestamp, months) {
+  if (!timestamp) return false;
+  const ms = typeof timestamp === 'number' ? timestamp : parseInt(timestamp, 10);
+  if (Number.isNaN(ms)) return false;
+  const deadline = new Date(ms);
+  deadline.setMonth(deadline.getMonth() + months);
+  return deadline.getTime() <= Date.now();
 }
-
-/**
- * 对单条记录执行播报判断（调用方需保证串行）
- * @returns {Promise<{broadcast: boolean, type: string|null}>}
- */
-async function evaluateRecord(prev, approval) {
-  const recordId = approval.record_id;
-  const fields = approval.fields || {};
-  const status = fields['申请状态'];
-
-  const no = fields['申请编号'] || recordId;
-
-  if (!prev) {
-    // ---- 新记录分支 ----
-    if (!isActiveProcess(fields)) {
-      console.log(`[审批事件] 跳过非活跃流程记录: ${no} (流程: ${fields['审批流程'] || '空'})`);
-      return { broadcast: false, type: null };
-    }
-    if (status === config.approvalStatus.PENDING) {
-      console.log(`[审批事件] 新申请，推送提醒: ${no}`);
-      await sendMessage(buildNewApprovalCard(approval));
-      return { broadcast: true, type: 'new' };
-    }
-    if (status === config.approvalStatus.APPROVED || status === config.approvalStatus.REJECTED) {
-      // 创建事件被抢走、快照里首次见到的终态记录：直接播结果
-      console.log(`[审批事件] 新发现的终态记录，补推结果: ${no} (${status})`);
-      await sendMessage(buildApprovalResultCard(approval, status));
-      return { broadcast: true, type: 'result' };
-    }
-    console.log(`[审批事件] 新记录为静默状态 (${status})，不播报: ${no}`);
-    return { broadcast: false, type: null };
-  }
-
-  // ---- 状态迁移分支 ----
-  if (prev.status === status) {
-    return { broadcast: false, type: null };
-  }
-  console.log(`[审批事件] 状态变更: ${no} ${prev.status} -> ${status}`);
-
-  if (status === config.approvalStatus.APPROVED || status === config.approvalStatus.REJECTED) {
-    await sendMessage(buildApprovalResultCard(approval, status));
-    return { broadcast: true, type: 'result' };
-  }
-
-  if (config.approvalStatus.SILENT_TERMINAL.includes(status)) {
-    console.log(`[审批事件] 撤回类状态变更，静默处理: ${no} -> ${status}`);
-    return { broadcast: false, type: null };
-  }
-
-  // 回到审批中或其他中间态：不播报
-  return { broadcast: false, type: null };
-}
-
-/**
- * 全量对账：拉取审批表全部记录并与快照 diff，按分支播报
- * @param {boolean} [announce=true] false 时仅静默重建快照（启动初始化）
- */
-async function syncAllApprovals(announce = true) {
-  const records = await fetchAllApprovals();
-
-  if (snapshot === null || !announce) {
-    const count = records.length;
-    snapshot = new Map(records.map(r => [r.record_id, { status: r.fields?.['申请状态'] }]));
-    console.log(`[审批对账] 快照已初始化，共 ${count} 条记录${announce ? '' : '（静默模式）'}`);
-    return { initialized: true, total: count, broadcasts: 0 };
-  }
-
-  let broadcasts = 0;
-  const nextSnapshot = new Map();
-
-  for (const record of records) {
-    const prev = snapshot.get(record.record_id) || null;
-    try {
-      const result = await evaluateRecord(prev, record);
-      if (result.broadcast) broadcasts++;
-    } catch (err) {
-      // 单条播报失败不阻断整轮对账，快照仍更新，避免反复重试造成刷屏
-      console.error(`[审批对账] 记录 ${record.record_id} 播报失败:`, err.message);
-    }
-    nextSnapshot.set(record.record_id, { status: record.fields?.['申请状态'] });
-  }
-
-  // 消失的记录（被物理删除）→ 从快照移除即可
-  snapshot = nextSnapshot;
-  lastSyncAt = new Date().toISOString();
-
-  if (broadcasts > 0) {
-    console.log(`[审批对账] 本轮完成，播报 ${broadcasts} 条`);
-  }
-  return { initialized: false, total: records.length, broadcasts };
-}
-
-/**
- * 单条记录对账（事件触发路径）：立即回查该记录并按迁移分支播报
- * @param {string} recordId
- */
-async function syncRecord(recordId) {
-  if (!recordId) return { broadcast: false };
-
-  // 快照未初始化时退化为全量对账（会静默建快照）
-  if (snapshot === null) {
-    return syncAllApprovals(true);
-  }
-
-  let approval;
-  try {
-    approval = await bitableApi.getRecord(config.bitable.approvalTableId, recordId);
-  } catch (err) {
-    // 记录可能已被删除或尚未同步到表格，静默跳过，等待全量对账
-    console.log(`[审批事件] 回查记录失败（可能未同步），跳过: ${recordId} - ${err.message}`);
-    return { broadcast: false };
-  }
-
-  const prev = snapshot.get(recordId) || null;
-  const result = await evaluateRecord(prev, approval);
-  snapshot.set(recordId, { status: approval.fields?.['申请状态'] });
-  lastSyncAt = new Date().toISOString();
-  return result;
-}
-
-/**
- * 串行执行对账（事件与轮询统一入口）
- * @param {'all'|'record'} mode
- * @param {string} [recordId]
- */
-function scheduleSync(mode, recordId) {
-  return enqueueSync(async () => {
-    try {
-      lastSyncError = null;
-      return mode === 'record' ? await syncRecord(recordId) : await syncAllApprovals(true);
-    } catch (err) {
-      lastSyncError = err.message;
-      throw err;
-    }
-  });
-}
-
-// ---------- 查询接口（供 API / 指令 / 播报使用） ----------
 
 async function getAllApprovals() {
   return fetchAllApprovals();
 }
 
-/** 审批中列表（客户端过滤，不依赖 API 的 filter 参数） */
+/** 审批中列表（客户端过滤） */
 async function getPendingApprovals() {
   const all = await fetchAllApprovals();
   return all.filter(r => r.fields?.['申请状态'] === config.approvalStatus.PENDING);
@@ -216,7 +58,7 @@ async function getApprovalById(id) {
   }
 }
 
-/** 审批统计（按真实状态值分类） */
+/** 审批统计：全量分类 + 本周滚动7天结果 */
 async function getApprovalStats() {
   const all = await fetchAllApprovals();
 
@@ -226,33 +68,81 @@ async function getApprovalStats() {
     approved: 0,
     rejected: 0,
     other: 0,
+    // 本周（滚动7天）
     weekNew: 0,
+    weekApproved: 0,
+    weekRejected: 0,
   };
 
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const APPROVED = config.approvalStatus.APPROVED;
+  const REJECTED = config.approvalStatus.REJECTED;
 
   for (const item of all) {
-    const status = item.fields?.['申请状态'];
+    const f = item.fields || {};
+    const status = f['申请状态'];
     if (status === config.approvalStatus.PENDING) stats.pending++;
-    else if (status === config.approvalStatus.APPROVED) stats.approved++;
-    else if (status === config.approvalStatus.REJECTED) stats.rejected++;
+    else if (status === APPROVED) stats.approved++;
+    else if (status === REJECTED) stats.rejected++;
     else stats.other++;
 
-    const startTime = item.fields?.['发起时间'];
-    if (typeof startTime === 'number' && startTime >= weekAgo) stats.weekNew++;
+    if (typeof f['发起时间'] === 'number' && f['发起时间'] >= weekAgo) stats.weekNew++;
+    if (status === APPROVED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) stats.weekApproved++;
+    if (status === REJECTED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) stats.weekRejected++;
   }
 
   return { stats, all };
 }
 
-function getSyncStatus() {
-  return {
-    snapshotReady: snapshot !== null,
-    snapshotSize: snapshot ? snapshot.size : 0,
-    lastSyncAt,
-    lastSyncError: lastSyncError ? String(lastSyncError) : null,
-    pollIntervalMinutes: config.bitable.pollIntervalMinutes,
-  };
+/**
+ * 财务催办三分支（仅针对「已通过」的活跃流程记录）：
+ *   1. 未交发票：发票栏为空            → 催发票
+ *   2. 未制单：  已有发票但报销单为空   → 做报销单
+ *               （报销单=无需报销 视为已制单/无需处理）
+ *   3. 未转账：  已有发票和报销单但「是否转账」为空，
+ *               且完成时间已超过 3 个月 → 提醒转账
+ */
+async function getFinanceFollowUp() {
+  const all = await fetchAllApprovals();
+  const APPROVED = config.approvalStatus.APPROVED;
+
+  const missingInvoice = [];  // 未交发票
+  const missingForm = [];     // 未制单（缺报销单）
+  const missingTransfer = []; // 未转账（完成超3个月）
+
+  for (const record of all) {
+    const f = record.fields || {};
+    if (f['申请状态'] !== APPROVED) continue;
+    if (!isActiveProcess(f)) continue;
+
+    const hasInvoice = hasAttachment(f['发票']);
+    // 报销单为单选：null=未制单；「无需报销」=无需制单，视为已完成该环节
+    const form = f['报销单'];
+    const hasForm = form !== null && form !== undefined && form !== '';
+
+    if (!hasInvoice) {
+      missingInvoice.push(record);
+      continue; // 没发票时不会走到制单/转账环节
+    }
+
+    if (!hasForm) {
+      missingForm.push(record);
+      continue;
+    }
+
+    // 已有发票和报销单，检查转账（完成时间3个月后才开始提醒）
+    if (!f['是否转账'] && isOlderThanMonths(f['完成时间'], TRANSFER_GRACE_MONTHS)) {
+      missingTransfer.push(record);
+    }
+  }
+
+  // 各段按完成/发起时间倒序，最老的在前（越久未处理越靠前）
+  const byTime = (a, b) => (a.fields['完成时间'] || a.fields['发起时间'] || 0) - (b.fields['完成时间'] || b.fields['发起时间'] || 0);
+  missingInvoice.sort(byTime);
+  missingForm.sort(byTime);
+  missingTransfer.sort(byTime);
+
+  return { missingInvoice, missingForm, missingTransfer };
 }
 
 module.exports = {
@@ -260,6 +150,5 @@ module.exports = {
   getPendingApprovals,
   getApprovalById,
   getApprovalStats,
-  scheduleSync,
-  getSyncStatus,
+  getFinanceFollowUp,
 };

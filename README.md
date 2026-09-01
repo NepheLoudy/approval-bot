@@ -1,6 +1,6 @@
 # approval-bot 审批机器人
 
-采购/发票审批播报机器人 —— 监听飞书多维表格「采购申请/发票提交」审批表的记录变更，自动向审批群推送新申请提醒、审批结果、每日待审批提醒和每周审批统计。
+财务审批播报机器人 —— 基于飞书多维表格「采购申请/发票提交」审批表，按定时任务向审批群推送**财务催办周报**（催发票/催报销单/催转账）与**每日待审批提醒**。审批提交、审批通过/拒绝均**不做事件即时播报**。
 
 ## 一、架构说明：共用飞书应用 + 群聊隔离
 
@@ -10,24 +10,17 @@
 - 本项目**仅服务审批群**（`BOT_CHAT_ID = oc_1ea53731a8772400450da6ab107f8331`）
 - 指令与对话触发只在该群生效，且必须 @机器人（共用应用机器人的实际名称为 **爆米花机_财务型**，`BOT_NAME` 与之保持一致用于 @识别；`/approval-*` 前缀指令即使漏检 @ 也会触发）
 - 其他群的消息、私聊消息一律跳过（留给爆米花机 project-management-robot 的正常对话能力），不回复、不记录
-- 自动播报通过审批群的**自定义机器人 Webhook**（`BOT_WEBHOOK_URL`）推送
+- 定时播报通过审批群的**自定义机器人 Webhook**（`BOT_WEBHOOK_URL`）推送
 
-### 2. 事件接收方式与轮询对账（重要）
-事件统一由 **feishu-gateway**（`FEISHU_USE_LONG_CONNECTION=false`，本服务不开长连接）持有共用应用的唯一长连接并转发到本服务 `/api/feishu/event`，不再被其他项目的连接随机抢走。因此：
+### 2. 事件接收方式
+事件统一由 **feishu-gateway**（`FEISHU_USE_LONG_CONNECTION=false`，本服务不开长连接）持有共用应用的唯一长连接并转发到本服务 `/api/feishu/event`。本服务只消费消息事件（指令与对话触发）；**多维表格事件不消费**——播报全部为定时任务在执行时拉取最新数据计算，天然不受事件分发/重复投递影响。
 
-- 多维表格播报**不直接消费事件体**，统一走「拉取记录 → 与内存快照 diff → 按迁移分支播报」
-- 事件到达时只作为**快速触发器**（立即回查对应记录）
-- 定时**对账轮询**（`BITABLE_POLL_MINUTES`，默认 5 分钟）保留为兜底通道（网关宕机/重启窗口内不漏播）
-- 云文档订阅接口由网关启动时统一调用（本服务 `eventSubscription.js` 里的调用在长连接关闭时跳过）
-
-> 若网关不可用，可临时把 `FEISHU_USE_LONG_CONNECTION` 改回 `true` 回到旧的随机分发模式。
-
-首次启动的第一次对账只建快照、不播报（避免重启重放历史记录）。
+> 若网关不可用，可临时把 `FEISHU_USE_LONG_CONNECTION` 改回 `true` 独立接收消息事件。
 
 ## 二、飞书应用配置（共用应用，仅需补充权限/事件）
 
-1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:chat`、`contact:user.base:readonly`、云文档订阅相关权限
-2. **事件订阅**：长连接模式，订阅 `im.message.receive_v1` 和 `drive.file.bitable_record_changed_v1`
+1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:chat`、`contact:user.base:readonly`
+2. **事件订阅**：`im.message.receive_v1`（由 feishu-gateway 长连接接收）
 3. **审批群自定义机器人**：Webhook `https://open.feishu.cn/open-apis/bot/v2/hook/d91361fc-b824-4a15-a8a3-a85b4344afba`
 
 ## 三、多维表格字段约定
@@ -36,54 +29,41 @@
 
 | 字段名 | 类型 | 用途 |
 |--------|------|------|
-| 申请编号 | Url/文本 | 审批编号，卡片主键展示 |
-| 申请状态 | 单选 | **播报分支的判断依据**（取值见下） |
-| 审批流程 | 单选 | 流程过滤：只有活跃流程才播报 |
-| 发起人 | 人员 | 卡片 @ 提及对象 |
-| 发起人部门 | 文本 | 新申请卡片展示 |
-| 当前处理人 | 人员 | 每日提醒 @ 对象（为空回落配置的审批人） |
-| 审批节点 | 文本 | 新申请卡片展示 |
-| 购买物资名称 | 文本 | 卡片展示 |
-| 总金额 / 总金额-币种 | 数量/单选 | 卡片展示 |
-| 项目 / 付款人 | 单选 | 新申请卡片展示 |
-| 发起时间 / 完成时间 | 日期 | 卡片展示、本周新增统计 |
-
-**「申请状态」实际取值与播报策略：**
-
-| 取值 | 播报策略 |
-|------|----------|
-| 审批中 | 新申请卡片（记录首次出现时） |
-| 已通过 | ✅ 结果卡片（green） |
-| 已拒绝 | ❌ 结果卡片（red） |
-| 已撤回 / 已取消 / 已终止 / 已删除 | 静默（仅更新快照，不打扰群） |
+| 申请状态 | 单选 | 催办对象过滤：仅「已通过」进入财务催办分支 |
+| 审批流程 | 单选 | 流程过滤：只有活跃流程才纳入统计与催办 |
+| 发票 | 附件 | **催办分支1**：为空 = 未交发票 → 催发票 |
+| 报销单 | 单选 | **催办分支2**：已有发票但此栏为空 = 未制单 → 做报销单（「无需报销」视为已处理） |
+| 是否转账 | 单选 | **催办分支3**：发票+报销单齐全但为空，且完成时间超3个月 → 提醒转账 |
+| 完成时间 | 日期 | 转账提醒的宽限期起算点；本周通过统计 |
+| 发起时间 | 日期 | 本周新增统计、催办列表展示 |
+| 发起人 / 当前处理人 | 人员 | 列表展示 / 每日提醒 @ |
+| 申请编号 / 购买物资名称 / 总金额 / 项目 / 付款人 | 各类 | 列表与统计展示 |
 
 **「审批流程」过滤**：表中混有历史/测试流程（如「发票（测试不要提交)」），`APPROVAL_PROCESS_NAMES` 配置当前活跃流程 `💸【27赛季】千里采购申请/发票提交`，非活跃流程的记录一律静默。
 
-## 四、判断分支与播报逻辑总览
+## 四、播报逻辑总览（纯定时，无事件即时播报）
 
 ```
-记录新增（快照中不存在）
-├─ 审批流程 ∉ 活跃流程列表        → 跳过（历史/测试流程静默）
-├─ 状态 = 审批中                  → 📋 新申请卡片（@发起人）
-├─ 状态 ∈ {已通过, 已拒绝}        → ✅/❌ 结果卡片（兜底：漏看创建/秒批）
-└─ 状态 ∈ 撤回/取消/终止/删除     → 静默
-
-状态变更（prev ≠ next）
-├─ → 已通过                       → ✅ 结果卡片（@发起人）
-├─ → 已拒绝                       → ❌ 结果卡片（@发起人）
-├─ → 撤回/取消/终止/删除          → 静默
-└─ → 审批中 / 其他中间态          → 静默（创建时已播报）
-
 定时任务（Asia/Shanghai）
+
 ├─ 每周一 18:00（CRON_SCHEDULE）
-│    📊 周播报：状态统计（含本周新增）+ 审批中列表（@当前处理人）
-├─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
-│    ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人（空则 @ 配置审批人）
-└─ 每 5 分钟（BITABLE_POLL_MINUTES）
-     🔁 对账轮询：事件分发竞争的兜底播报通道
+│    🧾 财务催办周报（仅统计「已通过」且活跃流程的记录）
+│    ├─ 分支1 未交发票：发票栏为空
+│    │    → 提醒财务催发票
+│    ├─ 分支2 未制单：已有发票但「报销单」为空
+│    │    → 提醒财务做报销单（报销单=无需报销 视为已处理）
+│    ├─ 分支3 未转账：发票+报销单齐全但「是否转账」为空
+│    │    且 完成时间已超过 3 个月（宽限期，未满不提醒）
+│    │    → 提醒财务跟进转账
+│    └─ 卡片底部：本周统计（近7天新增/通过/拒绝，不放全量数据）
+│
+└─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
+     ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人（空则 @ 配置审批人）
 ```
 
-同一条记录的播报由**快照状态机**天然去重：重复事件、同一状态的多次编辑都不会重复推送。
+- 审批提交、审批通过/拒绝**不触发任何播报**（多维表格事件不订阅、不消费）
+- 周报各分支按时间倒序（最久未处理的排最前），单段超过 15 条折叠
+- 周报抬头 @财务负责人（`DAILY_REMINDER_MENTION_IDS`，回落到何云杰/张郭浩）
 
 ## 五、本地开发
 
@@ -116,28 +96,23 @@ curl http://localhost:3002/api/health
 
 | 指令 | 说明 |
 |------|------|
-| `/approval-help` | 显示帮助 |
+| `/approval-help` | 显示帮助（`/help` 同效） |
 | `/approval-list` | 查看所有申请（审批中在前） |
 | `/approval-pending` | 查看审批中列表 |
-| `/approval-status` | 查看审批统计 |
-| `/approval-sync` | 立即对账一次（排查漏播报） |
+| `/approval-status` | 查看审批统计（含本周通过/拒绝） |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。事件统一由 feishu-gateway 路由：`/approval-*` 消息由网关解析后转发到 `POST http://localhost:3002/api/chat/command`（bambu 打印服务同款转发契约，回复由网关代发）；爆米花机 chatService 中保留的同名转发作为兜底，二者幂等（本服务按 message_id/调用去重由指令本身幂等保证）。
 
 ## 八、部署到 NAS
 
-### 一键部署（推荐）
+### 一键部署（push.js，密钥存 .env 的 NAS_*）
 ```bash
-npm run deploy
+npm run push
 ```
-该命令会：git commit & push → SSH 连接 NAS（10.253.33.233:8500）→ `/opt/approval-bot` 拉取最新代码 → 写入 `.env`（凭证已内置在 `deploy.js`）→ `npm install --production` → `pm2 restart approval-bot` → 开放 3002 端口。
-
-### GitHub Actions 自动部署
-push 到 main 后 `deploy.yml` 会通过 SSH 自动部署，相关密钥配置在仓库 Secrets（`APP_ID`、`APP_SECRET`、`BOT_CHAT_ID`、`BOT_WEBHOOK_URL` 等）。
+git push（失败自动降级 SFTP 直传）→ NAS `/opt/approval-bot` 同步代码 → 单独上传 `.env` → `pm2 restart approval-bot`。
 
 ### 检查部署状态
 ```bash
-npm run deploy:check
 ssh -p 8500 qianli@10.253.33.233 "pm2 logs approval-bot --lines 30"
 ```
 
@@ -146,21 +121,23 @@ ssh -p 8500 qianli@10.253.33.233 "pm2 logs approval-bot --lines 30"
 ```
 approval-bot/
 ├── src/
-│   ├── cron/index.js              # 三个定时任务：周播报 / 每日提醒 / 对账轮询
+│   ├── cron/index.js              # 两个定时任务：财务催办周报 / 每日待审批提醒
 │   ├── feishu/
 │   │   ├── bitable.js             # 多维表格 API（自动翻页）
-│   │   ├── bot.js                 # 卡片构建 + webhook/API 发送
+│   │   ├── bot.js                 # 卡片构建（催办周报/每日提醒）+ webhook/API 发送
 │   │   ├── client.js              # 飞书 API 客户端（token 缓存）
-│   │   └── eventSubscription.js   # 长连接事件订阅（含云文档订阅）
+│   │   └── eventSubscription.js   # 消息事件接入（长连接调试模式；生产走网关转发）
 │   ├── services/
-│   │   ├── approvalService.js     # 播报引擎：快照对账 + 状态迁移分支
-│   │   ├── broadcastService.js    # 每周统计播报
+│   │   ├── approvalService.js     # 数据查询 + 财务催办三分支计算
+│   │   ├── broadcastService.js    # 每周财务催办周报（支持 dryRun 预览）
 │   │   ├── reminderService.js     # 每日待审批提醒
 │   │   └── chatService.js         # 群隔离 + /approval-* 指令
+│   ├── utils/fields.js            # 多维表格字段值 → 展示文本
 │   ├── config.js                  # 配置中心
-│   └── index.js                   # 主入口（Express API）
+│   └── index.js                   # 主入口（Express API + 事件接收）
 ├── scripts/inspect-bitable.js     # 多维表格结构/分布检查工具
+├── scripts/dryrun-weekly.js       # 周报 dry-run 预览（不发送）
 ├── feishu-permissions.json        # 飞书应用权限清单
-├── deploy.js                      # 一键部署脚本（.env 模板已内置凭证）
+├── push.js                        # 一键部署（git/SFTP + .env 上传）
 └── package.json
 ```

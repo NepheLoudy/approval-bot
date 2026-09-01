@@ -67,15 +67,15 @@ function parseCommand(text) {
 
 async function handleHelpCommand() {
   return [
-    `📋 ${config.bot.name} - 指令帮助`,
+    `📋 ${config.bot.name} - 财务审批指令`,
     '',
     '  /approval-help    显示此帮助',
     '  /approval-list    查看所有申请',
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
-    '  /approval-sync    立即对账一次多维表格（排查漏播报）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
+    '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账）',
   ].join('\n');
 }
 
@@ -128,15 +128,9 @@ async function handleStatusCommand() {
     `已拒绝: ${stats.rejected}`,
     `其他（撤回/取消/终止/删除）: ${stats.other}`,
     `本周新增: ${stats.weekNew}`,
+    `本周通过: ${stats.weekApproved}`,
+    `本周拒绝: ${stats.weekRejected}`,
   ].join('\n');
-}
-
-async function handleSyncCommand() {
-  const result = await approvalService.scheduleSync('all');
-  if (result.initialized) {
-    return `✅ 对账完成：快照初始化，共 ${result.total} 条记录`;
-  }
-  return `✅ 对账完成：共 ${result.total} 条记录，本次播报 ${result.broadcasts} 条`;
 }
 
 const commandHandlers = {
@@ -144,7 +138,6 @@ const commandHandlers = {
   '/approval-list': handleListCommand,
   '/approval-pending': handlePendingCommand,
   '/approval-status': handleStatusCommand,
-  '/approval-sync': handleSyncCommand,
 };
 
 /**
