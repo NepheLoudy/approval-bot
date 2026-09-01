@@ -101,7 +101,7 @@ curl http://localhost:3002/api/health
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
 
-指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。事件统一由 feishu-gateway 路由：`/approval-*` 消息由网关解析后转发到 `POST http://localhost:3002/api/chat/command`（bambu 打印服务同款转发契约，回复由网关代发）；爆米花机 chatService 中保留的同名转发作为兜底，二者幂等（本服务按 message_id/调用去重由指令本身幂等保证）。
+指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
 ## 八、部署到 NAS
 
