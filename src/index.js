@@ -114,7 +114,7 @@ app.post('/api/chat/command', async (req, res) => {
 
     const reply = await executeCommand(command, args || []);
     if (reply === null) {
-      return res.json({ reply: `❌ 未知指令：${command}` });
+      return res.json({ reply: `❌ 未知指令：${command}\n本群仅支持财务指令，发送 /help 查看可用指令` });
     }
 
     res.json({ reply });
