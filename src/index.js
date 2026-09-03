@@ -9,7 +9,8 @@ const { startCronJobs, runBroadcast, runReminder, getCronStatus, getBroadcastHis
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// 网关会转发完整事件体（表格事件含 before/after 全量字段，可能超 100kb），放宽 body 限制
+app.use(express.json({ limit: '2mb' }));
 
 // ---------- 健康检查 ----------
 
