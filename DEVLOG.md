@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v27**（2026-09-05）。
+当前最新：**v29**（2026-09-06，随本提交落地）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -170,3 +170,14 @@
 - FEISHU_USE_LONG_CONNECTION 安全默认改 false（漏配时不再自行开长连接抢网关事件；生产 .env 已显式 false，行为不变）。
 - 文档对齐：README 机器人名改「爆米花机-对话型」、删已不存在的 /api/bot/sync、催发票主消息通道改 sendPostToUser、卡片名「今日已催」、API 表补 /api/feishu/event、结构补 dryrun-urge-state.js，并移除误提交的群机器人 webhook 完整地址（应轮换）；另将上批遗留未提交的 AGENTS.md 边界补充一并入库。
 - 版本线备注：v16~v27 期间条目未及时入档，版本号以 git 提交消息为准（fb5ae6f=v27），本条起恢复逐 push 记录。
+
+## 阶段六 · 晚间静默——播报时段限制（2026-09-06）
+
+### v29 · 2026-09-06 · 随本提交落地 · feat
+**02:00–09:00（Asia/Shanghai）静默窗口：三个定时播报积压到 09:00 统一补跑（可配可关）**
+- 新增 `src/utils/quietHours.js`（顶层 AGENTS.md「晚间静默」规则的本仓实现）：窗口 `[QUIET_HOURS_START, QUIET_HOURS_END)`（默认 2→9，支持跨午夜写法，`QUIET_HOURS_DISABLED=1` 关闭）内 cron 触发不直接执行，登记积压持久化 `.quiet-backlog.json`（重启不丢），窗口结束整点重跑整个任务函数；启动时过点立即补冲刷；冲刷失败单条保留重试 ≤3 次。
+- 接线：催办周报/每日待审批提醒/催发票私聊三个定时任务统一过 `gateTask`（同触发槽位去重）；冲刷重跑以补发时刻最新数据重查——夜里已了结的审批不再催，催办状态/已催标记/p2p 回复轮询都以实际补发时刻为准；催发票的「今日已催」群播属同一任务流一并顺延。
+- 现状默认调度（周一18:00 / 每天09:00 / 每天10:30）均不在窗口内，本改动为规则兜底：调度改进窗口或未来新增夜间播报时自动生效。
+- 豁免：人工接口（`/api/broadcast`、urge/reminder 手动触发、dryRun）不受限。
+- 其他：`getCronStatus` 附 `quietHours` 状态；.gitignore/.env.example 同步；README §四 补静默说明；顶层 AGENTS.md 新增「晚间静默」规则段。
+- 同批补：README §九 项目结构树补 `src/utils/quietHours.js`（例行维护扫描发现结构树漏登记新文件）。

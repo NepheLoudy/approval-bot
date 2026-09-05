@@ -44,6 +44,8 @@
 
 ## 四、播报逻辑总览（纯定时，无事件即时播报）
 
+> **晚间静默**：任务触发落在 02:00–09:00（Asia/Shanghai，`QUIET_HOURS_START/END` 可配、`QUIET_HOURS_DISABLED=1` 关闭）内时不直接执行，积压到 09:00 整点重跑整个任务（以补发时刻数据重查）；人工接口不受限。详见 `src/utils/quietHours.js` 与顶层 AGENTS.md「晚间静默」。
+
 ```
 定时任务（Asia/Shanghai）
 
@@ -182,6 +184,7 @@ approval-bot/
 │   │   ├── reminderService.js     # 每日待审批提醒
 │   │   └── chatService.js         # 群隔离 + /approval-* 指令
 │   ├── utils/fields.js            # 多维表格字段值 → 展示文本
+│   ├── utils/quietHours.js        # 晚间静默闸门（播报积压补发）
 │   ├── config.js                  # 配置中心
 │   └── index.js                   # 主入口（Express API + 事件接收）
 ├── scripts/inspect-bitable.js     # 多维表格结构/分布检查工具

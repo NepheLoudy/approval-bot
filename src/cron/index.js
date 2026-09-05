@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const config = require('../config');
+const quietHours = require('../utils/quietHours');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
 const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeService');
@@ -12,6 +13,11 @@ const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeS
 //      已通过满14天仍未交发票 → 私聊发起人催交；私聊前轮询 p2p 会话回复
 //      （延期→3天不催 / 无法提交→停催 / 同一笔满3次→升级周报），
 //      私聊后群播「今日已催」卡（今日明细 + 需财务关注 + 未私聊汇总，与周报分开），无待催则跳过)
+//
+// 晚间静默：任务触发落在播报静默窗口（默认 02:00–09:00，Asia/Shanghai，
+// 见 utils/quietHours）内时不直接执行，登记积压到窗口结束整点重跑整个任务
+// （以补发时刻数据重查）；人工接口（runBroadcast/runReminder/
+// runInvoiceUrgeOnce）不受限
 // ============================================================
 
 const broadcastHistory = [];
@@ -82,6 +88,14 @@ function summarize(taskName, result) {
 
 // ---------- 任务定义 ----------
 
+// 晚间静默积压的冲刷执行器：与下方 cron 回调共用同一执行链（含频率限制重试），
+// 冲刷时重跑整个任务函数，以补发时刻的最新数据为准
+const quietTaskRunners = {
+  weekly_broadcast: () => withRetry('weekly_broadcast', () => runWeeklyBroadcast()),
+  daily_reminder: () => withRetry('daily_reminder', () => runReminder()),
+  invoice_urge: () => withRetry('invoice_urge', () => runInvoiceUrge()).then((r) => announceTodayUrged(r)),
+};
+
 let weeklyTask = null;
 let reminderTask = null;
 let invoiceUrgeTask = null;
@@ -93,7 +107,8 @@ function startCronJobs() {
   // 1. 每周财务催办周报
   weeklyTask = cron.schedule(config.cron.schedule, () => {
     console.log('[定时任务] 触发每周财务催办周报');
-    withRetry('weekly_broadcast', () => runWeeklyBroadcast()).catch(err => {
+    // 晚间静默：窗口内登记积压，窗口结束整点重跑整个任务
+    quietHours.gateTask('weekly_broadcast', quietHours.shanghaiStamp(), quietTaskRunners.weekly_broadcast, '每周财务催办周报').catch(err => {
       console.error('[定时任务] 周播报失败:', err.message);
     });
   }, { timezone: 'Asia/Shanghai' });
@@ -104,7 +119,8 @@ function startCronJobs() {
   if (config.reminder.schedule) {
     reminderTask = cron.schedule(config.reminder.schedule, () => {
       console.log('[定时任务] 触发每日待审批提醒');
-      withRetry('daily_reminder', () => runReminder()).catch(err => {
+      // 晚间静默：窗口内登记积压，窗口结束整点重跑整个任务
+      quietHours.gateTask('daily_reminder', quietHours.shanghaiStamp(), quietTaskRunners.daily_reminder, '每日待审批提醒').catch(err => {
         console.error('[定时任务] 每日提醒失败:', err.message);
       });
     }, { timezone: 'Asia/Shanghai' });
@@ -118,17 +134,22 @@ function startCronJobs() {
   if (config.invoiceUrge.schedule) {
     invoiceUrgeTask = cron.schedule(config.invoiceUrge.schedule, () => {
       console.log('[定时任务] 触发催发票私聊');
-      withRetry('invoice_urge', () => runInvoiceUrge())
-        .then(result => announceTodayUrged(result))
-        .catch(err => {
-          console.error('[定时任务] 催发票私聊失败:', err.message);
-        });
+      // 晚间静默：窗口内登记积压（私聊+「今日已催」群播同属一个任务流，一并顺延重跑）
+      quietHours.gateTask('invoice_urge', quietHours.shanghaiStamp(), quietTaskRunners.invoice_urge, '催发票私聊').catch(err => {
+        console.error('[定时任务] 催发票私聊失败:', err.message);
+      });
     }, { timezone: 'Asia/Shanghai' });
 
     console.log(`[定时任务] 催发票私聊已启动: ${config.invoiceUrge.schedule} (Asia/Shanghai, 超期阈值 ${config.invoiceUrge.graceDays} 天) -> 下次 ${getNextExecutionTime(config.invoiceUrge.schedule)}`);
   } else {
     console.log('[定时任务] 未配置 INVOICE_URGE_SCHEDULE，催发票私聊未启用');
   }
+
+  // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
+  for (const [name, fn] of Object.entries(quietTaskRunners)) {
+    quietHours.registerTask(name, fn);
+  }
+  quietHours.initQuietHoursFlush();
 
   return { weeklyTask, reminderTask, invoiceUrgeTask };
 }
@@ -192,6 +213,7 @@ function getCronStatus() {
       dailyReminder: reminderTask ? getNextExecutionTime(config.reminder.schedule) : null,
       invoiceUrge: invoiceUrgeTask ? getNextExecutionTime(config.invoiceUrge.schedule) : null,
     },
+    quietHours: quietHours.getStatus(),
   };
 }
 
