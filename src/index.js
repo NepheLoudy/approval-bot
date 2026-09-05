@@ -4,7 +4,7 @@ const config = require('./config');
 const { startEventSubscription } = require('./feishu/eventSubscription');
 const { processChatMessage, executeCommand } = require('./services/chatService');
 const approvalService = require('./services/approvalService');
-const { startCronJobs, runBroadcast, runReminder, getCronStatus, getBroadcastHistory } = require('./cron');
+const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
 
@@ -88,6 +88,17 @@ app.post('/api/bot/test-reminder', async (req, res) => {
     res.json({ success: true, result });
   } catch (err) {
     console.error('测试提醒失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 手动触发一次催发票私聊；body 传 { "dryRun": true } 时只构建私聊文案不发送（预览用）
+app.post('/api/bot/test-invoice-urge', async (req, res) => {
+  try {
+    const result = await runInvoiceUrgeOnce({ dryRun: !!req.body?.dryRun });
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('测试催发票失败:', err);
     res.status(500).json({ error: err.message });
   }
 });

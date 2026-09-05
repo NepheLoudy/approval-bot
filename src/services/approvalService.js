@@ -1,11 +1,12 @@
 const config = require('../config');
 const bitableApi = require('../feishu/bitable');
+const { fieldText } = require('../utils/fields');
 
 // ============================================================
 // 审批数据服务
 //
 // 播报策略：不做事件即时播报（审批提交/审批结果都不推），
-// 播报只有定时任务（周播报催办清单 + 每日待审批提醒），
+// 播报只有定时任务（周播报催办清单 + 每日待审批提醒 + 催发票私聊），
 // 因此这里只负责数据查询与催办分支计算。
 // ============================================================
 
@@ -58,7 +59,7 @@ async function getApprovalById(id) {
   }
 }
 
-/** 审批统计：全量分类 + 本周滚动7天结果 */
+/** 审批统计：全量分类 + 本周滚动7天结果（含按「项目」字段粗分类） */
 async function getApprovalStats() {
   const all = await fetchAllApprovals();
 
@@ -78,6 +79,13 @@ async function getApprovalStats() {
   const APPROVED = config.approvalStatus.APPROVED;
   const REJECTED = config.approvalStatus.REJECTED;
 
+  // 本周明细按「项目」分组（周报统计展示用）
+  const weekProjects = { new: {}, approved: {}, rejected: {} };
+  const bumpProject = (bucket, fields) => {
+    const project = fieldText(fields['项目'], '未填写');
+    bucket[project] = (bucket[project] || 0) + 1;
+  };
+
   for (const item of all) {
     const f = item.fields || {};
     const status = f['申请状态'];
@@ -86,12 +94,55 @@ async function getApprovalStats() {
     else if (status === REJECTED) stats.rejected++;
     else stats.other++;
 
-    if (typeof f['发起时间'] === 'number' && f['发起时间'] >= weekAgo) stats.weekNew++;
-    if (status === APPROVED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) stats.weekApproved++;
-    if (status === REJECTED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) stats.weekRejected++;
+    if (typeof f['发起时间'] === 'number' && f['发起时间'] >= weekAgo) {
+      stats.weekNew++;
+      bumpProject(weekProjects.new, f);
+    }
+    if (status === APPROVED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) {
+      stats.weekApproved++;
+      bumpProject(weekProjects.approved, f);
+    }
+    if (status === REJECTED && typeof f['完成时间'] === 'number' && f['完成时间'] >= weekAgo) {
+      stats.weekRejected++;
+      bumpProject(weekProjects.rejected, f);
+    }
   }
 
-  return { stats, all };
+  // {项目: 条数} → [{project, count}]，条数多的在前
+  const toGroups = (bucket) => Object.entries(bucket)
+    .map(([project, count]) => ({ project, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const projects = {
+    new: toGroups(weekProjects.new),
+    approved: toGroups(weekProjects.approved),
+    rejected: toGroups(weekProjects.rejected),
+  };
+
+  return { stats, projects, all };
+}
+
+/**
+ * 超期未交发票（催发票私聊用）：「已通过」且完成时间满 graceDays 天、发票栏为空
+ * 按完成时间正序（最久未交的排最前）
+ */
+async function getOverdueInvoices() {
+  const all = await fetchAllApprovals();
+  const APPROVED = config.approvalStatus.APPROVED;
+  const graceMs = config.invoiceUrge.graceDays * 24 * 60 * 60 * 1000;
+
+  const overdue = all.filter((record) => {
+    const f = record.fields || {};
+    if (f['申请状态'] !== APPROVED) return false;
+    if (!isActiveProcess(f)) return false;
+    if (hasAttachment(f['发票'])) return false;
+    const ms = typeof f['完成时间'] === 'number' ? f['完成时间'] : parseInt(f['完成时间'], 10);
+    if (!ms || Number.isNaN(ms)) return false; // 无完成时间不催
+    return ms + graceMs <= Date.now();
+  });
+
+  overdue.sort((a, b) => (a.fields['完成时间'] || 0) - (b.fields['完成时间'] || 0));
+  return overdue;
 }
 
 /**
@@ -151,4 +202,5 @@ module.exports = {
   getApprovalById,
   getApprovalStats,
   getFinanceFollowUp,
+  getOverdueInvoices,
 };

@@ -20,16 +20,18 @@ async function runWeeklyBroadcast(options = {}) {
   console.log('[周播报] 开始执行财务催办周报...');
 
   const followUp = await approvalService.getFinanceFollowUp();
-  const { stats } = await approvalService.getApprovalStats();
+  const { stats, projects } = await approvalService.getApprovalStats();
 
   console.log(
     `[周播报] 催办: 未交发票=${followUp.missingInvoice.length} 未制单=${followUp.missingForm.length} 未转账=${followUp.missingTransfer.length} | ` +
-    `本周: 新增=${stats.weekNew} 通过=${stats.weekApproved} 拒绝=${stats.weekRejected}`
+    `本周: 新增=${stats.weekNew} 通过=${stats.weekApproved} 拒绝=${stats.weekRejected}` +
+    (projects.new.length ? ` | 新增项目: ${projects.new.map(g => `${g.project}(${g.count})`).join(' ')}` : '')
   );
 
   const card = buildWeeklyFinanceCard(followUp, stats, {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
+    projects,
   });
 
   if (options.dryRun) {

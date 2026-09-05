@@ -2,11 +2,14 @@ const cron = require('node-cron');
 const config = require('../config');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
+const { runInvoiceUrge } = require('../services/invoiceUrgeService');
 
 // ============================================================
-// 定时任务（共两个，播报只走定时，无事件即时播报）：
+// 定时任务（共三个，播报只走定时，无事件即时播报）：
 //   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
+//   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,
+//      已通过满14天仍未交发票 → 私聊发起人催交，无超期记录则跳过)
 // ============================================================
 
 const broadcastHistory = [];
@@ -69,6 +72,9 @@ function summarize(taskName, result) {
   if (taskName === 'daily_reminder') {
     return { sent: result.sent, pendingCount: result.pendingCount };
   }
+  if (taskName === 'invoice_urge') {
+    return { sent: result.sent, overdueCount: result.overdueCount, users: result.users };
+  }
   return result;
 }
 
@@ -76,6 +82,7 @@ function summarize(taskName, result) {
 
 let weeklyTask = null;
 let reminderTask = null;
+let invoiceUrgeTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -105,12 +112,27 @@ function startCronJobs() {
     console.log('[定时任务] 未配置 DAILY_INVOICE_REMINDER_SCHEDULE，每日提醒未启用');
   }
 
-  return { weeklyTask, reminderTask };
+  // 3. 催发票私聊（已通过满 N 天仍未交发票 → 私聊发起人）
+  if (config.invoiceUrge.schedule) {
+    invoiceUrgeTask = cron.schedule(config.invoiceUrge.schedule, () => {
+      console.log('[定时任务] 触发催发票私聊');
+      withRetry('invoice_urge', () => runInvoiceUrge()).catch(err => {
+        console.error('[定时任务] 催发票私聊失败:', err.message);
+      });
+    }, { timezone: 'Asia/Shanghai' });
+
+    console.log(`[定时任务] 催发票私聊已启动: ${config.invoiceUrge.schedule} (Asia/Shanghai, 超期阈值 ${config.invoiceUrge.graceDays} 天) -> 下次 ${getNextExecutionTime(config.invoiceUrge.schedule)}`);
+  } else {
+    console.log('[定时任务] 未配置 INVOICE_URGE_SCHEDULE，催发票私聊未启用');
+  }
+
+  return { weeklyTask, reminderTask, invoiceUrgeTask };
 }
 
 function stopCronJobs() {
   if (weeklyTask) { weeklyTask.stop(); weeklyTask = null; }
   if (reminderTask) { reminderTask.stop(); reminderTask = null; }
+  if (invoiceUrgeTask) { invoiceUrgeTask.stop(); invoiceUrgeTask = null; }
 }
 
 function getNextExecutionTime(schedule) {
@@ -138,14 +160,17 @@ function getCronStatus() {
     running: {
       weeklyBroadcast: !!weeklyTask,
       dailyReminder: !!reminderTask,
+      invoiceUrge: !!invoiceUrgeTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
       dailyReminder: config.reminder.schedule || '(未启用)',
+      invoiceUrge: config.invoiceUrge.schedule || '(未启用)',
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
       dailyReminder: reminderTask ? getNextExecutionTime(config.reminder.schedule) : null,
+      invoiceUrge: invoiceUrgeTask ? getNextExecutionTime(config.invoiceUrge.schedule) : null,
     },
   };
 }
@@ -159,11 +184,17 @@ async function runBroadcast(options = {}) {
   return withRetry('weekly_broadcast', () => runWeeklyBroadcast(options));
 }
 
+/** 手动触发一次催发票私聊（测试/管理接口用；dryRun=true 只构建文案不发送） */
+async function runInvoiceUrgeOnce(options = {}) {
+  return withRetry('invoice_urge', () => runInvoiceUrge(options));
+}
+
 module.exports = {
   startCronJobs,
   stopCronJobs,
   runBroadcast,
   runReminder,
+  runInvoiceUrgeOnce,
   getCronStatus,
   getBroadcastHistory,
 };

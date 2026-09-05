@@ -55,6 +55,14 @@ module.exports = {
     SILENT_TERMINAL: ['已撤回', '已取消', '已终止', '已删除'],
   },
 
+  // 催发票私聊：已通过且完成时间满 graceDays 天仍未交发票 → 私聊发起人催交
+  // （私聊走应用 IM API sendTextToUser，链接用「申请编号」自带的审批实例链接）
+  invoiceUrge: {
+    // 留空 = 不启用（与每日提醒同款开关约定）
+    schedule: process.env.INVOICE_URGE_SCHEDULE || '',
+    graceDays: parseInt(process.env.INVOICE_URGE_GRACE_DAYS, 10) || 14,
+  },
+
   // 每日待审批提醒（发票提醒）：@当前处理人，为空时回落到配置的审批人
   reminder: {
     schedule: process.env.DAILY_INVOICE_REMINDER_SCHEDULE || '',

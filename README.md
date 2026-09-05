@@ -1,6 +1,6 @@
 # approval-bot 审批机器人
 
-财务审批播报机器人 —— 基于飞书多维表格「采购申请/发票提交」审批表，按定时任务向审批群推送**财务催办周报**（催发票/催报销单/催转账）与**每日待审批提醒**。审批提交、审批通过/拒绝均**不做事件即时播报**。
+财务审批播报机器人 —— 基于飞书多维表格「采购申请/发票提交」审批表，按定时任务向审批群推送**财务催办周报**（催发票/催报销单/催转账，本周统计附按项目分布）与**每日待审批提醒**，并对超期未交发票的申请人做**催发票私聊**。审批提交、审批通过/拒绝均**不做事件即时播报**。
 
 ## 一、架构说明：共用飞书应用 + 群聊隔离
 
@@ -55,15 +55,22 @@
 │    ├─ 分支3 未转账：发票+报销单齐全但「是否转账」为空
 │    │    且 完成时间已超过 3 个月（宽限期，未满不提醒）
 │    │    → 提醒财务跟进转账
-│    └─ 卡片底部：本周统计（近7天新增/通过/拒绝，不放全量数据）
+│    └─ 卡片底部：本周统计（近7天新增/通过/拒绝，
+│         并按「项目」字段粗分类：各项目条数分布）
 │
-└─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
-     ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人（空则 @ 配置审批人）
+├─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
+│    ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人（空则 @ 配置审批人）
+│
+└─ 每天 10:30（INVOICE_URGE_SCHEDULE，留空不启用）
+     🧾 催发票私聊：「已通过」且完成时间满 INVOICE_URGE_GRACE_DAYS
+     天（默认 14）仍未交发票 → 按发起人分组私聊催交，
+     附「申请编号」自带的审批实例链接（审批详情页，非表格链接）
 ```
 
 - 审批提交、审批通过/拒绝**不触发任何播报**（多维表格事件不订阅、不消费）
 - 周报各分支按时间倒序（最久未处理的排最前），单段超过 15 条折叠
 - 周报抬头 @财务负责人（`DAILY_REMINDER_MENTION_IDS`，回落到何云杰/张郭浩）
+- 催发票私聊走应用 IM API（`receive_id_type=open_id`），一人一条汇总名下全部超期记录；发起人为空的记录跳过
 
 ## 五、本地开发
 
@@ -87,6 +94,7 @@ curl http://localhost:3002/api/health
 | GET | `/api/approvals/:id` | 审批详情 |
 | POST | `/api/bot/test-broadcast` | 立即触发一次周播报（测试） |
 | POST | `/api/bot/test-reminder` | 立即触发一次每日提醒（测试） |
+| POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，body 传 `{"dryRun":true}` 只预览不发送） |
 | POST | `/api/bot/sync` | 立即执行一次全量对账 |
 | GET | `/api/bot/cron-status` | 定时任务状态 + 对账快照状态 |
 | GET | `/api/bot/history` | 播报历史 |
@@ -121,15 +129,16 @@ ssh -p 8500 qianli@10.253.33.233 "pm2 logs approval-bot --lines 30"
 ```
 approval-bot/
 ├── src/
-│   ├── cron/index.js              # 两个定时任务：财务催办周报 / 每日待审批提醒
+│   ├── cron/index.js              # 三个定时任务：财务催办周报 / 每日待审批提醒 / 催发票私聊
 │   ├── feishu/
 │   │   ├── bitable.js             # 多维表格 API（自动翻页）
-│   │   ├── bot.js                 # 卡片构建（催办周报/每日提醒）+ webhook/API 发送
+│   │   ├── bot.js                 # 卡片构建（催办周报/每日提醒/催发票私聊文案）+ webhook/API 发送
 │   │   ├── client.js              # 飞书 API 客户端（token 缓存）
 │   │   └── eventSubscription.js   # 消息事件接入（长连接调试模式；生产走网关转发）
 │   ├── services/
-│   │   ├── approvalService.js     # 数据查询 + 财务催办三分支计算
+│   │   ├── approvalService.js     # 数据查询 + 财务催办三分支 + 超期未交发票 + 周统计按项目分组
 │   │   ├── broadcastService.js    # 每周财务催办周报（支持 dryRun 预览）
+│   │   ├── invoiceUrgeService.js  # 催发票私聊（按发起人分组，支持 dryRun 预览）
 │   │   ├── reminderService.js     # 每日待审批提醒
 │   │   └── chatService.js         # 群隔离 + /approval-* 指令
 │   ├── utils/fields.js            # 多维表格字段值 → 展示文本
@@ -137,6 +146,7 @@ approval-bot/
 │   └── index.js                   # 主入口（Express API + 事件接收）
 ├── scripts/inspect-bitable.js     # 多维表格结构/分布检查工具
 ├── scripts/dryrun-weekly.js       # 周报 dry-run 预览（不发送）
+├── scripts/dryrun-invoice-urge.js # 催发票私聊 dry-run 预览（不发送）
 ├── feishu-permissions.json        # 飞书应用权限清单
 ├── push.js                        # 一键部署（git/SFTP + .env 上传）
 └── package.json

@@ -175,9 +175,10 @@ function renderSection(elements, { title, records, timeField, cap = 15, note }) 
 
 /**
  * 周播报卡片：财务催办清单
- * 结构：@财务 → 三段催办（催发票/催报销单/催转账）→ 底部本周统计（仅本周结果）
+ * 结构：@财务 → 三段催办（催发票/催报销单/催转账）→ 底部本周统计（仅本周结果+按项目分布）
  * @param {object} followUp { missingInvoice, missingForm, missingTransfer }
  * @param {object} stats 含 weekNew/weekApproved/weekRejected
+ * @param {object} [options.projects] { new, approved, rejected } 各为 [{project, count}]（按项目粗分类）
  */
 function buildWeeklyFinanceCard(followUp, stats, options = {}) {
   const { date } = options;
@@ -216,17 +217,27 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     note: '（完成时间已超 3 个月）',
   });
 
-  // 底部：本周统计（仅本周结果，不放全量数据）
+  // 底部：本周统计（仅本周结果，不放全量数据）+ 按项目粗分类
   elements.push({ tag: 'hr' });
-  elements.push({
-    tag: 'markdown',
-    content: [
-      `**📊 本周统计（近7天）**`,
-      `- 本周新增申请：${stats.weekNew ?? 0} 条`,
-      `- 本周通过：${stats.weekApproved ?? 0} 条`,
-      `- 本周拒绝：${stats.weekRejected ?? 0} 条`,
-    ].join('\n'),
-  });
+  const statLines = [
+    `**📊 本周统计（近7天）**`,
+    `- 本周新增申请：${stats.weekNew ?? 0} 条`,
+    `- 本周通过：${stats.weekApproved ?? 0} 条`,
+    `- 本周拒绝：${stats.weekRejected ?? 0} 条`,
+  ];
+  const projectLine = (label, groups) => {
+    if (!groups || !groups.length) return null;
+    return `- ${label}项目分布：${groups.map(g => `${g.project} ${g.count} 条`).join('、')}`;
+  };
+  const distribution = [
+    projectLine('新增', options.projects?.new),
+    projectLine('通过', options.projects?.approved),
+    projectLine('拒绝', options.projects?.rejected),
+  ].filter(Boolean);
+  if (distribution.length) {
+    statLines.push(distribution.join('\n'));
+  }
+  elements.push({ tag: 'markdown', content: statLines.join('\n') });
 
   const hasPendingWork = followUp.missingInvoice.length + followUp.missingForm.length + followUp.missingTransfer.length > 0;
 
@@ -293,6 +304,34 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
   };
 }
 
+/**
+ * 催发票私聊文案（发给申请发起人，一人一条可含多笔）
+ * 「申请编号」是 Url 字段，其 link 即审批实例链接（打开审批详情页，非表格链接）；
+ * 无链接时退化为纯文字条目。
+ * @param {Array<{record_id, fields}>} records 该发起人名下超期未交发票的记录
+ */
+function buildInvoiceUrgeText(records) {
+  const lines = records.map((record, i) => {
+    const f = record.fields || {};
+    const no = fieldText(f['申请编号']) || record.record_id;
+    const noObj = f['申请编号'];
+    const link = noObj && typeof noObj === 'object' && !Array.isArray(noObj) ? noObj.link : '';
+    const goods = truncate(f['购买物资名称'], 30) || '未填写物资名称';
+    const item = `${i + 1}. ${no} | ${goods} | ${fmtMoney(f)} | 完成于 ${fmtTime(f['完成时间'])}`;
+    return link ? `${item}\n   审批入口：${link}` : item;
+  });
+
+  return [
+    `🧾 发票催交提醒`,
+    '',
+    `您有 ${records.length} 笔已通过的申请，完成已满 ${config.invoiceUrge.graceDays} 天仍未提交发票：`,
+    '',
+    ...lines,
+    '',
+    '请点击上方「审批入口」打开对应申请的审批详情页（审批界面，非表格），尽快补交发票；已线下递交的请忽略本提醒。',
+  ].join('\n');
+}
+
 async function sendCardToChat(chatId, cardContent) {
   const res = await requestAPI(
     'POST',
@@ -318,6 +357,7 @@ module.exports = {
   sendCardToChat,
   buildWeeklyFinanceCard,
   buildReminderCard,
+  buildInvoiceUrgeText,
   // 字段格式化工具（供其他服务复用）
   fmtTime,
   fmtMoney,
