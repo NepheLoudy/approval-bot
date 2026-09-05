@@ -30,6 +30,14 @@ function hasAttachment(value) {
   return true;
 }
 
+/**
+ * 是否已交发票：「发票」（Url）或「补交发票」（附件）任一栏有值即算已交
+ * （补交发票为财务新增的补录栏，与发票栏等效）
+ */
+function hasInvoiceSubmitted(fields) {
+  return hasAttachment(fields['发票']) || hasAttachment(fields['补交发票']);
+}
+
 /** 完成时间是否已超过 N 个月（无完成时间返回 false，不提醒） */
 function isOlderThanMonths(timestamp, months) {
   if (!timestamp) return false;
@@ -123,7 +131,7 @@ async function getApprovalStats() {
 }
 
 /**
- * 超期未交发票（催发票私聊用）：「已通过」且完成时间满 graceDays 天、发票栏为空
+ * 超期未交发票（催发票私聊用）：「已通过」且完成时间满 graceDays 天、发票/补交发票均为空
  * 按完成时间正序（最久未交的排最前）
  */
 async function getOverdueInvoices() {
@@ -135,7 +143,7 @@ async function getOverdueInvoices() {
     const f = record.fields || {};
     if (f['申请状态'] !== APPROVED) return false;
     if (!isActiveProcess(f)) return false;
-    if (hasAttachment(f['发票'])) return false;
+    if (hasInvoiceSubmitted(f)) return false; // 发票/补交发票任一栏有值即不算超期
     const ms = typeof f['完成时间'] === 'number' ? f['完成时间'] : parseInt(f['完成时间'], 10);
     if (!ms || Number.isNaN(ms)) return false; // 无完成时间不催
     return ms + graceMs <= Date.now();
@@ -147,7 +155,7 @@ async function getOverdueInvoices() {
 
 /**
  * 财务催办三分支（仅针对「已通过」的活跃流程记录）：
- *   1. 未交发票：发票栏为空            → 催发票
+ *   1. 未交发票：发票/补交发票均为空   → 催发票
  *   2. 未制单：  已有发票但报销单为空   → 做报销单
  *               （报销单=无需报销 视为已制单/无需处理）
  *   3. 未转账：  已有发票和报销单但「是否转账」为空，
@@ -166,7 +174,7 @@ async function getFinanceFollowUp() {
     if (f['申请状态'] !== APPROVED) continue;
     if (!isActiveProcess(f)) continue;
 
-    const hasInvoice = hasAttachment(f['发票']);
+    const hasInvoice = hasInvoiceSubmitted(f);
     // 报销单为单选：null=未制单；「无需报销」=无需制单，视为已完成该环节
     const form = f['报销单'];
     const hasForm = form !== null && form !== undefined && form !== '';
