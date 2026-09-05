@@ -2,7 +2,7 @@ const cron = require('node-cron');
 const config = require('../config');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
-const { runInvoiceUrge } = require('../services/invoiceUrgeService');
+const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeService');
 
 // ============================================================
 // 定时任务（共三个，播报只走定时，无事件即时播报）：
@@ -10,7 +10,8 @@ const { runInvoiceUrge } = require('../services/invoiceUrgeService');
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 //   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,
 //      已通过满14天仍未交发票 → 私聊发起人催交；私聊前轮询 p2p 会话回复
-//      （延期→3天不催 / 无法提交→停催 / 同一笔满3次→升级周报），无待催记录则跳过)
+//      （延期→3天不催 / 无法提交→停催 / 同一笔满3次→升级周报），
+//      私聊后群播「今日已催」卡（今日明细 + 需财务关注 + 未私聊汇总，与周报分开），无待催则跳过)
 // ============================================================
 
 const broadcastHistory = [];
@@ -113,13 +114,15 @@ function startCronJobs() {
     console.log('[定时任务] 未配置 DAILY_INVOICE_REMINDER_SCHEDULE，每日提醒未启用');
   }
 
-  // 3. 催发票私聊（已通过满 N 天仍未交发票 → 私聊发起人）
+  // 3. 催发票私聊（已通过满 N 天仍未交发票 → 私聊发起人；私聊后群播「今日已催」卡）
   if (config.invoiceUrge.schedule) {
     invoiceUrgeTask = cron.schedule(config.invoiceUrge.schedule, () => {
       console.log('[定时任务] 触发催发票私聊');
-      withRetry('invoice_urge', () => runInvoiceUrge()).catch(err => {
-        console.error('[定时任务] 催发票私聊失败:', err.message);
-      });
+      withRetry('invoice_urge', () => runInvoiceUrge())
+        .then(result => announceTodayUrged(result))
+        .catch(err => {
+          console.error('[定时任务] 催发票私聊失败:', err.message);
+        });
     }, { timezone: 'Asia/Shanghai' });
 
     console.log(`[定时任务] 催发票私聊已启动: ${config.invoiceUrge.schedule} (Asia/Shanghai, 超期阈值 ${config.invoiceUrge.graceDays} 天) -> 下次 ${getNextExecutionTime(config.invoiceUrge.schedule)}`);

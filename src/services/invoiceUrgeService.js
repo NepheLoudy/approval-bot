@@ -2,7 +2,7 @@ const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
 const { requestAPI } = require('../feishu/client');
-const { sendTextToUser, buildInvoiceUrgeText, getUsers } = require('../feishu/bot');
+const { sendTextToUser, buildInvoiceUrgeText, buildTodayUrgedCard, sendMessage, getUsers } = require('../feishu/bot');
 
 // ============================================================
 // 催发票私聊（有状态版）
@@ -181,7 +181,7 @@ async function runInvoiceUrge(options = {}) {
   if (!urgeList.length) {
     urgeStateStore.prune(overdue.map((r) => r.record_id));
     console.log(`[催发票] 无需私聊（超期 ${overdue.length} 条: 延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 其余 ${overdue.length - statusCounts.deferred - statusCounts.cannotSubmit - statusCounts.escalated} 条不在私聊范围），跳过`);
-    return { sent: false, overdueCount: overdue.length, users: 0, replyStats, statusCounts };
+    return { sent: false, overdueCount: overdue.length, users: 0, overdueRecords: overdue, urgedRecords: [], statusCounts, replyStats };
   }
 
   // 按发起人分组：open_id -> { name, records[] }
@@ -209,7 +209,7 @@ async function runInvoiceUrge(options = {}) {
     for (const [openId, { name, records }] of byUser) {
       previews.push({ openId, name, text: buildInvoiceUrgeText(records), urgeCount: urgeStateStore.getRecord(records[0].record_id)?.urgeCount || 0 });
     }
-    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, urgedRecords: urgeList, statusCounts, replyStats, previews };
+    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, overdueRecords: overdue, urgedRecords: urgeList, statusCounts, replyStats, previews };
   }
 
   let sent = 0;
@@ -257,6 +257,7 @@ async function runInvoiceUrge(options = {}) {
     urgeCount: urgeList.length,
     users: byUser.size,
     sentCount: sent,
+    overdueRecords: overdue,
     urgedRecords,
     statusCounts,
     replyStats,
@@ -264,7 +265,55 @@ async function runInvoiceUrge(options = {}) {
   };
 }
 
+/**
+ * 「今日已催」群播报（每日私聊催交后独立播报，与周报能力分开）：
+ *   - 今日已私聊明细 + 未私聊汇总
+ *   - ⚠️ 需财务关注：多次催交仍无票（urgeCount ≥ 2）/ 回复得知无法提交 的记录
+ * 无催交且无重点关注时不发卡（避免空播刷屏）。dry-run 不发送。
+ */
+async function announceTodayUrged(result) {
+  if (!result || result.dryRun) return { announced: false, reason: 'dry-run' };
+
+  const urgedRecords = result.urgedRecords || [];
+  const statusCounts = result.statusCounts || {};
+  const maxTimes = config.invoiceUrge.maxTimes;
+
+  // 重点名单：全量超期名单里「多次催交仍无票」或「无法提交」的记录
+  const attention = [];
+  for (const record of result.overdueRecords || []) {
+    const st = urgeStateStore.getRecord(record.record_id);
+    if (!st) continue;
+    const reasons = [];
+    if (st.status === 'cannot_submit') reasons.push('无法提交');
+    if ((st.urgeCount || 0) >= maxTimes) reasons.push(`已催满${st.urgeCount}次`);
+    else if ((st.urgeCount || 0) >= 2) reasons.push(`已催${st.urgeCount}次`);
+    if (reasons.length) attention.push({ record, reasons });
+  }
+
+  if (!urgedRecords.length && !attention.length) {
+    console.log('[催发票] 今日无催交且无重点关注记录，跳过「今日已催」播报');
+    return { announced: false, reason: 'empty' };
+  }
+
+  try {
+    const card = buildTodayUrgedCard({
+      urgedRecords,
+      attention,
+      statusCounts,
+      urgeStates: urgeStateStore.allRecords(),
+    });
+    await sendMessage(card);
+    console.log(`[催发票] 「今日已催」已播报：今日催交 ${urgedRecords.length} 条，需财务关注 ${attention.length} 条`);
+    return { announced: true, attentionCount: attention.length };
+  } catch (err) {
+    // 播报失败不抛出——避免定时任务重试导致私聊重复发送
+    console.error('[催发票] 「今日已催」播报失败（不影响私聊结果）:', err.message);
+    return { announced: false, reason: err.message };
+  }
+}
+
 module.exports = {
   runInvoiceUrge,
+  announceTodayUrged,
   parseReply,
 };

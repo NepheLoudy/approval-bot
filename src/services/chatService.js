@@ -1,8 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const invoiceUrgeService = require('./invoiceUrgeService');
-const urgeStateStore = require('./urgeStateStore');
-const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildInvoiceUrgeReportCard } = require('../feishu/bot');
+const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -171,31 +170,26 @@ async function handleUrgeCommand(args = []) {
   }
 
   const lines = ['🔔 手动催办完成：'];
-  const urgeStates = urgeStateStore.init(config.invoiceUrge.stateFile).allRecords();
 
-  // 发票 → 私聊发起人（复用催发票私聊能力）+ 群播本次催交明细
+  // 发票 → 私聊发起人（复用催发票私聊能力）+ 群播「今日已催」卡
   if (category === 'invoice') {
     const r = await invoiceUrgeService.runInvoiceUrge();
     const skipped = r.statusCounts || {};
     const skippedTotal = (skipped.deferred || 0) + (skipped.cannotSubmit || 0) + (skipped.escalated || 0);
 
-    // 群播「发票催交播报」：说清楚刚才催了哪些（有实际私聊或存在状态记录才发卡）
-    if ((r.urgedRecords && r.urgedRecords.length) || skippedTotal > 0) {
-      const card = buildInvoiceUrgeReportCard({
-        urgedRecords: r.urgedRecords || [],
-        statusCounts: skipped,
-        urgeStates,
-      });
-      await sendMessage(card);
-    }
+    // 群播「今日已催」：今日催交明细 + 需财务关注（多次催交/无法提交）+ 未私聊汇总
+    const announce = await invoiceUrgeService.announceTodayUrged(r);
 
     lines.push(
       r.urgedRecords && r.urgedRecords.length
-        ? `🧾 未开票：已私聊 ${r.sentCount}/${r.users} 位发起人（${r.urgedRecords.length} 条，明细见群卡片）${r.failures?.length ? `，⚠️ ${r.failures.length} 人发送失败` : ''}`
+        ? `🧾 未开票：已私聊 ${r.sentCount}/${r.users} 位发起人（${r.urgedRecords.length} 条，明细见群卡片「今日已催」）${r.failures?.length ? `，⚠️ ${r.failures.length} 人发送失败` : ''}`
         : '🧾 未开票：✅ 本次无私聊（无超期或均处于延期/无法提交/已催满状态）'
     );
     if (skippedTotal > 0) {
       lines.push(`⏸ 未私聊：延期中 ${skipped.deferred || 0} · 无法提交 ${skipped.cannotSubmit || 0} · 已催满 ${skipped.escalated || 0}`);
+    }
+    if (!announce.announced && announce.reason === 'empty') {
+      lines.push('（今日无催交且无重点关注，未发播报卡）');
     }
     return lines.join('\n');
   }
