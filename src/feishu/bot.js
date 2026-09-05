@@ -77,13 +77,36 @@ async function sendTextToUser(openId, text) {
     }
   );
   if (res.code !== 0) {
-    // 230013 = 机器人对该用户不可用：飞书「应用可用范围」不含对方，属平台 ACL，API 无法绕过
-    const hint = res.code === 230013
-      ? ' —— 对方不在应用可用范围内，需管理员在飞书开发者后台把「可用范围」改为全员（或加入对方）'
-      : '';
-    throw new Error(`发送私聊消息失败: ${res.msg} (code: ${res.code})${hint}`);
+    throw new Error(`发送私聊消息失败: ${res.msg} (code: ${res.code})${availabilityHint(res.code)}`);
   }
   return res.data;
+}
+
+/**
+ * 发送富文本（post）私聊：rows 为二维数组，每行是元素数组
+ * 元素：{tag:'text', text} / {tag:'a', text, href}（post 里超链接才可点击渲染）
+ */
+async function sendPostToUser(openId, title, rows) {
+  const res = await requestAPI(
+    'POST',
+    '/im/v1/messages?receive_id_type=open_id',
+    {
+      receive_id: openId,
+      msg_type: 'post',
+      content: JSON.stringify({ post: { zh_cn: { title, content: rows } } }),
+    }
+  );
+  if (res.code !== 0) {
+    throw new Error(`发送私聊富文本失败: ${res.msg} (code: ${res.code})${availabilityHint(res.code)}`);
+  }
+  return res.data;
+}
+
+// 230013 = 机器人对该用户不可用：飞书「应用可用范围」不含对方，属平台 ACL，API 无法绕过
+function availabilityHint(code) {
+  return code === 230013
+    ? ' —— 对方不在应用可用范围内，需管理员在飞书开发者后台把「可用范围」改为全员（或加入对方）'
+    : '';
 }
 
 async function replyTextMessage(messageId, text) {
@@ -436,31 +459,48 @@ function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = []
 }
 
 /**
- * 催发票私聊文案（发给申请发起人，一人一条可含多笔）
+ * 催发票私聊富文本（发给申请发起人，一人一条可含多笔）
  * 「申请编号」是 Url 字段，其 link 即审批实例链接（打开审批详情页，非表格链接）；
- * 无链接时退化为纯文字条目。
+ * post 富文本里超链接可点击，展示文本简化为「项目名 + 金额」。
  * @param {Array<{record_id, fields}>} records 该发起人名下超期未交发票的记录
+ * @returns {{title: string, rows: Array<Array<object>>}} post 消息结构
  */
-function buildInvoiceUrgeText(records) {
-  const lines = records.map((record, i) => {
+function buildInvoiceUrgePost(records) {
+  const rows = [];
+
+  rows.push([{ tag: 'text', text: `您有 ${records.length} 笔已通过的申请，完成已满 ${config.invoiceUrge.graceDays} 天仍未提交发票：` }]);
+
+  records.forEach((record, i) => {
     const f = record.fields || {};
-    const no = fieldText(f['申请编号']) || record.record_id;
+    // 链接展示文本：项目名 + 金额（无项目回落物资名称，再回落申请编号）
+    const project = fieldText(f['项目'], '') || truncate(f['购买物资名称'], 20) || fieldText(f['申请编号']) || record.record_id;
+    const display = `${project} ${fmtMoney(f)}`;
+    const tail = ` | ${fieldText(f['申请编号']) || record.record_id} | 完成于 ${fmtTime(f['完成时间'])}`;
     const noObj = f['申请编号'];
     const link = noObj && typeof noObj === 'object' && !Array.isArray(noObj) ? noObj.link : '';
-    const goods = truncate(f['购买物资名称'], 30) || '未填写物资名称';
-    const item = `${i + 1}. ${no} | ${goods} | ${fmtMoney(f)} | 完成于 ${fmtTime(f['完成时间'])}`;
-    return link ? `${item}\n   审批入口：${link}` : item;
+
+    if (link) {
+      rows.push([
+        { tag: 'text', text: `${i + 1}. ` },
+        { tag: 'a', text: display, href: link },
+        { tag: 'text', text: tail },
+      ]);
+    } else {
+      rows.push([{ tag: 'text', text: `${i + 1}. ${display}（无审批链接）${tail}` }]);
+    }
   });
 
-  return [
-    `🧾 发票催交提醒`,
-    '',
-    `您有 ${records.length} 笔已通过的申请，完成已满 ${config.invoiceUrge.graceDays} 天仍未提交发票：`,
-    '',
-    ...lines,
-    '',
-    '请点击上方「审批入口」打开对应申请的审批详情页（审批界面，非表格），尽快补交发票；已线下递交的请忽略本提醒。',
-  ].join('\n');
+  rows.push([{ tag: 'text', text: '' }]);
+  rows.push([{ tag: 'text', text: '请点击上方「项目名+金额」打开对应申请的审批详情页（审批界面，非表格），尽快补交发票；已线下递交的请忽略本提醒。' }]);
+
+  return { title: '🧾 发票催交提醒', rows };
+}
+
+/** post 结构 → 纯文本预览（dry-run 展示用；链接渲染为 [文本](短地址)） */
+function previewInvoiceUrgePost(post) {
+  return [post.title, ...post.rows.map(row => row.map(el =>
+    el.tag === 'a' ? `[${el.text}](${String(el.href).slice(0, 48)}…)` : el.text
+  ).join(''))].join('\n');
 }
 
 async function sendCardToChat(chatId, cardContent) {
@@ -484,13 +524,15 @@ module.exports = {
   sendTextMessage,
   sendTextToChat,
   sendTextToUser,
+  sendPostToUser,
   replyTextMessage,
   sendCardToChat,
   buildWeeklyFinanceCard,
   buildReminderCard,
   buildUrgeCard,
   buildTodayUrgedCard,
-  buildInvoiceUrgeText,
+  buildInvoiceUrgePost,
+  previewInvoiceUrgePost,
   // 字段格式化工具（供其他服务复用）
   fmtTime,
   fmtMoney,

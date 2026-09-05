@@ -2,7 +2,7 @@ const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
 const { requestAPI } = require('../feishu/client');
-const { sendTextToUser, buildInvoiceUrgeText, buildTodayUrgedCard, sendMessage, getUsers } = require('../feishu/bot');
+const { sendTextToUser, sendPostToUser, buildInvoiceUrgePost, previewInvoiceUrgePost, buildTodayUrgedCard, sendMessage, getUsers } = require('../feishu/bot');
 
 // ============================================================
 // 催发票私聊（有状态版）
@@ -207,7 +207,7 @@ async function runInvoiceUrge(options = {}) {
   if (options.dryRun) {
     const previews = [];
     for (const [openId, { name, records }] of byUser) {
-      previews.push({ openId, name, text: buildInvoiceUrgeText(records), urgeCount: urgeStateStore.getRecord(records[0].record_id)?.urgeCount || 0 });
+      previews.push({ openId, name, text: previewInvoiceUrgePost(buildInvoiceUrgePost(records)), urgeCount: urgeStateStore.getRecord(records[0].record_id)?.urgeCount || 0 });
     }
     return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, overdueRecords: overdue, urgedRecords: urgeList, statusCounts, replyStats, previews };
   }
@@ -217,7 +217,9 @@ async function runInvoiceUrge(options = {}) {
   const urgedRecords = []; // 本次实际私聊成功的记录（播报卡用）
   for (const [openId, { name, records }] of byUser) {
     try {
-      const res = await sendTextToUser(openId, buildInvoiceUrgeText(records));
+      // 富文本 post：超链接展示为「项目名+金额」，点击直达审批详情页
+      const post = buildInvoiceUrgePost(records);
+      const res = await sendPostToUser(openId, post.title, post.rows);
       sent++;
       urgedRecords.push(...records);
 
