@@ -147,16 +147,45 @@ function truncate(text, max = 40) {
 
 // ---------- 周播报卡片：财务催办清单 ----------
 
-/** 催办条目通用行 */
-function followUpLine(record, index, timeField) {
+/** 申请编号 → markdown 超链接（Url 字段的 link 即审批实例链接，财务可点击直达审批详情页） */
+function fmtNoMarkdown(fields, recordId) {
+  const raw = fields['申请编号'];
+  const no = fieldText(raw) || recordId;
+  const link = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.link : '';
+  return link ? `[${no}](${link})` : no;
+}
+
+/** 催发票状态徽标（无法提交 / 延期中 / 已催次数），供周报展示给财务 */
+function invoiceStatusBadge(state) {
+  if (!state) return '';
+  if (state.status === 'cannot_submit') return '**[无法提交]** ';
+  if (state.status === 'deferred' && (state.snoozeUntil || 0) > Date.now()) {
+    return `**[已延期至 ${fmtDayShort(state.snoozeUntil)}]** `;
+  }
+  if ((state.urgeCount || 0) > 0) {
+    return state.status === 'escalated'
+      ? `**[已催满${state.urgeCount}次]** `
+      : `[已催${state.urgeCount}次] `;
+  }
+  return '';
+}
+
+function fmtDayShort(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+/** 催办条目通用行（单号带审批链接；urgeStates 提供时未交票行带状态徽标） */
+function followUpLine(record, index, timeField, urgeStates) {
   const f = record.fields || {};
-  const no = fieldText(f['申请编号']) || record.record_id;
+  const badge = urgeStates ? invoiceStatusBadge(urgeStates[record.record_id]) : '';
   const timeLabel = timeField === '完成时间' ? '完成' : '发起';
-  return `${index + 1}. ${no} | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${timeLabel}：${fmtTime(f[timeField] || f['发起时间'])}`;
+  return `${index + 1}. ${badge}${fmtNoMarkdown(f, record.record_id)} | ${firstUserName(f['发起人'])} | ${truncate(f['购买物资名称']) || '未填写'} | ${fmtMoney(f)} | ${timeLabel}：${fmtTime(f[timeField] || f['发起时间'])}`;
 }
 
 /** 分段渲染（超过上限折叠，避免卡片超限） */
-function renderSection(elements, { title, records, timeField, cap = 15, note }) {
+function renderSection(elements, { title, records, timeField, cap = 15, note, urgeStates }) {
   elements.push({ tag: 'hr' });
   if (!records || records.length === 0) {
     elements.push({ tag: 'markdown', content: `${title}：✅ 无` });
@@ -166,7 +195,7 @@ function renderSection(elements, { title, records, timeField, cap = 15, note }) 
     tag: 'markdown',
     content: `${title}（**${records.length} 条**）${note || ''}`,
   });
-  const lines = records.slice(0, cap).map((r, i) => followUpLine(r, i, timeField));
+  const lines = records.slice(0, cap).map((r, i) => followUpLine(r, i, timeField, urgeStates));
   if (records.length > cap) {
     lines.push(`…其余 ${records.length - cap} 条请在多维表格中查看`);
   }
@@ -179,6 +208,7 @@ function renderSection(elements, { title, records, timeField, cap = 15, note }) 
  * @param {object} followUp { missingInvoice, missingForm, missingTransfer }
  * @param {object} stats 含 weekNew/weekApproved/weekRejected
  * @param {object} [options.projects] { new, approved, rejected } 各为 [{project, count}]（按项目粗分类）
+ * @param {object} [options.urgeStates] { record_id: 催发票私聊状态 }（未交票行状态徽标）
  */
 function buildWeeklyFinanceCard(followUp, stats, options = {}) {
   const { date } = options;
@@ -194,11 +224,12 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     content: `**🧾 财务催办周报**\n${date || new Date().toLocaleDateString('zh-CN')}\n${mentionLine}以下为「已通过」申请的后续财务环节待办：`,
   });
 
-  // 1. 未交发票 → 催发票
+  // 1. 未交发票 → 催发票（单号带审批链接 + 私聊状态徽标：无法提交/已延期/已催N次）
   renderSection(elements, {
     title: '🧾 未交发票（需催发票）',
     records: followUp.missingInvoice,
     timeField: '发起时间',
+    urgeStates: options.urgeStates,
   });
 
   // 2. 已有发票但未制单 → 做报销单

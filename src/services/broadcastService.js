@@ -1,5 +1,6 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
+const urgeStateStore = require('./urgeStateStore');
 const { buildWeeklyFinanceCard, sendMessage } = require('../feishu/bot');
 
 /**
@@ -32,6 +33,8 @@ async function runWeeklyBroadcast(options = {}) {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
     projects,
+    // 未交发票行的私聊状态徽标（无法提交/已延期/已催N次）
+    urgeStates: urgeStateStore.init(config.invoiceUrge.stateFile).allRecords(),
   });
 
   if (options.dryRun) {

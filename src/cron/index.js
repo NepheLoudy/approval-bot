@@ -9,7 +9,8 @@ const { runInvoiceUrge } = require('../services/invoiceUrgeService');
 //   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 //   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,
-//      已通过满14天仍未交发票 → 私聊发起人催交，无超期记录则跳过)
+//      已通过满14天仍未交发票 → 私聊发起人催交；私聊前轮询 p2p 会话回复
+//      （延期→3天不催 / 无法提交→停催 / 同一笔满3次→升级周报），无待催记录则跳过)
 // ============================================================
 
 const broadcastHistory = [];

@@ -57,10 +57,18 @@ module.exports = {
 
   // 催发票私聊：已通过且完成时间满 graceDays 天仍未交发票 → 私聊发起人催交
   // （私聊走应用 IM API sendTextToUser，链接用「申请编号」自带的审批实例链接）
+  // 回复监听：私聊后轮询 p2p 会话消息列表（不经事件链路），
+  //   回复「延期/推迟」→ deferDays 天内不催该批记录；
+  //   回复「无法提交」→ 停止催该批记录，状态呈报周报给财务；
+  //   同一记录私聊满 maxTimes 次 → 停止私聊，升级周报展示给财务。
   invoiceUrge: {
     // 留空 = 不启用（与每日提醒同款开关约定）
     schedule: process.env.INVOICE_URGE_SCHEDULE || '',
     graceDays: parseInt(process.env.INVOICE_URGE_GRACE_DAYS, 10) || 14,
+    deferDays: parseInt(process.env.INVOICE_URGE_DEFER_DAYS, 10) || 3,
+    maxTimes: parseInt(process.env.INVOICE_URGE_MAX_TIMES, 10) || 3,
+    // 状态文件：NAS 的 SFTP 部署会清空项目目录，生产应配到项目目录之外
+    stateFile: process.env.INVOICE_URGE_STATE_FILE || '',
   },
 
   // 每日待审批提醒（发票提醒）：@当前处理人，为空时回落到配置的审批人
