@@ -230,9 +230,9 @@ async function runInvoiceUrge(options = {}) {
         lastReadTime: Math.max(Number(res?.create_time) || 0, prevUser.lastReadTime || 0),
       });
 
-      // 计数与升级
+      // 计数与升级（成功即清除上次的私聊失败标记）
       for (const id of recordIds) {
-        const st = urgeStateStore.updateRecord(id, { urgeCount: (urgeStateStore.getRecord(id)?.urgeCount || 0) + 1, lastUrgeAt: Date.now() });
+        const st = urgeStateStore.updateRecord(id, { urgeCount: (urgeStateStore.getRecord(id)?.urgeCount || 0) + 1, lastUrgeAt: Date.now(), lastUrgeError: '' });
         if (st.urgeCount >= maxTimes && st.status !== 'escalated') {
           urgeStateStore.updateRecord(id, { status: 'escalated', statusNote: `已私聊催交 ${st.urgeCount} 次` });
         }
@@ -241,6 +241,10 @@ async function runInvoiceUrge(options = {}) {
     } catch (err) {
       failures.push({ openId, name, error: err.message });
       console.error(`[催发票] 私聊 ${name}(${openId}) 失败:`, err.message);
+      // 失败原因落到记录状态（周报徽标用），让财务看到"催不出去"而不是默默没反应
+      for (const r of records) {
+        urgeStateStore.updateRecord(r.record_id, { lastUrgeError: err.message, lastUrgeErrorAt: Date.now() });
+      }
     }
   }
 

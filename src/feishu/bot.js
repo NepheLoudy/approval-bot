@@ -77,7 +77,11 @@ async function sendTextToUser(openId, text) {
     }
   );
   if (res.code !== 0) {
-    throw new Error(`发送私聊消息失败: ${res.msg} (code: ${res.code})`);
+    // 230013 = 机器人对该用户不可用：飞书「应用可用范围」不含对方，属平台 ACL，API 无法绕过
+    const hint = res.code === 230013
+      ? ' —— 对方不在应用可用范围内，需管理员在飞书开发者后台把「可用范围」改为全员（或加入对方）'
+      : '';
+    throw new Error(`发送私聊消息失败: ${res.msg} (code: ${res.code})${hint}`);
   }
   return res.data;
 }
@@ -167,6 +171,8 @@ function invoiceStatusBadge(state) {
       ? `**[已催满${state.urgeCount}次]** `
       : `[已催${state.urgeCount}次] `;
   }
+  // 从未成功私聊过且最近一次发送失败（如 230013 可用范围拒绝）——周报提醒财务该人催不出去
+  if (state.lastUrgeError) return '**[私聊失败]** ';
   return '';
 }
 
