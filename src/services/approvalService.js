@@ -44,7 +44,11 @@ function isOlderThanMonths(timestamp, months) {
   const ms = typeof timestamp === 'number' ? timestamp : parseInt(timestamp, 10);
   if (Number.isNaN(ms)) return false;
   const deadline = new Date(ms);
+  const day = deadline.getDate();
   deadline.setMonth(deadline.getMonth() + months);
+  if (deadline.getDate() < day) {
+    deadline.setDate(0); // 月末溢出（如 11-30 + 3 个月滚到 3-02）钳到目标月最后一天
+  }
   return deadline.getTime() <= Date.now();
 }
 
@@ -67,7 +71,7 @@ async function getApprovalById(id) {
   }
 }
 
-/** 审批统计：全量分类 + 本周滚动7天结果（含按「项目」字段粗分类） */
+/** 审批统计：全量分类 + 本周滚动7天结果（仅活跃流程；含按「项目」字段粗分类） */
 async function getApprovalStats() {
   const all = await fetchAllApprovals();
 
@@ -77,7 +81,7 @@ async function getApprovalStats() {
     approved: 0,
     rejected: 0,
     other: 0,
-    // 本周（滚动7天）
+    // 本周（滚动7天，仅活跃流程——周报统计口径与非活跃流程一律静默的约定一致）
     weekNew: 0,
     weekApproved: 0,
     weekRejected: 0,
@@ -101,6 +105,8 @@ async function getApprovalStats() {
     else if (status === APPROVED) stats.approved++;
     else if (status === REJECTED) stats.rejected++;
     else stats.other++;
+
+    if (!isActiveProcess(f)) continue; // 周/项目统计排除历史与测试流程
 
     if (typeof f['发起时间'] === 'number' && f['发起时间'] >= weekAgo) {
       stats.weekNew++;

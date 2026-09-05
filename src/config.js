@@ -31,7 +31,9 @@ module.exports = {
   feishuEvent: {
     verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || '',
     encryptKey: process.env.FEISHU_ENCRYPT_KEY || '',
-    useLongConnection: process.env.FEISHU_USE_LONG_CONNECTION !== 'false',
+    // 安全默认必须为 false：本项目只做定时拉取与被动接收网关转发，
+    // 自行开长连接会与 feishu-gateway 抢共用应用的事件（架构铁律）
+    useLongConnection: process.env.FEISHU_USE_LONG_CONNECTION === 'true',
   },
 
   bot: {

@@ -49,7 +49,8 @@ function fmtDay(ms) {
 
 /**
  * 轮询所有已建联用户的私聊回复
- * @param {object} [options] { silent } silent=true 时只读解析、不发确认回执（dry-run 用）
+ * @param {object} [options] { silent } silent=true 时纯只读：不写状态、不发确认回执（dry-run 用），
+ *   已识别的回复留到下一次真实执行再消费
  */
 async function pollAllReplies(options = {}) {
   ensureInit();
@@ -86,31 +87,40 @@ async function pollAllReplies(options = {}) {
 
       if (kind === 'deferred') {
         const snoozeUntil = Date.now() + config.invoiceUrge.deferDays * 24 * 60 * 60 * 1000;
-        for (const id of recordIds) {
-          urgeStateStore.updateRecord(id, { status: 'deferred', snoozeUntil, statusNote: '发起人申请延期' });
-        }
         stats.deferred++;
         if (!options.silent) {
-          await sendTextToUser(
-            openId,
-            `✅ 已收到您的延期申请：名下 ${recordIds.length} 笔超期发票 ${config.invoiceUrge.deferDays} 天内（至 ${fmtDay(snoozeUntil)}）不再私聊提醒，请尽快安排提交。`
-          );
+          for (const id of recordIds) {
+            urgeStateStore.updateRecord(id, { status: 'deferred', snoozeUntil, statusNote: '发起人申请延期' });
+          }
+          // 回执发送失败只记日志，不允许中断整个轮询（否则当天所有人的催办都会不发）
+          try {
+            await sendTextToUser(
+              openId,
+              `✅ 已收到您的延期申请：名下 ${recordIds.length} 笔超期发票 ${config.invoiceUrge.deferDays} 天内（至 ${fmtDay(snoozeUntil)}）不再私聊提醒，请尽快安排提交。`
+            );
+          } catch (err) {
+            console.warn(`[催发票] 延期回执发送失败 ${openId}: ${err.message}`);
+          }
         }
       } else {
-        for (const id of recordIds) {
-          urgeStateStore.updateRecord(id, { status: 'cannot_submit', statusNote: '发起人称无法提交' });
-        }
         stats.cannotSubmit++;
         if (!options.silent) {
-          await sendTextToUser(
-            openId,
-            `✅ 已记录：${recordIds.length} 笔发票标记为「无法提交」，将呈报财务跟进，后续不再私聊提醒。`
-          );
+          for (const id of recordIds) {
+            urgeStateStore.updateRecord(id, { status: 'cannot_submit', statusNote: '发起人称无法提交' });
+          }
+          try {
+            await sendTextToUser(
+              openId,
+              `✅ 已记录：${recordIds.length} 笔发票标记为「无法提交」，将呈报财务跟进，后续不再私聊提醒。`
+            );
+          } catch (err) {
+            console.warn(`[催发票] 无法提交回执发送失败 ${openId}: ${err.message}`);
+          }
         }
       }
     }
 
-    if (lastRead > (user.lastReadTime || 0)) {
+    if (!options.silent && lastRead > (user.lastReadTime || 0)) {
       urgeStateStore.updateUser(openId, { lastReadTime: lastRead });
     }
   }
@@ -151,11 +161,28 @@ function extractMsgText(message) {
 
 /**
  * [2] 催发票私聊主流程：先轮询回复，再对仍需催的记录私聊
+ * 并发互斥：定时任务、/approval-urge 指令、测试接口可能同时触发，
+ * 重入会导致同一批记录重复私聊、urgeCount 双计
  */
+let urgeRunning = false;
+
 async function runInvoiceUrge(options = {}) {
+  if (urgeRunning) {
+    console.warn('[催发票] 上一轮催发票仍在执行，跳过本次触发（防重复私聊）');
+    return { skipped: true, reason: 'already_running' };
+  }
+  urgeRunning = true;
+  try {
+    return await runInvoiceUrgeInner(options);
+  } finally {
+    urgeRunning = false;
+  }
+}
+
+async function runInvoiceUrgeInner(options = {}) {
   ensureInit();
 
-  // [1] 先处理回复（延期/无法提交会影响本次过滤）；dry-run 只读不发回执
+  // [1] 先处理回复（延期/无法提交会影响本次过滤）；dry-run 纯只读预览（不消费回复、不改状态）
   const replyStats = await pollAllReplies({ silent: !!options.dryRun });
   if (replyStats.users > 0) {
     console.log(`[催发票] 回复轮询: 监听 ${replyStats.users} 位用户, 延期 ${replyStats.deferred} 批, 无法提交 ${replyStats.cannotSubmit} 批, 未识别 ${replyStats.ignored} 条`);

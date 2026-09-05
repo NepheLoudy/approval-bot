@@ -402,11 +402,14 @@ function buildTodayUrgedCard({ urgedRecords = [], attention = [], statusCounts =
   }
 
   elements.push({ tag: 'hr' });
+  const deferred = statusCounts.deferred || 0;
+  const cannotSubmit = statusCounts.cannotSubmit || 0;
+  const escalated = statusCounts.escalated || 0;
   elements.push({
     tag: 'markdown',
     content:
-      `⏸ 今日未私聊 ${statusCounts.deferred + statusCounts.cannotSubmit + statusCounts.escalated} 条：` +
-      `延期中 ${statusCounts.deferred || 0} · 无法提交 ${statusCounts.cannotSubmit || 0} · 已催满 ${statusCounts.escalated || 0}`,
+      `⏸ 今日未私聊 ${deferred + cannotSubmit + escalated} 条：` +
+      `延期中 ${deferred} · 无法提交 ${cannotSubmit} · 已催满 ${escalated}`,
   });
 
   return {

@@ -139,21 +139,37 @@ function stopCronJobs() {
   if (invoiceUrgeTask) { invoiceUrgeTask.stop(); invoiceUrgeTask = null; }
 }
 
+/**
+ * 计算下次执行时间（展示用，Asia/Shanghai 由调度器保证，这里按服务器本地时区渲染）。
+ * 支持 node-cron 的 6 段（秒 分 时 日 月 周）与 5 段（分 时 日 月 周）写法，
+ * 日/月/周域支持 * 与逗号列表；带步进/范围的表达式返回「未知」。
+ */
 function getNextExecutionTime(schedule) {
   try {
-    const [second, minute, hour] = schedule.split(' ');
+    const parts = String(schedule).trim().split(/\s+/);
+    if (parts.length < 5) return '未知';
+    const [sec, min, hr, dom, mon, dow] = parts.length >= 6 ? parts : ['0', ...parts];
+
+    const matchField = (field, value) => {
+      if (field === undefined || field === '*' || field === '?') return true;
+      if (!/^[\d,]+$/.test(field)) return null;
+      return field.split(',').some((v) => parseInt(v, 10) === value);
+    };
+
     const now = new Date();
-    const next = new Date(now);
-
-    next.setSeconds(parseInt(second) || 0);
-    next.setMinutes(parseInt(minute) || 0);
-    next.setHours(parseInt(hour) || 0);
-
-    if (next <= now) {
-      next.setDate(next.getDate() + 1);
+    for (let addDays = 0; addDays <= 366; addDays++) {
+      const candidate = new Date(
+        now.getFullYear(), now.getMonth(), now.getDate() + addDays,
+        parseInt(hr, 10) || 0, parseInt(min, 10) || 0, parseInt(sec, 10) || 0, 0
+      );
+      if (candidate <= now) continue;
+      const domHit = matchField(dom, candidate.getDate());
+      const monHit = matchField(mon, candidate.getMonth() + 1);
+      const dowHit = matchField(dow, candidate.getDay()); // 0=周日，与 node-cron 一致
+      if (domHit === null || monHit === null || dowHit === null) return '未知（暂不支持的表达式）';
+      if (domHit && monHit && dowHit) return candidate.toLocaleString('zh-CN');
     }
-
-    return next.toLocaleString('zh-CN');
+    return '未知';
   } catch (e) {
     return '未知';
   }

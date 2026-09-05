@@ -8,7 +8,7 @@
 
 ### 1. 群聊隔离
 - 本项目**仅服务审批群**（`BOT_CHAT_ID = oc_1ea53731a8772400450da6ab107f8331`）
-- 指令与对话触发只在该群生效，且必须 @机器人（共用应用机器人的实际名称为 **爆米花机_财务型**，`BOT_NAME` 与之保持一致用于 @识别；`/approval-*` 前缀指令即使漏检 @ 也会触发）
+- 指令与对话触发只在该群生效，且必须 @机器人（共用应用机器人的实际名称为 **爆米花机-对话型**，`BOT_NAME` 与之保持一致用于 @识别；`/approval-*` 前缀指令即使漏检 @ 也会触发）
 - 其他群的消息、私聊消息一律跳过（留给爆米花机 project-management-robot 的正常对话能力），不回复、不记录
 - 定时播报通过审批群的**自定义机器人 Webhook**（`BOT_WEBHOOK_URL`）推送
 
@@ -19,9 +19,9 @@
 
 ## 二、飞书应用配置（共用应用，仅需补充权限/事件）
 
-1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:chat`、`contact:user.base:readonly`
+1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:message.p2p_msg:readonly`（回复轮询）、`contact:user.base:readonly`；`im:chat` 曾申请但后台未实际开通，勿依赖
 2. **事件订阅**：`im.message.receive_v1`（由 feishu-gateway 长连接接收）
-3. **审批群自定义机器人**：Webhook `https://open.feishu.cn/open-apis/bot/v2/hook/d91361fc-b824-4a15-a8a3-a85b4344afba`
+3. **审批群自定义机器人**：Webhook 完整地址存 `.env` 的 `BOT_WEBHOOK_URL`（勿写入文档/仓库）
 
 ## 三、多维表格字段约定
 
@@ -38,7 +38,7 @@
 | 完成时间 | 日期 | 转账提醒的宽限期起算点；本周通过统计 |
 | 发起时间 | 日期 | 本周新增统计、催办列表展示 |
 | 发起人 / 当前处理人 | 人员 | 列表展示 / 每日提醒 @ |
-| 申请编号 / 购买物资名称 / 总金额 / 项目 / 付款人 | 各类 | 列表与统计展示 |
+| 申请编号 / 购买物资名称 / 总金额 / 总金额-币种 / 项目 / 付款人 | 各类 | 列表与统计展示 |
 
 **「审批流程」过滤**：表中混有历史/测试流程（如「发票（测试不要提交)」），`APPROVAL_PROCESS_NAMES` 配置当前活跃流程 `💸【27赛季】千里采购申请/发票提交`，非活跃流程的记录一律静默。
 
@@ -60,7 +60,8 @@
 │         并按「项目」字段粗分类：各项目条数分布）
 │
 ├─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
-│    ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人（空则 @ 配置审批人）
+│    ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人
+│    （仅当全部待审批记录的处理人均为空时，才整体回落 @ 配置审批人）
 │
 └─ 每天 10:30（INVOICE_URGE_SCHEDULE，留空不启用）
      🧾 催发票私聊：「已通过」且完成时间满 INVOICE_URGE_GRACE_DAYS
@@ -94,7 +95,7 @@
 | 📄 未制单 | 已有发票但「报销单」为空（「无需报销」视为已处理） | 财务 / 群卡片 @财务 | 周一 18:00 周报；`/approval-urge 报销单` |
 | 💸 未转账 | 发票+报销单齐全、「是否转账」为空、完成时间超 3 个月 | 财务 / 群卡片 @财务 | 周一 18:00 周报；`/approval-urge 转账` |
 
-两条发送通道：**私聊** = 应用 IM API `sendTextToUser`（按发起人分组，一人一条汇总）；**群卡片** = 审批群自定义机器人 webhook（周报全三段 / 手动催办按需选段，全为空不发卡）。两条通道已于 2026-09-05 实发验证通过（见 DEVLOG v20）。
+两条发送通道：**私聊** = 应用 IM API `sendPostToUser` 富文本（按发起人分组，一人一条汇总；回执确认用 `sendTextToUser`）；**群卡片** = 审批群自定义机器人 webhook（周报全三段 / 手动催办按需选段，全为空不发卡）。两条通道已于 2026-09-05 实发验证通过（见 DEVLOG v20）。
 
 **未交发票私聊的状态机**（申请人回复经 p2p 会话消息轮询识别，每次私聊前执行）：
 
@@ -131,13 +132,13 @@ curl http://localhost:3002/api/health
 | GET | `/api/approvals/:id` | 审批详情 |
 | POST | `/api/bot/test-broadcast` | 立即触发一次周播报（测试） |
 | POST | `/api/bot/test-reminder` | 立即触发一次每日提醒（测试） |
-| POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，body 传 `{"dryRun":true}` 只预览不发送） |
-| POST | `/api/bot/sync` | 立即执行一次全量对账 |
-| GET | `/api/bot/cron-status` | 定时任务状态 + 对账快照状态 |
+| POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，body 传 `{"dryRun":true}` 只预览不发送、不消费申请人回复、不改状态） |
+| GET | `/api/bot/cron-status` | 定时任务状态 + 下次执行时间 |
 | GET | `/api/bot/history` | 播报历史 |
 | POST | `/api/chat/command` | 指令转发端点（`{command, args}` → `{reply}`） |
+| POST | `/api/feishu/event` | feishu-gateway 事件转发入口（消息事件） |
 
-## 七、机器人指令（仅审批群，需 @爆米花机_财务型）
+## 七、机器人指令（仅审批群，需 @爆米花机-对话型）
 
 | 指令 | 说明 |
 |------|------|
@@ -145,7 +146,7 @@ curl http://localhost:3002/api/health
 | `/approval-list` | 查看所有申请（审批中在前） |
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
-| `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「发票催交播报」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
+| `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「今日已催」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
@@ -186,6 +187,7 @@ approval-bot/
 ├── scripts/inspect-bitable.js     # 多维表格结构/分布检查工具
 ├── scripts/dryrun-weekly.js       # 周报 dry-run 预览（不发送）
 ├── scripts/dryrun-invoice-urge.js # 催发票私聊 dry-run 预览（不发送）
+├── scripts/dryrun-urge-state.js   # 催发票本地状态检查/清理工具
 ├── feishu-permissions.json        # 飞书应用权限清单
 ├── push.js                        # 一键部署（git/SFTP + .env 上传）
 └── package.json
