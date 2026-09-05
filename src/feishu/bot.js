@@ -171,8 +171,6 @@ function invoiceStatusBadge(state) {
       ? `**[已催满${state.urgeCount}次]** `
       : `[已催${state.urgeCount}次] `;
   }
-  // 从未成功私聊过且最近一次发送失败（如 230013 可用范围拒绝）——周报提醒财务该人催不出去
-  if (state.lastUrgeError) return '**[私聊失败]** ';
   return '';
 }
 
