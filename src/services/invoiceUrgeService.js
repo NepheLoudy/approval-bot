@@ -209,15 +209,17 @@ async function runInvoiceUrge(options = {}) {
     for (const [openId, { name, records }] of byUser) {
       previews.push({ openId, name, text: buildInvoiceUrgeText(records), urgeCount: urgeStateStore.getRecord(records[0].record_id)?.urgeCount || 0 });
     }
-    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, statusCounts, replyStats, previews };
+    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, urgedRecords: urgeList, statusCounts, replyStats, previews };
   }
 
   let sent = 0;
   const failures = [];
+  const urgedRecords = []; // 本次实际私聊成功的记录（播报卡用）
   for (const [openId, { name, records }] of byUser) {
     try {
       const res = await sendTextToUser(openId, buildInvoiceUrgeText(records));
       sent++;
+      urgedRecords.push(...records);
 
       // 记录会话与批次，供回复轮询使用；发送响应自带 chat_id / create_time（毫秒）
       const recordIds = records.map((r) => r.record_id);
@@ -251,6 +253,7 @@ async function runInvoiceUrge(options = {}) {
     urgeCount: urgeList.length,
     users: byUser.size,
     sentCount: sent,
+    urgedRecords,
     statusCounts,
     replyStats,
     failures,

@@ -1,7 +1,8 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const invoiceUrgeService = require('./invoiceUrgeService');
-const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard } = require('../feishu/bot');
+const urgeStateStore = require('./urgeStateStore');
+const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildInvoiceUrgeReportCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -79,7 +80,7 @@ async function handleHelpCommand() {
     '  /approval-list    查看所有申请',
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
-    '  /approval-urge    手动催办 [发票|报销单|转账]，留空=全部',
+    '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
     '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账）',
@@ -142,66 +143,82 @@ async function handleStatusCommand() {
 }
 
 /**
- * 手动催办：/approval-urge [发票|报销单|转账]，留空=全部
+ * 手动催办：/approval-urge [发票|报销单|转账]，留空=发票私聊催交
  * 分支与催办通道一一对应（与定时任务同款能力，按需触发）：
- *   - 未开票   → 私聊发起人催交（同每天 10:30 的催发票私聊）
- *   - 未制单   → 群卡片播报未制单清单 @财务
- *   - 未转账   → 群卡片播报未转账清单 @财务
- * 回复文本为触发结果摘要；群卡片经审批群自定义机器人 webhook 直发。
+ *   - 发票（默认）→ 私聊发起人催交 + 群播「发票催交播报」卡片：本次催了哪些未开票记录
+ *     （单号超链接 + 状态徽标 + 未私聊汇总；申请人回复延期/无法提交自动识别）
+ *   - 报销单/转账 → 群卡片播报对应清单 @财务（该二分支的常规展示由周报承担，
+ *     手动仅在显式传参时播报）
+ * 回复文本为触发结果摘要。
  */
 const URGE_CATEGORIES = {
-  invoice: ['发票', '开票', 'invoice'],
+  invoice: ['发票', '开票', 'invoice', '全部', 'all'],
   form: ['报销单', '制单', 'form'],
   transfer: ['转账', 'transfer'],
 };
 
 async function handleUrgeCommand(args = []) {
   const raw = (args[0] || '').toLowerCase();
-  const want = { invoice: false, form: false, transfer: false };
-
-  if (!raw || raw === '全部' || raw === 'all') {
-    want.invoice = want.form = want.transfer = true;
-  } else {
+  let category = 'invoice'; // 留空默认：发票私聊催交
+  if (raw) {
+    category = null;
     for (const [key, aliases] of Object.entries(URGE_CATEGORIES)) {
-      if (aliases.includes(raw)) want[key] = true;
+      if (aliases.includes(raw)) { category = key; break; }
     }
-    if (!want.invoice && !want.form && !want.transfer) {
-      return `❌ 未知催办类别：${args[0]}\n用法：/approval-urge [发票|报销单|转账]，留空=全部`;
+    if (!category) {
+      return `❌ 未知催办类别：${args[0]}\n用法：/approval-urge [发票|报销单|转账]，留空=发票私聊催交`;
     }
   }
 
   const lines = ['🔔 手动催办完成：'];
+  const urgeStates = urgeStateStore.init(config.invoiceUrge.stateFile).allRecords();
 
-  // 未开票 → 私聊发起人（复用催发票私聊能力）
-  if (want.invoice) {
+  // 发票 → 私聊发起人（复用催发票私聊能力）+ 群播本次催交明细
+  if (category === 'invoice') {
     const r = await invoiceUrgeService.runInvoiceUrge();
-    lines.push(r.overdueCount
-      ? `🧾 未开票：已私聊 ${r.sentCount}/${r.users} 位发起人（超期 ${r.overdueCount} 笔）${r.failures?.length ? `，⚠️ ${r.failures.length} 人发送失败` : ''}`
-      : '🧾 未开票：✅ 无超期记录，未发送');
-  }
+    const skipped = r.statusCounts || {};
+    const skippedTotal = (skipped.deferred || 0) + (skipped.cannotSubmit || 0) + (skipped.escalated || 0);
 
-  // 未制单/未转账 → 群卡片 @财务（两段都为空则不刷卡片）
-  if (want.form || want.transfer) {
-    const { missingForm, missingTransfer } = await approvalService.getFinanceFollowUp();
-    const pickedForm = want.form ? missingForm : [];
-    const pickedTransfer = want.transfer ? missingTransfer : [];
-
-    if (pickedForm.length + pickedTransfer.length > 0) {
-      const card = buildUrgeCard({
-        missingForm: pickedForm,
-        missingTransfer: pickedTransfer,
-        mentionIds: config.reminder.mentionIds,
+    // 群播「发票催交播报」：说清楚刚才催了哪些（有实际私聊或存在状态记录才发卡）
+    if ((r.urgedRecords && r.urgedRecords.length) || skippedTotal > 0) {
+      const card = buildInvoiceUrgeReportCard({
+        urgedRecords: r.urgedRecords || [],
+        statusCounts: skipped,
+        urgeStates,
       });
       await sendMessage(card);
     }
-    if (want.form) {
-      lines.push(pickedForm.length ? `📄 未制单：已播报 ${pickedForm.length} 笔（群卡片 @财务）` : '📄 未制单：✅ 无待催办');
+
+    lines.push(
+      r.urgedRecords && r.urgedRecords.length
+        ? `🧾 未开票：已私聊 ${r.sentCount}/${r.users} 位发起人（${r.urgedRecords.length} 条，明细见群卡片）${r.failures?.length ? `，⚠️ ${r.failures.length} 人发送失败` : ''}`
+        : '🧾 未开票：✅ 本次无私聊（无超期或均处于延期/无法提交/已催满状态）'
+    );
+    if (skippedTotal > 0) {
+      lines.push(`⏸ 未私聊：延期中 ${skipped.deferred || 0} · 无法提交 ${skipped.cannotSubmit || 0} · 已催满 ${skipped.escalated || 0}`);
     }
-    if (want.transfer) {
-      lines.push(pickedTransfer.length ? `💸 未转账：已播报 ${pickedTransfer.length} 笔（群卡片 @财务）` : '💸 未转账：✅ 无待催办');
-    }
+    return lines.join('\n');
   }
 
+  // 报销单/转账 → 群卡片 @财务（周报同款清单，显式触发才播）
+  const { missingForm, missingTransfer } = await approvalService.getFinanceFollowUp();
+  const pickedForm = category === 'form' ? missingForm : [];
+  const pickedTransfer = category === 'transfer' ? missingTransfer : [];
+
+  if (pickedForm.length + pickedTransfer.length > 0) {
+    const card = buildUrgeCard({
+      missingForm: pickedForm,
+      missingTransfer: pickedTransfer,
+      mentionIds: config.reminder.mentionIds,
+    });
+    await sendMessage(card);
+  }
+  if (category === 'form') {
+    lines.push(pickedForm.length ? `📄 未制单：已播报 ${pickedForm.length} 笔（群卡片 @财务；常规展示见每周一 18:00 周报）` : '📄 未制单：✅ 无待催办');
+  }
+  if (category === 'transfer') {
+    lines.push(pickedTransfer.length ? `💸 未转账：已播报 ${pickedTransfer.length} 笔（群卡片 @财务；常规展示见每周一 18:00 周报）` : '💸 未转账：✅ 无待催办');
+  }
   return lines.join('\n');
 }
 

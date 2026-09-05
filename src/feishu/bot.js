@@ -336,8 +336,50 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
 }
 
 /**
- * 手动催办卡片（/approval-urge 触发）：按需渲染未制单/未转账段，@财务
- * （未开票不进此卡片——该分支的催办能力是私聊发起人，不走群播报）
+ * 发票催交播报卡片（/approval-urge 触发私聊后展示）：说清楚刚才私聊催了哪些未开票记录
+ * 单号带审批链接、行带私聊状态徽标；未私聊部分（延期/无法提交/已催满）只做数字汇总。
+ * （未制单/未转账的列表播报属于周报职能，不进本卡。）
+ * @param {object} params { urgedRecords, statusCounts, date, urgeStates }
+ */
+function buildInvoiceUrgeReportCard({ urgedRecords = [], statusCounts = {}, date, urgeStates } = {}) {
+  const elements = [];
+
+  elements.push({
+    tag: 'markdown',
+    content:
+      `**🔔 发票催交播报**（${date || new Date().toLocaleDateString('zh-CN')}）\n` +
+      `本次已私聊催交 **${urgedRecords.length} 条**未开票记录，申请人回复将自动识别` +
+      `（「延期」3 天内免催 /「无法提交」停催转财务）：`,
+  });
+
+  renderSection(elements, {
+    title: '🧾 未开票（本次已私聊催交）',
+    records: urgedRecords,
+    timeField: '完成时间',
+    urgeStates,
+  });
+
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content:
+      `⏸ 未私聊 ${statusCounts.deferred + statusCounts.cannotSubmit + statusCounts.escalated} 条：` +
+      `延期中 ${statusCounts.deferred || 0} · 无法提交 ${statusCounts.cannotSubmit || 0} · 已催满 ${statusCounts.escalated || 0}（等待财务跟进）`,
+  });
+
+  return {
+    config: { wide_screen_mode: true },
+    elements,
+    header: {
+      template: urgedRecords.length ? 'orange' : 'green',
+      title: { content: '🔔 发票催交播报', tag: 'plain_text' },
+    },
+  };
+}
+
+/**
+ * 手动催办卡片（/approval-urge 报销单|转账 显式触发）：按需渲染未制单/未转账段，@财务
+ * （未开票不进此卡片——该分支的催办能力是私聊发起人，播报走 buildInvoiceUrgeReportCard）
  * @param {object} params { missingForm, missingTransfer, mentionIds }
  */
 function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = [] } = {}) {
@@ -428,6 +470,7 @@ module.exports = {
   buildWeeklyFinanceCard,
   buildReminderCard,
   buildUrgeCard,
+  buildInvoiceUrgeReportCard,
   buildInvoiceUrgeText,
   // 字段格式化工具（供其他服务复用）
   fmtTime,
