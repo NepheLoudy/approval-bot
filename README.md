@@ -108,6 +108,7 @@ curl http://localhost:3002/api/health
 | `/approval-list` | 查看所有申请（审批中在前） |
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
+| `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，留空=全部。未开票→私聊发起人催交；未制单/未转账→群卡片 @财务 |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 

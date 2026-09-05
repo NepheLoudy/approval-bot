@@ -305,6 +305,45 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
 }
 
 /**
+ * 手动催办卡片（/approval-urge 触发）：按需渲染未制单/未转账段，@财务
+ * （未开票不进此卡片——该分支的催办能力是私聊发起人，不走群播报）
+ * @param {object} params { missingForm, missingTransfer, mentionIds }
+ */
+function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = [] } = {}) {
+  const elements = [];
+  const mentionLine = (mentionIds || []).filter(Boolean).map(buildAtTag).join(' ');
+  elements.push({
+    tag: 'markdown',
+    content: `**🔔 财务催办**（手动触发 ${new Date().toLocaleDateString('zh-CN')}）\n${mentionLine}${mentionLine ? '\n' : ''}以下为「已通过」申请的待催办环节：`,
+  });
+
+  renderSection(elements, {
+    title: '📄 未制单（需做报销单）',
+    records: missingForm,
+    timeField: '发起时间',
+    note: '（已有发票，报销单未填写）',
+  });
+
+  renderSection(elements, {
+    title: '💸 未转账（需跟进转账）',
+    records: missingTransfer,
+    timeField: '完成时间',
+    note: '（完成时间已超 3 个月）',
+  });
+
+  const hasPendingWork = missingForm.length + missingTransfer.length > 0;
+
+  return {
+    config: { wide_screen_mode: true },
+    elements,
+    header: {
+      template: hasPendingWork ? 'orange' : 'green',
+      title: { content: '🔔 财务催办', tag: 'plain_text' },
+    },
+  };
+}
+
+/**
  * 催发票私聊文案（发给申请发起人，一人一条可含多笔）
  * 「申请编号」是 Url 字段，其 link 即审批实例链接（打开审批详情页，非表格链接）；
  * 无链接时退化为纯文字条目。
@@ -357,6 +396,7 @@ module.exports = {
   sendCardToChat,
   buildWeeklyFinanceCard,
   buildReminderCard,
+  buildUrgeCard,
   buildInvoiceUrgeText,
   // 字段格式化工具（供其他服务复用）
   fmtTime,

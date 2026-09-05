@@ -1,6 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
-const { sendTextToChat, replyTextMessage } = require('../feishu/bot');
+const invoiceUrgeService = require('./invoiceUrgeService');
+const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -78,6 +79,7 @@ async function handleHelpCommand() {
     '  /approval-list    查看所有申请',
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
+    '  /approval-urge    手动催办 [发票|报销单|转账]，留空=全部',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
     '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账）',
@@ -139,11 +141,76 @@ async function handleStatusCommand() {
   ].join('\n');
 }
 
+/**
+ * 手动催办：/approval-urge [发票|报销单|转账]，留空=全部
+ * 分支与催办通道一一对应（与定时任务同款能力，按需触发）：
+ *   - 未开票   → 私聊发起人催交（同每天 10:30 的催发票私聊）
+ *   - 未制单   → 群卡片播报未制单清单 @财务
+ *   - 未转账   → 群卡片播报未转账清单 @财务
+ * 回复文本为触发结果摘要；群卡片经审批群自定义机器人 webhook 直发。
+ */
+const URGE_CATEGORIES = {
+  invoice: ['发票', '开票', 'invoice'],
+  form: ['报销单', '制单', 'form'],
+  transfer: ['转账', 'transfer'],
+};
+
+async function handleUrgeCommand(args = []) {
+  const raw = (args[0] || '').toLowerCase();
+  const want = { invoice: false, form: false, transfer: false };
+
+  if (!raw || raw === '全部' || raw === 'all') {
+    want.invoice = want.form = want.transfer = true;
+  } else {
+    for (const [key, aliases] of Object.entries(URGE_CATEGORIES)) {
+      if (aliases.includes(raw)) want[key] = true;
+    }
+    if (!want.invoice && !want.form && !want.transfer) {
+      return `❌ 未知催办类别：${args[0]}\n用法：/approval-urge [发票|报销单|转账]，留空=全部`;
+    }
+  }
+
+  const lines = ['🔔 手动催办完成：'];
+
+  // 未开票 → 私聊发起人（复用催发票私聊能力）
+  if (want.invoice) {
+    const r = await invoiceUrgeService.runInvoiceUrge();
+    lines.push(r.overdueCount
+      ? `🧾 未开票：已私聊 ${r.sentCount}/${r.users} 位发起人（超期 ${r.overdueCount} 笔）${r.failures?.length ? `，⚠️ ${r.failures.length} 人发送失败` : ''}`
+      : '🧾 未开票：✅ 无超期记录，未发送');
+  }
+
+  // 未制单/未转账 → 群卡片 @财务（两段都为空则不刷卡片）
+  if (want.form || want.transfer) {
+    const { missingForm, missingTransfer } = await approvalService.getFinanceFollowUp();
+    const pickedForm = want.form ? missingForm : [];
+    const pickedTransfer = want.transfer ? missingTransfer : [];
+
+    if (pickedForm.length + pickedTransfer.length > 0) {
+      const card = buildUrgeCard({
+        missingForm: pickedForm,
+        missingTransfer: pickedTransfer,
+        mentionIds: config.reminder.mentionIds,
+      });
+      await sendMessage(card);
+    }
+    if (want.form) {
+      lines.push(pickedForm.length ? `📄 未制单：已播报 ${pickedForm.length} 笔（群卡片 @财务）` : '📄 未制单：✅ 无待催办');
+    }
+    if (want.transfer) {
+      lines.push(pickedTransfer.length ? `💸 未转账：已播报 ${pickedTransfer.length} 笔（群卡片 @财务）` : '💸 未转账：✅ 无待催办');
+    }
+  }
+
+  return lines.join('\n');
+}
+
 const commandHandlers = {
   '/approval-help': handleHelpCommand,
   '/approval-list': handleListCommand,
   '/approval-pending': handlePendingCommand,
   '/approval-status': handleStatusCommand,
+  '/approval-urge': handleUrgeCommand,
 };
 
 /**
