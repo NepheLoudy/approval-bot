@@ -189,3 +189,10 @@
 - `src/config.js`：提醒 @ 回落变量 `HE_YUNJIE_OPEN_ID`/`ZHANG_GUOHAO_OPEN_ID` → `REMINDER_FALLBACK_OPEN_ID_1/2`（本地与 NAS `.env` 已随批同步改名，行为不变：留空回落 `DAILY_REMINDER_MENTION_IDS` 配置）
 - README 移除硬编码审批群号与人名（群 id 只存 .env）；DEVLOG 历史条目人名最小替换（角色称谓，内容不变）
 - 无功能变更；`.env.example` 键名同步
+
+### v31 · 2026-09-11 · 随本提交落地 · fix
+
+**全仓审计 debug 批：飞书 API 客户端加超时 + 静默积压文件可配**
+
+- `requestAPI` 与 tenant_access_token 获取加 15s AbortSignal 超时 + 非 JSON 响应保护——此前网络挂起会把 cron 无限挂住，催发票私聊的互斥锁永不释放（之后每天 skip 'already_running' 直到重启）
+- quietHours 积压文件支持 QUIET_BACKLOG_FILE 挪出项目目录；`.env` 已配 /home/qianli/approval-bot-data/（目录已存在，与催发票状态文件同目录），SFTP 部署清目录不再丢积压

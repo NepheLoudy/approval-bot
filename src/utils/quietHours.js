@@ -19,7 +19,8 @@ const path = require('path');
 // 含 dryRun）——操作者明确要求立即执行。
 // ============================================================
 
-const BACKLOG_FILE = path.join(__dirname, '..', '..', '.quiet-backlog.json');
+// 可用 QUIET_BACKLOG_FILE 挪到项目目录外（SFTP 部署会清空项目目录，部署即丢积压）
+const BACKLOG_FILE = process.env.QUIET_BACKLOG_FILE || path.join(__dirname, '..', '..', '.quiet-backlog.json');
 const TZ_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Shanghai 无夏令时，固定 UTC+8
 const MAX_ATTEMPTS = 3;
 const FLUSH_ROUNDS = 10;

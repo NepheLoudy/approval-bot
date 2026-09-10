@@ -20,6 +20,7 @@ async function getTenantAccessToken() {
 
   const res = await fetch(`${BASE_URL}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       app_id: config.feishu.appId,
@@ -51,6 +52,8 @@ async function requestAPI(method, path, body) {
 
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
+    // 无超时的 fetch 挂起会拖死定时任务（如催发票互斥锁永不释放），15s 强制超时
+    signal: AbortSignal.timeout(15000),
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
@@ -58,7 +61,11 @@ async function requestAPI(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  return res.json();
+  try {
+    return await res.json();
+  } catch (err) {
+    throw new Error(`飞书 API 返回非 JSON 响应 (HTTP ${res.status}): ${path}`);
+  }
 }
 
 module.exports = {
