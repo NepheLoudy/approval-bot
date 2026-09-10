@@ -80,7 +80,7 @@ module.exports = {
     mentionIds: parseArrayConfig(process.env.DAILY_REMINDER_MENTION_IDS).length > 0
       ? parseArrayConfig(process.env.DAILY_REMINDER_MENTION_IDS)
       : parseArrayConfig(
-          [process.env.HE_YUNJIE_OPEN_ID, process.env.ZHANG_GUOHAO_OPEN_ID]
+          [process.env.REMINDER_FALLBACK_OPEN_ID_1, process.env.REMINDER_FALLBACK_OPEN_ID_2]
             .filter(Boolean)
             .join(',')
         ),

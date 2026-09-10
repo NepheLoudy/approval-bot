@@ -10,7 +10,7 @@
 **催发票私聊改富文本：审批入口超链接文本简化为「项目名+金额」**
 - 私聊从纯文本（text）升级为富文本（post）：纯文本不渲染 markdown 链接，升级后超链接可点击；地址仍是「申请编号」自带的审批实例链接，展示文本简化为「项目名 + 金额」（无项目回落物资名称，再回落申请编号），行尾保留 编号/完成时间。
 - 新增 `sendPostToUser`（msg_type=post，沿用 230013 可用范围提示）与 `buildInvoiceUrgePost`/`previewInvoiceUrgePost`；`buildInvoiceUrgeText`（纯文本版）移除。回复轮询不受影响（post 发送响应同样返回 chat_id/create_time）。
-- 实测：dry-run 预览（如 `[步兵机器人 541.13 CNY](applink…)`）+ 真实 post 发送（何云杰，带测试标记）均通过。
+- 实测：dry-run 预览（如 `[步兵机器人 541.13 CNY](applink…)`）+ 真实 post 发送（财务负责人，带测试标记）均通过。
 
 ## 阶段九 · 补交发票双栏判断（2026-09-05）
 
@@ -71,7 +71,7 @@
 
 ### v20 · 2026-09-05 · docs+verify（随本提交落地，无独立哈希）
 **三条催办链路确认（两条通道实发验证）+ README 链路一览表**
-- 私聊通道实发验证：以「催发票私聊」真实文案（带【链路测试】标记）发往财务负责人（HE_YUNJIE_OPEN_ID），IM API 投递成功——`sendTextToUser` 权限与链路首次实测打通。
+- 私聊通道实发验证：以「催发票私聊」真实文案（带【链路测试】标记）发往财务负责人（REMINDER_FALLBACK_OPEN_ID_1），IM API 投递成功——`sendTextToUser` 权限与链路首次实测打通。
 - 群卡片通道实发验证：真实周报渲染卡片（含 @标记、三段催办、按项目分布）加测试标记后经 webhook 实发成功——近期生产日志里周报只有 dry-run 记录，真实发送路径借此补验。
 - 生产日志核查：每日提醒定时链路多次正常执行（无审批中即跳过）；error log 中 PayloadTooLargeError 栈为历史残留（文件 mtime 2026-09-04 00:50，早于当天 2mb 修复部署），非现存问题。
 - README 第四节新增「三条催办链路一览」表：分支判定条件、催办对象/通道、触发时机一表收敛。
@@ -181,3 +181,11 @@
 - 豁免：人工接口（`/api/broadcast`、urge/reminder 手动触发、dryRun）不受限。
 - 其他：`getCronStatus` 附 `quietHours` 状态；.gitignore/.env.example 同步；README §四 补静默说明；顶层 AGENTS.md 新增「晚间静默」规则段。
 - 同批补：README §九 项目结构树补 `src/utils/quietHours.js`（例行维护扫描发现结构树漏登记新文件）。
+
+### v30 · 2026-09-11 · 随本提交落地 · chore
+
+**隐私整改（代码与文档零人名/群号）+ 提醒回落变量名通用化**
+
+- `src/config.js`：提醒 @ 回落变量 `HE_YUNJIE_OPEN_ID`/`ZHANG_GUOHAO_OPEN_ID` → `REMINDER_FALLBACK_OPEN_ID_1/2`（本地与 NAS `.env` 已随批同步改名，行为不变：留空回落 `DAILY_REMINDER_MENTION_IDS` 配置）
+- README 移除硬编码审批群号与人名（群 id 只存 .env）；DEVLOG 历史条目人名最小替换（角色称谓，内容不变）
+- 无功能变更；`.env.example` 键名同步
