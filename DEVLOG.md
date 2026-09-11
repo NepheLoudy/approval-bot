@@ -196,3 +196,10 @@
 
 - `requestAPI` 与 tenant_access_token 获取加 15s AbortSignal 超时 + 非 JSON 响应保护——此前网络挂起会把 cron 无限挂住，催发票私聊的互斥锁永不释放（之后每天 skip 'already_running' 直到重启）
 - quietHours 积压文件支持 QUIET_BACKLOG_FILE 挪出项目目录；`.env` 已配 /home/qianli/approval-bot-data/（目录已存在，与催发票状态文件同目录），SFTP 部署清目录不再丢积压
+
+### v32 · 2026-09-11 · 0728e21 · feat
+
+**定制窗口 GET /api/approval/policy（顶层「机器人后端定制窗口」规则首批落地）**
+
+- 只读全景：审批流程名/状态映射（APPROVAL_PROCESS_NAMES/STATUS）、审批人白名单（APPROVERS）、催发票参数（INVOICE_URGE_*）、提醒与 cron 配置、审批群 chatId。
+- 只读窗口；催办等行为的修改仍走 .env + push。
