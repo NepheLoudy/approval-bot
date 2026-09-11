@@ -23,6 +23,20 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// ---------- 定制窗口（规则见顶层 AGENTS「机器人后端定制窗口」）：定制项全景只读 ----------
+
+app.get('/api/approval/policy', (req, res) => {
+  res.json({
+    bot: { name: config.bot.name, chatId: config.bot.chatId },
+    approvalProcesses: config.approvalProcesses,
+    approvalStatus: config.approvalStatus,
+    approvers: config.approvers,
+    invoiceUrge: config.invoiceUrge,
+    reminder: config.reminder,
+    cron: config.cron,
+  });
+});
+
 // ---------- 审批数据查询 ----------
 
 app.get('/api/approvals', async (req, res) => {
