@@ -128,6 +128,7 @@ curl http://localhost:3002/api/health
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查（含目标群 ID） |
+| GET | `/api/approval/policy` | 定制窗口：审批流程/审批人白名单/催办参数/定时任务全景（只读） |
 | GET | `/api/approvals` | 所有审批记录 |
 | GET | `/api/approvals/pending` | 审批中列表 |
 | GET | `/api/approvals/stats` | 审批统计 |
