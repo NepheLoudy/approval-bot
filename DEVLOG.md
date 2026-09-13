@@ -212,3 +212,10 @@
 - `.env.example` 补 `QUIET_BACKLOG_FILE` 键（v31 起 `.env` 已配，模板漏键）。
 - README API 表补 `GET /api/approval/policy` 定制窗口行（v32 上线时漏记）。
 - DEVLOG 哈希回填：v28（e0b0a29）/ v29（137e6fc）/ v30（6e38233）/ v31（1e8630f）；头部「当前最新」指针 v29 → v33。
+
+### v34 · 2026-09-13 · 随本提交落地 · feat
+
+**管理端点鉴权 + 部署前测试闸门（体系推荐 R2/R4）**
+
+- 新增 src/auth.js：/api/bot/test-* 触发端点需 X-API-Token（fail-closed）。运维台代理自动带头。
+- push.js 加部署前测试闸门：入口/服务语法检查（本仓暂无 stub 套件）。

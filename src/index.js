@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireApiToken } = require('./auth');
 const cors = require('cors');
 const config = require('./config');
 const { startEventSubscription } = require('./feishu/eventSubscription');
@@ -86,7 +87,7 @@ app.get('/api/approvals/:id', async (req, res) => {
 // ---------- 机器人管理接口 ----------
 
 // 手动触发一次周播报；body 传 { "dryRun": true } 时只构建卡片不发送（预览用）
-app.post('/api/bot/test-broadcast', async (req, res) => {
+app.post('/api/bot/test-broadcast', requireApiToken, async (req, res) => {
   try {
     const result = await runBroadcast({ dryRun: !!req.body?.dryRun });
     res.json({ success: true, result });
@@ -96,7 +97,7 @@ app.post('/api/bot/test-broadcast', async (req, res) => {
   }
 });
 
-app.post('/api/bot/test-reminder', async (req, res) => {
+app.post('/api/bot/test-reminder', requireApiToken, async (req, res) => {
   try {
     const result = await runReminder();
     res.json({ success: true, result });
@@ -107,7 +108,7 @@ app.post('/api/bot/test-reminder', async (req, res) => {
 });
 
 // 手动触发一次催发票私聊；body 传 { "dryRun": true } 时只构建私聊文案不发送（预览用）
-app.post('/api/bot/test-invoice-urge', async (req, res) => {
+app.post('/api/bot/test-invoice-urge', requireApiToken, async (req, res) => {
   try {
     const result = await runInvoiceUrgeOnce({ dryRun: !!req.body?.dryRun });
     res.json({ success: true, result });
