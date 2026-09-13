@@ -194,7 +194,7 @@ async function deployCode() {
 // npm install
 function npmInstall() {
   console.log('\n安装依赖...');
-  exec('cd ' + REMOTE_DIR + ' && npm install --production', () => uploadEnv());
+  exec('export PATH=/c/tools/node-v22.10.0-win-x64:$PATH; cd ' + REMOTE_DIR + ' && npm install --omit=dev', () => uploadEnv());
 }
 
 // ============ [3/4] 上传 .env ============
