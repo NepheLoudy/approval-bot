@@ -43,8 +43,10 @@ const commitMessage = process.argv[2] || 'update: 代码更新';
 const TAR_NAME = 'approval-bot-deploy.tar.gz';
 // 打包时用相对文件名 + cwd 指向临时目录，避免 Windows GNU tar 把 "C:" 当远程主机
 const TAR_LOCAL = path.join(os.tmpdir(), TAR_NAME);
-const TAR_REMOTE = '/tmp/' + TAR_NAME;
-const REMOTE_DIR = '/opt/approval-bot';
+const TAR_REMOTE = '/c/qianli/' + TAR_NAME;   // bash 路径（小电脑 git-bash）
+const TAR_REMOTE_WIN = 'C:/qianli/' + TAR_NAME; // SFTP 用 Windows 路径
+const REMOTE_DIR = '/c/qianli/opt/approval-bot';      // bash 路径
+const REMOTE_DIR_WIN = 'C:/qianli/opt/approval-bot';  // SFTP 用 Windows 路径
 const GIT_REMOTE = 'https://github.com/NepheLoudy/approval-bot.git';
 const PM2_NAME = 'approval-bot';
 
@@ -88,7 +90,7 @@ if (gitPushed) {
 }
 
 // ============ 连接 NAS ============
-console.log('\n========== [2/4] 连接 NAS 部署代码 ==========');
+console.log('\n========== [2/4] 连接 小电脑 部署代码 ==========');
 
 const conn = new Client();
 
@@ -173,8 +175,8 @@ async function deployCode() {
         conn.end();
         process.exit(1);
       }
-      console.log('上传代码包到 NAS...');
-      sftp.fastPut(TAR_LOCAL, TAR_REMOTE, (err2) => {
+      console.log('上传代码包到 小电脑...');
+      sftp.fastPut(TAR_LOCAL, TAR_REMOTE_WIN, (err2) => {
         if (err2) {
           console.error('代码上传失败:', err2.message);
           conn.end();
@@ -204,13 +206,13 @@ function uploadEnv() {
       conn.end();
       process.exit(1);
     }
-    sftp.fastPut(path.join(__dirname, '.env'), REMOTE_DIR + '/.env', (err2) => {
+    sftp.fastPut(path.join(__dirname, '.env'), REMOTE_DIR_WIN + '/.env', (err2) => {
       if (err2) {
         console.error('.env 上传失败:', err2.message);
         conn.end();
         process.exit(1);
       }
-      console.log('✓ .env 已上传到 NAS（含飞书密钥，仅存于 NAS）');
+      console.log('✓ .env 已上传到 小电脑（含飞书密钥）');
       restart();
     });
   });

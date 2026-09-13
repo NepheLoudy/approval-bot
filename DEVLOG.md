@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v33**（2026-09-12，随本提交落地）。
+当前最新：**v35**（2026-09-14，随本提交落地）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -213,9 +213,18 @@
 - README API 表补 `GET /api/approval/policy` 定制窗口行（v32 上线时漏记）。
 - DEVLOG 哈希回填：v28（e0b0a29）/ v29（137e6fc）/ v30（6e38233）/ v31（1e8630f）；头部「当前最新」指针 v29 → v33。
 
-### v34 · 2026-09-13 · 随本提交落地 · feat
+### v34 · 2026-09-13 · cabe8d7 · feat
 
 **管理端点鉴权 + 部署前测试闸门（体系推荐 R2/R4）**
 
 - 新增 src/auth.js：/api/bot/test-* 触发端点需 X-API-Token（fail-closed）。运维台代理自动带头。
 - push.js 加部署前测试闸门：入口/服务语法检查（本仓暂无 stub 套件）。
+
+### v35 · 2026-09-14 · 随本提交落地 · chore
+
+**部署目标切换小电脑（Windows）——push.js 路径双轨**
+
+- 路由器割接完成：机器人运行环境整体从 NAS 迁至小电脑 DESKTOP-FE1MIGI（192.168.31.57，Windows + PortableGit + node v22.10.0 + pm2，ssh 默认 shell = git-bash，开机自启 pm2 resurrect）。
+- push.js 目标段双轨：exec 走 MSYS 路径（/c/qianli/...），SFTP 走 Windows 路径（C:/qianli/...）；REMOTE_DIR/TAR_REMOTE 改指小电脑。
+- 本仓 .env 的 NAS_* 四值改指小电脑（192.168.31.57:22 mechax）——运维台 /api/nas/api 代理随之自动指向。
+- NAS 转入备件位：保留 copyparty/快照/备份职能，校园网保活脚本已部署于 NAS（每分钟 cron + @reboot，v35 前置迁移项）。
