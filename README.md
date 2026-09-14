@@ -84,7 +84,7 @@
 - 周报各分支按时间倒序（最久未处理的排最前），单段超过 15 条折叠
 - 周报抬头 @财务负责人（`DAILY_REMINDER_MENTION_IDS`，回落到 `.env` 中配置的两个回落审批人 open_id）
 - 催发票私聊走应用 IM API（`receive_id_type=open_id`），一人一条汇总名下全部超期记录；发起人为空的记录跳过
-- 私聊状态（催次数/延期/无法提交）持久化在 `INVOICE_URGE_STATE_FILE` 指向的 JSON 文件；NAS 的 SFTP 部署会清空项目目录，**该文件必须放项目目录之外**（本地默认 `data/urge-state.json`）
+- 私聊状态（催次数/延期/无法提交）持久化在 `INVOICE_URGE_STATE_FILE` 指向的 JSON 文件；部署目标的 SFTP 部署会清空项目目录，**该文件必须放项目目录之外**（本地默认 `data/urge-state.json`）
 - 周报/催办卡片里的申请编号均为超链接（指向审批实例详情页）；未交发票行按状态带徽标：`[无法提交]` / `[已延期至M-D]` / `[已催N次]`（加粗为需财务重点跟进）
 
 ### 三条催办链路一览
@@ -153,18 +153,19 @@ curl http://localhost:3002/api/health
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
-## 八、部署到 NAS
+## 八、部署到部署目标（小电脑）
 
-### 一键部署（push.js，密钥存 .env 的 NAS_*）
+### 一键部署（push.js，密钥存 .env 的 NAS_*；NAS_* 为历史命名，语义=部署目标）
 ```bash
 npm run push
 ```
-git push（失败自动降级 SFTP 直传）→ NAS `/opt/approval-bot` 同步代码 → 单独上传 `.env` → `pm2 restart approval-bot`。
+git push（失败自动降级 SFTP 直传）→ 部署目标 `/opt/approval-bot` 同步代码 → 单独上传 `.env` → `pm2 restart approval-bot`。
 
 ### 检查部署状态
 ```bash
-ssh -p 8500 qianli@10.253.33.233 "pm2 logs approval-bot --lines 30"
+ssh mechax@192.168.31.57 "pm2 logs approval-bot --lines 30"
 ```
+（2026-09-14 起部署目标=小电脑 DESKTOP-FE1MIGI 192.168.31.57:22；旧 NAS `qianli@10.253.33.233:8500` 已停用）
 
 ## 九、项目结构
 
