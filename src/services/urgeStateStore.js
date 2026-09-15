@@ -7,7 +7,7 @@ const path = require('path');
 // 记录维度（record_id → 状态）：
 //   urgeCount    私聊已触发次数（满 maxTimes 升级财务，停止私聊）
 //   snoozeUntil  延期截止毫秒时间戳（申请延期后 N 天内不再私聊）
-//   status       none | deferred(延期中) | cannot_submit(无法提交) | escalated(已催满)
+//   status       none | deferred(延期中) | cannot_submit(无法提交) | escalated(已催满) | resigned(发起人已退队，通讯录校验)
 //   lastUrgeAt   最近一次私聊时间
 // 用户维度（open_id → 会话）：
 //   chatId             p2p 会话 ID（发私聊时从响应取，用于轮询回复）

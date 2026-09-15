@@ -182,10 +182,11 @@ function fmtNoMarkdown(fields, recordId) {
   return link ? `[${no}](${link})` : no;
 }
 
-/** 催发票状态徽标（无法提交 / 延期中 / 已催次数），供周报展示给财务 */
+/** 催发票状态徽标（无法提交 / 已退队 / 延期中 / 已催次数），供周报展示给财务 */
 function invoiceStatusBadge(state) {
   if (!state) return '';
   if (state.status === 'cannot_submit') return '**[无法提交]** ';
+  if (state.status === 'resigned') return '**[发起人已退队]** ';
   if (state.status === 'deferred' && (state.snoozeUntil || 0) > Date.now()) {
     return `**[已延期至 ${fmtDayShort(state.snoozeUntil)}]** `;
   }
@@ -365,8 +366,8 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
 /**
  * 今日已催播报卡片（每日私聊催交后独立播报，与周报能力分开）：
  *   1. 今日已私聊催交的未开票明细（单号超链接 + 状态徽标）
- *   2. ⚠️ 需财务关注：多次催交仍无票 / 回复得知无法提交 的记录（重点提醒段）
- *   3. 未私聊数字汇总（延期中/无法提交/已催满）
+ *   2. ⚠️ 需财务关注：多次催交仍无票 / 回复得知无法提交 / 发起人已退队 的记录（重点提醒段）
+ *   3. 未私聊数字汇总（延期中/无法提交/已催满/已退队）
  * @param {object} params { urgedRecords, attention, statusCounts, date, urgeStates }
  *   attention: [{ record, reasons: ['无法提交','已催2次',...] }]
  */
@@ -405,11 +406,12 @@ function buildTodayUrgedCard({ urgedRecords = [], attention = [], statusCounts =
   const deferred = statusCounts.deferred || 0;
   const cannotSubmit = statusCounts.cannotSubmit || 0;
   const escalated = statusCounts.escalated || 0;
+  const resigned = statusCounts.resigned || 0;
   elements.push({
     tag: 'markdown',
     content:
-      `⏸ 今日未私聊 ${deferred + cannotSubmit + escalated} 条：` +
-      `延期中 ${deferred} · 无法提交 ${cannotSubmit} · 已催满 ${escalated}`,
+      `⏸ 今日未私聊 ${deferred + cannotSubmit + escalated + resigned} 条：` +
+      `延期中 ${deferred} · 无法提交 ${cannotSubmit} · 已催满 ${escalated} · 已退队 ${resigned}`,
   });
 
   return {

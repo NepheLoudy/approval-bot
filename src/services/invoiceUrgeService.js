@@ -1,19 +1,24 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
+const contacts = require('../feishu/contacts');
 const { requestAPI } = require('../feishu/client');
 const { sendTextToUser, sendPostToUser, buildInvoiceUrgePost, previewInvoiceUrgePost, buildTodayUrgedCard, sendMessage, getUsers } = require('../feishu/bot');
 
 // ============================================================
 // 催发票私聊（有状态版）
 //
-// 每次执行两步：
+// 每次执行三步：
 //   [1] 轮询回复：对最近一次私聊过的用户，拉 p2p 会话消息列表
 //       （IM API，不经网关事件链路），识别「申请延期 / 无法提交」：
 //         - 延期/推迟 → 该批记录 deferDays 天内不再私聊
 //         - 无法提交  → 该批记录停止私聊，状态呈报周报给财务
-//   [2] 私聊催交：过滤后仍需催的记录按发起人分组私聊，
-//         - 延期中(snoozeUntil 未到) / 无法提交 / 已催满 maxTimes 次 → 跳过
+//   [2] 通讯录兜底：私聊前拉全租户通讯录（feishu/contacts）校验发起人有效性，
+//         - 发起人已离职/停用 → 标记 resigned 停止私聊，呈报财务（避免必然失败的发送）；
+//           发起人重新入队 → 自动恢复催办
+//         - 校验失败 fail-open：本轮不校验，按原名单继续
+//   [3] 私聊催交：过滤后仍需催的记录按发起人分组私聊，
+//         - 延期中(snoozeUntil 未到) / 无法提交 / 已退队 / 已催满 maxTimes 次 → 跳过
 //         - 发送后 urgeCount+1，满 maxTimes 次标记 escalated（升级财务）
 // 状态持久化在 urgeStateStore（JSON 文件，pm2 重启不丢）。
 // ============================================================
@@ -192,23 +197,70 @@ async function runInvoiceUrgeInner(options = {}) {
   const now = Date.now();
   const maxTimes = config.invoiceUrge.maxTimes;
 
-  // 状态过滤：延期中 / 无法提交 / 已催满 N 次 的记录跳过
+  // 状态过滤：延期中 / 无法提交 / 已催满 N 次 的记录跳过；
+  // 已退队(resigned)记录单独收集——本轮重新过通讯录校验，发起人回队可自动恢复催办
   const urgeList = [];
-  const statusCounts = { deferred: 0, cannotSubmit: 0, escalated: 0 };
+  const resignedRecords = [];
+  const statusCounts = { deferred: 0, cannotSubmit: 0, escalated: 0, resigned: 0 };
   for (const record of overdue) {
     const st = urgeStateStore.getRecord(record.record_id);
     if (st) {
       if (st.status === 'cannot_submit') { statusCounts.cannotSubmit++; continue; }
       if (st.status === 'deferred' && (st.snoozeUntil || 0) > now) { statusCounts.deferred++; continue; }
       if ((st.urgeCount || 0) >= maxTimes) { statusCounts.escalated++; continue; }
+      if (st.status === 'resigned') { resignedRecords.push(record); continue; }
     }
     urgeList.push(record);
   }
 
+  // 通讯录兜底：私聊前确认发起人有效性（离职/停用成员私聊必然失败，如 230013），
+  // 不在通讯录的候选标记 resigned 停止私聊并呈报财务；校验失败 fail-open（本轮不校验按原名单继续）。
+  // dry-run 只预览不改状态（mark 静默化）
+  let contactsChecked = false;
+  let recoveredCount = 0;
+  if (urgeList.length || resignedRecords.length) {
+    try {
+      const activeIds = await contacts.listActiveOpenIds();
+      contactsChecked = true;
+      const mark = (id, patch) => { if (!options.dryRun) urgeStateStore.updateRecord(id, patch); };
+      const stillUrged = [];
+      for (const record of urgeList) {
+        const uid = getUsers(record.fields?.['发起人'])[0]?.id || '';
+        if (uid && !activeIds.has(uid)) {
+          mark(record.record_id, { status: 'resigned', statusNote: '发起人已退队（通讯录校验），停止私聊' });
+          statusCounts.resigned++;
+        } else {
+          stillUrged.push(record);
+        }
+      }
+      urgeList.length = 0;
+      urgeList.push(...stillUrged);
+      const stillResigned = [];
+      for (const record of resignedRecords) {
+        const uid = getUsers(record.fields?.['发起人'])[0]?.id || '';
+        if (uid && activeIds.has(uid)) {
+          mark(record.record_id, { status: 'none', statusNote: '发起人重新入队，恢复催办' });
+          urgeList.push(record);
+          recoveredCount++;
+        } else {
+          stillResigned.push(record);
+        }
+      }
+      statusCounts.resigned += stillResigned.length;
+      if (statusCounts.resigned || recoveredCount) {
+        console.log(`[催发票] 通讯录校验: ${statusCounts.resigned} 条记录发起人已退队（停止私聊）` +
+          (recoveredCount ? `，${recoveredCount} 条发起人重新入队恢复催办` : ''));
+      }
+    } catch (err) {
+      console.warn(`[催发票] 通讯录校验失败（本轮不校验人员有效性，按原名单继续）: ${err.message}`);
+      statusCounts.resigned += resignedRecords.length;
+    }
+  }
+
   if (!urgeList.length) {
     urgeStateStore.prune(overdue.map((r) => r.record_id));
-    console.log(`[催发票] 无需私聊（超期 ${overdue.length} 条: 延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 其余 ${overdue.length - statusCounts.deferred - statusCounts.cannotSubmit - statusCounts.escalated} 条不在私聊范围），跳过`);
-    return { sent: false, overdueCount: overdue.length, users: 0, overdueRecords: overdue, urgedRecords: [], statusCounts, replyStats };
+    console.log(`[催发票] 无需私聊（超期 ${overdue.length} 条: 延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned} / 其余 ${overdue.length - statusCounts.deferred - statusCounts.cannotSubmit - statusCounts.escalated - statusCounts.resigned} 条不在私聊范围），跳过`);
+    return { sent: false, overdueCount: overdue.length, users: 0, overdueRecords: overdue, urgedRecords: [], statusCounts, contactsChecked, replyStats };
   }
 
   // 按发起人分组：open_id -> { name, records[] }
@@ -228,7 +280,7 @@ async function runInvoiceUrgeInner(options = {}) {
   }
 
   console.log(`[催发票] 超期 ${overdue.length} 条，本次私聊 ${urgeList.length} 条，涉及 ${byUser.size} 位发起人` +
-    `（延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated}${skippedNoUser ? ` / 无发起人跳过 ${skippedNoUser}` : ''}）`);
+    `（延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned}${skippedNoUser ? ` / 无发起人跳过 ${skippedNoUser}` : ''}）`);
 
   // dry-run：只构建私聊文案与状态预览，不发送、不改状态
   if (options.dryRun) {
@@ -236,7 +288,7 @@ async function runInvoiceUrgeInner(options = {}) {
     for (const [openId, { name, records }] of byUser) {
       previews.push({ openId, name, text: previewInvoiceUrgePost(buildInvoiceUrgePost(records)), urgeCount: urgeStateStore.getRecord(records[0].record_id)?.urgeCount || 0 });
     }
-    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, overdueRecords: overdue, urgedRecords: urgeList, statusCounts, replyStats, previews };
+    return { dryRun: true, overdueCount: overdue.length, users: previews.length, urgeCount: urgeList.length, overdueRecords: overdue, urgedRecords: urgeList, statusCounts, contactsChecked, replyStats, previews };
   }
 
   let sent = 0;
@@ -285,6 +337,7 @@ async function runInvoiceUrgeInner(options = {}) {
     overdueRecords: overdue,
     urgedRecords,
     statusCounts,
+    contactsChecked,
     replyStats,
     failures,
   };
@@ -293,7 +346,7 @@ async function runInvoiceUrgeInner(options = {}) {
 /**
  * 「今日已催」群播报（每日私聊催交后独立播报，与周报能力分开）：
  *   - 今日已私聊明细 + 未私聊汇总
- *   - ⚠️ 需财务关注：多次催交仍无票（urgeCount ≥ 2）/ 回复得知无法提交 的记录
+ *   - ⚠️ 需财务关注：多次催交仍无票（urgeCount ≥ 2）/ 回复得知无法提交 / 发起人已退队 的记录
  * 无催交且无重点关注时不发卡（避免空播刷屏）。dry-run 不发送。
  */
 async function announceTodayUrged(result) {
@@ -310,6 +363,7 @@ async function announceTodayUrged(result) {
     if (!st) continue;
     const reasons = [];
     if (st.status === 'cannot_submit') reasons.push('无法提交');
+    if (st.status === 'resigned') reasons.push('发起人已退队');
     if ((st.urgeCount || 0) >= maxTimes) reasons.push(`已催满${st.urgeCount}次`);
     else if ((st.urgeCount || 0) >= 2) reasons.push(`已催${st.urgeCount}次`);
     if (reasons.length) attention.push({ record, reasons });

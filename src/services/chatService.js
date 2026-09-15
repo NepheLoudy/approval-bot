@@ -175,7 +175,7 @@ async function handleUrgeCommand(args = []) {
   if (category === 'invoice') {
     const r = await invoiceUrgeService.runInvoiceUrge();
     const skipped = r.statusCounts || {};
-    const skippedTotal = (skipped.deferred || 0) + (skipped.cannotSubmit || 0) + (skipped.escalated || 0);
+    const skippedTotal = (skipped.deferred || 0) + (skipped.cannotSubmit || 0) + (skipped.escalated || 0) + (skipped.resigned || 0);
 
     // 群播「今日已催」：今日催交明细 + 需财务关注（多次催交/无法提交）+ 未私聊汇总
     const announce = await invoiceUrgeService.announceTodayUrged(r);
@@ -186,7 +186,7 @@ async function handleUrgeCommand(args = []) {
         : '🧾 未开票：✅ 本次无私聊（无超期或均处于延期/无法提交/已催满状态）'
     );
     if (skippedTotal > 0) {
-      lines.push(`⏸ 未私聊：延期中 ${skipped.deferred || 0} · 无法提交 ${skipped.cannotSubmit || 0} · 已催满 ${skipped.escalated || 0}`);
+      lines.push(`⏸ 未私聊：延期中 ${skipped.deferred || 0} · 无法提交 ${skipped.cannotSubmit || 0} · 已催满 ${skipped.escalated || 0} · 已退队 ${skipped.resigned || 0}`);
     }
     if (!announce.announced && announce.reason === 'empty') {
       lines.push('（今日无催交且无重点关注，未发播报卡）');
