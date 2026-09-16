@@ -2,8 +2,9 @@ const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
 const contacts = require('../feishu/contacts');
+const bot = require('../feishu/bot');
 const { requestAPI } = require('../feishu/client');
-const { sendTextToUser, sendPostToUser, buildInvoiceUrgePost, previewInvoiceUrgePost, buildTodayUrgedCard, sendMessage, getUsers } = require('../feishu/bot');
+const { buildInvoiceUrgePost, previewInvoiceUrgePost, buildTodayUrgedCard, getUsers } = require('../feishu/bot');
 
 // ============================================================
 // 催发票私聊（有状态版）
@@ -18,7 +19,8 @@ const { sendTextToUser, sendPostToUser, buildInvoiceUrgePost, previewInvoiceUrge
 //           发起人重新入队 → 自动恢复催办
 //         - 校验失败 fail-open：本轮不校验，按原名单继续
 //   [3] 私聊催交：过滤后仍需催的记录按发起人分组私聊，
-//         - 延期中(snoozeUntil 未到) / 无法提交 / 已退队 / 已催满 maxTimes 次 → 跳过
+//         - 延期中(snoozeUntil 未到) / 无法提交 / 已退队 / 已催满 maxTimes 次 / 距上次私聊
+//           不满 intervalDays 天（间隔闸）→ 跳过
 //         - 发送后 urgeCount+1，满 maxTimes 次标记 escalated（升级财务）
 // 状态持久化在 urgeStateStore（JSON 文件，pm2 重启不丢）。
 // ============================================================
@@ -41,9 +43,65 @@ function isFromUser(message) {
 
 function parseReply(text) {
   const t = String(text || '');
-  if (/无法提交|不能提交|没法提交|交不了|无法提供|开不了|开不出|没法开/.test(t)) return 'cannot_submit';
-  if (/延期|推迟/.test(t)) return 'deferred';
+  if (/无法提交|不能提交|没法提交|交不了|无法提供|办不了|开不了|开不出|没法开/.test(t)) return 'cannot_submit';
+  if (/延期|推迟|还没|未开|没开|过几天|晚点|稍后|改天|下周/.test(t)) return 'deferred';
   return null;
+}
+
+const CN_DIGIT = { 零: 0, 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+/** 中文数字段 → 数值：支持十进制组合（十=10、十五=15、二十=20、二十五=25）；阿拉伯数字直读；不认识返回 NaN */
+function cnNumToInt(raw) {
+  const s = String(raw || '').trim();
+  if (/^[0-9]+$/.test(s)) return parseInt(s, 10);
+  const tenIdx = s.indexOf('十');
+  if (tenIdx >= 0) {
+    const tens = tenIdx > 0 ? CN_DIGIT[s[tenIdx - 1]] : 1;
+    const ones = tenIdx + 1 < s.length ? CN_DIGIT[s[tenIdx + 1]] : 0;
+    if (tens === undefined || ones === undefined) return NaN;
+    return tens * 10 + ones;
+  }
+  if (s.length === 1 && s in CN_DIGIT) return CN_DIGIT[s];
+  return NaN;
+}
+
+const clampDeferDays = (n) => Math.min(Math.max(n, 1), 60); // 钳制 1~60 天，防「延期999天」
+
+/**
+ * 从回复中解析延期时长（天）；无可解析时长返回 0（回落 deferDays 默认值）。支持：
+ *   - 阿拉伯/中文数字（含十进制组合）：「延期3天」「十五天」「二十天」「二十五天」
+ *   - 周/星期（含「零」天余数）：「延期一周」「两周零三天」= 17
+ *   - 「日」同「天」：「延期7日」= 7；「半周」= 3 天；「下周…」= 7 天
+ */
+function parseDeferDays(text) {
+  const t = String(text || '');
+  const NUM = '([0-9]+|[零一二两三四五六七八九十]+)';
+  // 1) 周(+零N天) 组合：「两周」「两周零三天」「1周零2天」
+  const week = t.match(new RegExp(`${NUM}\\s*(?:周|星期)\\s*(?:零\\s*${NUM}\\s*(?:天|日))?`));
+  if (week) {
+    const w = cnNumToInt(week[1]);
+    const extra = week[2] ? cnNumToInt(week[2]) : 0;
+    const days = (Number.isNaN(w) ? 0 : w * 7) + (Number.isNaN(extra) ? 0 : extra);
+    if (days > 0) return clampDeferDays(days);
+  }
+  // 2) 半周 → 3 天
+  if (/半\s*(?:周|星期)/.test(t)) return clampDeferDays(3);
+  // 3) 天/日：「延期3天」「延期7日」「十五天」
+  const day = t.match(new RegExp(`${NUM}\\s*(?:天|日)`));
+  if (day) {
+    const n = cnNumToInt(day[1]);
+    if (!Number.isNaN(n) && n > 0) return clampDeferDays(n);
+  }
+  // 4) 「下周…」→ 默认顺延一周
+  if (/下周/.test(t)) return clampDeferDays(7);
+  return 0;
+}
+
+const TZ_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Shanghai 无夏令时，固定 UTC+8（同 utils/quietHours 口径）
+
+/** 上海日历日序号：+8h 后按 UTC 天数取整（间隔闸/当日判定用，不受运行时区与当天时刻差影响） */
+function shanghaiDayIndex(ms) {
+  return Math.floor((ms + TZ_OFFSET_MS) / 86400000);
 }
 
 function fmtDay(ms) {
@@ -91,17 +149,19 @@ async function pollAllReplies(options = {}) {
       if (!recordIds.length) continue;
 
       if (kind === 'deferred') {
-        const snoozeUntil = Date.now() + config.invoiceUrge.deferDays * 24 * 60 * 60 * 1000;
+        // 延期时长：回复里带天数/周数（如「延期7天」「延期两周」）按回复，否则回落 deferDays 默认值
+        const days = parseDeferDays(text) || config.invoiceUrge.deferDays;
+        const snoozeUntil = Date.now() + days * 24 * 60 * 60 * 1000;
         stats.deferred++;
         if (!options.silent) {
           for (const id of recordIds) {
-            urgeStateStore.updateRecord(id, { status: 'deferred', snoozeUntil, statusNote: '发起人申请延期' });
+            urgeStateStore.updateRecord(id, { status: 'deferred', snoozeUntil, statusNote: `发起人申请延期${days}天` });
           }
           // 回执发送失败只记日志，不允许中断整个轮询（否则当天所有人的催办都会不发）
           try {
-            await sendTextToUser(
+            await bot.sendTextToUser(
               openId,
-              `✅ 已收到您的延期申请：名下 ${recordIds.length} 笔超期发票 ${config.invoiceUrge.deferDays} 天内（至 ${fmtDay(snoozeUntil)}）不再私聊提醒，请尽快安排提交。`
+              `✅ 已收到您的延期申请：名下 ${recordIds.length} 笔超期发票 ${days} 天内（至 ${fmtDay(snoozeUntil)}）不再私聊提醒，请尽快安排提交。`
             );
           } catch (err) {
             console.warn(`[催发票] 延期回执发送失败 ${openId}: ${err.message}`);
@@ -111,10 +171,11 @@ async function pollAllReplies(options = {}) {
         stats.cannotSubmit++;
         if (!options.silent) {
           for (const id of recordIds) {
-            urgeStateStore.updateRecord(id, { status: 'cannot_submit', statusNote: '发起人称无法提交' });
+            // statusChangedAt：当日状态变化标记，「今日已催」卡在无私聊日也要为它播报（财务可见）
+            urgeStateStore.updateRecord(id, { status: 'cannot_submit', statusNote: '发起人称无法提交', statusChangedAt: Date.now() });
           }
           try {
-            await sendTextToUser(
+            await bot.sendTextToUser(
               openId,
               `✅ 已记录：${recordIds.length} 笔发票标记为「无法提交」，将呈报财务跟进，后续不再私聊提醒。`
             );
@@ -198,10 +259,12 @@ async function runInvoiceUrgeInner(options = {}) {
   const maxTimes = config.invoiceUrge.maxTimes;
 
   // 状态过滤：延期中 / 无法提交 / 已催满 N 次 的记录跳过；
-  // 已退队(resigned)记录单独收集——本轮重新过通讯录校验，发起人回队可自动恢复催办
+  // 已退队(resigned)记录单独收集——本轮重新过通讯录校验，发起人回队可自动恢复催办；
+  // 间隔闸：定时任务每天跑（回复轮询每日不漏），但同一笔距上次私聊不满 intervalDays 天不重复催
   const urgeList = [];
   const resignedRecords = [];
-  const statusCounts = { deferred: 0, cannotSubmit: 0, escalated: 0, resigned: 0 };
+  const statusCounts = { deferred: 0, cannotSubmit: 0, escalated: 0, resigned: 0, intervalHold: 0 };
+  const intervalDays = config.invoiceUrge.intervalDays;
   for (const record of overdue) {
     const st = urgeStateStore.getRecord(record.record_id);
     if (st) {
@@ -209,6 +272,9 @@ async function runInvoiceUrgeInner(options = {}) {
       if (st.status === 'deferred' && (st.snoozeUntil || 0) > now) { statusCounts.deferred++; continue; }
       if ((st.urgeCount || 0) >= maxTimes) { statusCounts.escalated++; continue; }
       if (st.status === 'resigned') { resignedRecords.push(record); continue; }
+      // 间隔闸按上海日历日比较：精确毫秒差因「now 在拉表后取、lastUrgeAt 在发送后打点」
+      // 恒小于 N*24h，会把「2天一催」实际拖成 3 天；按日历日第 0 天催、第 2 天可再催
+      if ((st.urgeCount || 0) > 0 && st.lastUrgeAt && shanghaiDayIndex(now) - shanghaiDayIndex(st.lastUrgeAt) < intervalDays) { statusCounts.intervalHold++; continue; }
     }
     urgeList.push(record);
   }
@@ -227,7 +293,7 @@ async function runInvoiceUrgeInner(options = {}) {
       for (const record of urgeList) {
         const uid = getUsers(record.fields?.['发起人'])[0]?.id || '';
         if (uid && !activeIds.has(uid)) {
-          mark(record.record_id, { status: 'resigned', statusNote: '发起人已退队（通讯录校验），停止私聊' });
+          mark(record.record_id, { status: 'resigned', statusNote: '发起人已退队（通讯录校验），停止私聊', statusChangedAt: Date.now() });
           statusCounts.resigned++;
         } else {
           stillUrged.push(record);
@@ -259,7 +325,7 @@ async function runInvoiceUrgeInner(options = {}) {
 
   if (!urgeList.length) {
     urgeStateStore.prune(overdue.map((r) => r.record_id));
-    console.log(`[催发票] 无需私聊（超期 ${overdue.length} 条: 延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned} / 其余 ${overdue.length - statusCounts.deferred - statusCounts.cannotSubmit - statusCounts.escalated - statusCounts.resigned} 条不在私聊范围），跳过`);
+    console.log(`[催发票] 无需私聊（超期 ${overdue.length} 条: 延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned} / 间隔未到 ${statusCounts.intervalHold} / 其余 ${overdue.length - statusCounts.deferred - statusCounts.cannotSubmit - statusCounts.escalated - statusCounts.resigned - statusCounts.intervalHold} 条不在私聊范围），跳过`);
     return { sent: false, overdueCount: overdue.length, users: 0, overdueRecords: overdue, urgedRecords: [], statusCounts, contactsChecked, replyStats };
   }
 
@@ -280,7 +346,7 @@ async function runInvoiceUrgeInner(options = {}) {
   }
 
   console.log(`[催发票] 超期 ${overdue.length} 条，本次私聊 ${urgeList.length} 条，涉及 ${byUser.size} 位发起人` +
-    `（延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned}${skippedNoUser ? ` / 无发起人跳过 ${skippedNoUser}` : ''}）`);
+    `（延期中 ${statusCounts.deferred} / 无法提交 ${statusCounts.cannotSubmit} / 已催满 ${statusCounts.escalated} / 已退队 ${statusCounts.resigned} / 间隔未到 ${statusCounts.intervalHold}${skippedNoUser ? ` / 无发起人跳过 ${skippedNoUser}` : ''}）`);
 
   // dry-run：只构建私聊文案与状态预览，不发送、不改状态
   if (options.dryRun) {
@@ -298,7 +364,7 @@ async function runInvoiceUrgeInner(options = {}) {
     try {
       // 富文本 post：超链接展示为「项目名+金额」，点击直达审批详情页
       const post = buildInvoiceUrgePost(records);
-      const res = await sendPostToUser(openId, post.title, post.rows);
+      const res = await bot.sendPostToUser(openId, post.title, post.rows);
       sent++;
       urgedRecords.push(...records);
 
@@ -347,7 +413,8 @@ async function runInvoiceUrgeInner(options = {}) {
  * 「今日已催」群播报（每日私聊催交后独立播报，与周报能力分开）：
  *   - 今日已私聊明细 + 未私聊汇总
  *   - ⚠️ 需财务关注：多次催交仍无票（urgeCount ≥ 2）/ 回复得知无法提交 / 发起人已退队 的记录
- * 无催交且无重点关注时不发卡（避免空播刷屏）。dry-run 不发送。
+ * 当天无私聊催交且无「当日状态发生变化」的关注项才不发卡（避免空播刷屏，同时保住
+ * 当日新增关注——用户当天回「无法提交」/新发现退队时财务看得到）。dry-run 不发送。
  */
 async function announceTodayUrged(result) {
   if (!result || result.dryRun) return { announced: false, reason: 'dry-run' };
@@ -356,7 +423,17 @@ async function announceTodayUrged(result) {
   const statusCounts = result.statusCounts || {};
   const maxTimes = config.invoiceUrge.maxTimes;
 
-  // 重点名单：全量超期名单里「多次催交仍无票」或「无法提交」的记录
+  // 间隔闸下并非每天实际催交：当天没催人且没有当日状态变化（statusChangedAt 为今天，
+  // 如回复「无法提交」/通讯录新发现退队）才跳过——否则财务当天看不到新增关注项
+  const now = Date.now();
+  const changedToday = (result.overdueRecords || []).some((record) => {
+    const st = urgeStateStore.getRecord(record.record_id);
+    return !!(st && st.statusChangedAt && shanghaiDayIndex(st.statusChangedAt) === shanghaiDayIndex(now));
+  });
+  if (!urgedRecords.length && !changedToday) {
+    console.log('[催发票] 今日无私聊催交且无当日状态变化，跳过「今日已催」播报');
+    return { announced: false, reason: 'no_urge_today' };
+  }
   const attention = [];
   for (const record of result.overdueRecords || []) {
     const st = urgeStateStore.getRecord(record.record_id);
@@ -369,11 +446,6 @@ async function announceTodayUrged(result) {
     if (reasons.length) attention.push({ record, reasons });
   }
 
-  if (!urgedRecords.length && !attention.length) {
-    console.log('[催发票] 今日无催交且无重点关注记录，跳过「今日已催」播报');
-    return { announced: false, reason: 'empty' };
-  }
-
   try {
     const card = buildTodayUrgedCard({
       urgedRecords,
@@ -381,7 +453,7 @@ async function announceTodayUrged(result) {
       statusCounts,
       urgeStates: urgeStateStore.allRecords(),
     });
-    await sendMessage(card);
+    await bot.sendMessage(card);
     console.log(`[催发票] 「今日已催」已播报：今日催交 ${urgedRecords.length} 条，需财务关注 ${attention.length} 条`);
     return { announced: true, attentionCount: attention.length };
   } catch (err) {
@@ -395,4 +467,5 @@ module.exports = {
   runInvoiceUrge,
   announceTodayUrged,
   parseReply,
+  parseDeferDays,
 };

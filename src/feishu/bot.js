@@ -20,6 +20,7 @@ async function sendToWebhook(webhookUrl, payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000), // 裸 fetch 无超时会卡死静默冲刷/定时任务链
   });
 
   const data = await res.json();
@@ -380,7 +381,7 @@ function buildTodayUrgedCard({ urgedRecords = [], attention = [], statusCounts =
     content:
       `**🔔 今日已催**（${date || new Date().toLocaleDateString('zh-CN')}）\n` +
       `今日已私聊催交 **${urgedRecords.length} 条**未开票记录，申请人回复将自动识别` +
-      `（「延期」3 天内免催 /「无法提交」停催转财务）：`,
+      `（「延期」可带时长，如「延期 7 天」「延期两周」，默认 ${config.invoiceUrge.deferDays} 天内免催 /「无法提交」停催转财务）：`,
   });
 
   renderSection(elements, {
@@ -407,11 +408,12 @@ function buildTodayUrgedCard({ urgedRecords = [], attention = [], statusCounts =
   const cannotSubmit = statusCounts.cannotSubmit || 0;
   const escalated = statusCounts.escalated || 0;
   const resigned = statusCounts.resigned || 0;
+  const intervalHold = statusCounts.intervalHold || 0;
   elements.push({
     tag: 'markdown',
     content:
-      `⏸ 今日未私聊 ${deferred + cannotSubmit + escalated + resigned} 条：` +
-      `延期中 ${deferred} · 无法提交 ${cannotSubmit} · 已催满 ${escalated} · 已退队 ${resigned}`,
+      `⏸ 今日未私聊 ${deferred + cannotSubmit + escalated + resigned + intervalHold} 条：` +
+      `延期中 ${deferred} · 无法提交 ${cannotSubmit} · 已催满 ${escalated} · 已退队 ${resigned} · 间隔未到 ${intervalHold}`,
   });
 
   return {
@@ -496,7 +498,9 @@ function buildInvoiceUrgePost(records) {
   });
 
   rows.push([{ tag: 'text', text: '' }]);
-  rows.push([{ tag: 'text', text: '请点击上方「项目名+金额」打开对应申请的审批详情页（审批界面，非表格），尽快补交发票；已线下递交的请忽略本提醒。' }]);
+  rows.push([{ tag: 'text', text: '请点击上方「项目名+金额」打开对应申请的审批详情页（审批界面，非表格），尽快补交发票；已线下递交或已补录的请忽略，补交后提醒会自动停止。' }]);
+  // 回复指引：轮询监听识别「延期/无法提交」（parseReply），告知通道才能收到回复
+  rows.push([{ tag: 'text', text: `如需更多时间，直接回复本消息「延期」（可带时长，如「延期 7 天」「延期两周」，默认顺延 ${config.invoiceUrge.deferDays} 天）；确实无法提供发票，回复「无法提交」，将转财务跟进并不再重复提醒。` }]);
 
   return { title: '🧾 发票催交提醒', rows };
 }
