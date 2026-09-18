@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v40**（2026-09-17，随本提交落地）。
+当前最新：**v41**（2026-09-19，随本提交落地）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -274,3 +274,10 @@
 - 「今日已催」卡头「延期 3 天内免催」改插值 deferDays + 可带时长表述（与 v39 私聊文案同口径）。
 - .env.example NAS 三键迁小电脑实值；cron 头注释注明「默认留空=不启用，注释时刻为现网配置值」。
 - 测试：stub-test-invoice-urge 扩到 parseDeferDays ×16 + 48h 边界 + 第 1 天 hold + 播报闸正反用例，全绿。
+
+### v41 · 2026-09-19 · 随本提交落地 · chore
+
+**npm test 与 push.js 闸门同源（R27）**
+
+- package.json `test` 由 `echo "Error: no test specified"` 占位符改为与 push.js 测试闸门完全相同的清单（`node --check src/index.js && node --check src/services/chatService.js && node scripts/test-invoice-urge.js`）——此前直接 `npm test` 得到误导输出，与 README「测试」节口径脱节（09-18 全量 debug 批观察项 R27）。
+- 纯元数据批，无行为改动；npm test 实跑验证全绿。
