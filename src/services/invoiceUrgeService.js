@@ -3,7 +3,7 @@ const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
 const contacts = require('../feishu/contacts');
 const bot = require('../feishu/bot');
-const { requestAPI } = require('../feishu/client');
+const client = require('../feishu/client');
 const { buildInvoiceUrgePost, previewInvoiceUrgePost, buildTodayUrgedCard, getUsers } = require('../feishu/bot');
 
 // ============================================================
@@ -194,23 +194,35 @@ async function pollAllReplies(options = {}) {
   return stats;
 }
 
-/** 会话消息列表（sort 按创建时间升序，客户端再按 lastReadTime 过滤） */
+/**
+ * 会话消息列表（sort 按创建时间升序，客户端再按 lastReadTime 过滤）。
+ * 2026-09-20 修复 230001：GET /im/v1/messages 的 start_time/end_time 查询参数是
+ * 【秒级】时间戳（响应体 create_time 才是毫秒）——此前把毫秒 lastReadTime 直接当
+ * start_time 传且不给 end_time，服务端视为「未来」起止倒挂，凡私聊催过的用户
+ * 回复轮询必报 230001（「延期/无法提交」永远识别不到）。客户端过滤仍用毫秒 since。
+ */
 async function listChatMessages(chatId, lastReadTime) {
-  // start_time 用毫秒下限兜底，避免错过边界消息；客户端仍按 lastReadTime 过滤
   const since = Math.max(0, Math.floor((lastReadTime || 0)));
   const query = new URLSearchParams({
     container_id_type: 'chat',
     container_id: chatId,
     sort_type: 'ByCreateTimeAsc',
     page_size: '50',
+    end_time: String(Math.floor(Date.now() / 1000)),
   });
-  if (since > 0) query.set('start_time', String(since));
+  if (since > 0) query.set('start_time', String(Math.floor(since / 1000)));
 
-  const res = await requestAPI('GET', `/im/v1/messages?${query.toString()}`);
-  if (res.code !== 0) {
-    throw new Error(`拉取会话消息失败: ${res.msg} (code: ${res.code})`);
-  }
-  const items = res.data?.items || [];
+  const items = [];
+  let pageToken = '';
+  do {
+    if (pageToken) query.set('page_token', pageToken);
+    const res = await client.requestAPI('GET', `/im/v1/messages?${query.toString()}`);
+    if (res.code !== 0) {
+      throw new Error(`拉取会话消息失败: ${res.msg} (code: ${res.code})`);
+    }
+    items.push(...((res.data && res.data.items) || []));
+    pageToken = (res.data && res.data.has_more && res.data.page_token) || '';
+  } while (pageToken);
   return items.filter((m) => (Number(m.create_time) || 0) > since);
 }
 
@@ -466,6 +478,7 @@ async function announceTodayUrged(result) {
 module.exports = {
   runInvoiceUrge,
   announceTodayUrged,
+  pollAllReplies,
   parseReply,
   parseDeferDays,
 };

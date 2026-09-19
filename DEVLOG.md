@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v41**（2026-09-19，随本提交落地）。
+当前最新：**v42**（2026-09-20，随本提交落地）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -281,3 +281,11 @@
 
 - package.json `test` 由 `echo "Error: no test specified"` 占位符改为与 push.js 测试闸门完全相同的清单（`node --check src/index.js && node --check src/services/chatService.js && node scripts/test-invoice-urge.js`）——此前直接 `npm test` 得到误导输出，与 README「测试」节口径脱节（09-18 全量 debug 批观察项 R27）。
 - 纯元数据批，无行为改动；npm test 实跑验证全绿。
+
+## v42 · 2026-09-20 · 随本提交落地 · fix
+
+**全量 debug 批：催发票回复轮询 230001 根因修复 + 分页补齐**
+
+- **P1 · 回复轮询 230001 根因修复**：`listChatMessages` 把毫秒 `lastReadTime` 直接当 `GET /im/v1/messages` 的 `start_time` 传且不传 `end_time`——该接口查询参数是**秒级**（响应体 `create_time` 才是毫秒），13 位毫秒被解释为「未来」，end 缺省小于 start → 230001。凡成功私聊催过一次的用户回复轮询必失败：用户回「延期/无法提交」永远不被识别，延期者被反复私聊到催满、`lastReadTime` 永不推进。现 `start_time=秒(since/1000)` + 显式 `end_time=秒(now)`，客户端毫秒过滤口径不变。此病自催发票私聊上线起存在（v40 修的是同模块另外三处，桩测试从未执行过该路径所以漏网）。
+- **分页补齐**：①会话消息拉取补 `has_more/page_token` 循环（原 page_size=50 一页，未读超 50 条时延期识别按天拖沓）；②`contacts.listActiveOpenIds` 部门列表补翻页（原单页 50，组织超 50 部门时漏人 → 误标 resigned 持久化停催且无法自愈）。
+- **桩测试 230001 回归锁**：`invoiceUrgeService` 改经 `client.requestAPI` 模块引用以便打桩；新增场景断言 start_time/end_time 均为 10 位秒级且 end≥start。全绿。

@@ -11,9 +11,18 @@ const { requestAPI } = require('./client');
 
 /** 活跃成员 open_id 集合（Set<open_id>；失败抛错） */
 async function listActiveOpenIds() {
-  const deptRes = await requestAPI('GET', '/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=true&page_size=50');
-  if (deptRes.code !== 0) throw new Error(`拉取部门失败: ${deptRes.msg} (${deptRes.code})`);
-  const deptIds = ['0', ...(deptRes.data?.items || []).map((d) => d.open_department_id)];
+  // 部门列表也要翻页（has_more/page_token）：组织超 50 个部门时单页拉取会漏人，
+  // 漏掉的部门成员被误判「离职」持久化停催且无法自动恢复（2026-09-20 审查发现）
+  const deptIds = ['0'];
+  let deptToken = '';
+  do {
+    const deptQuery = new URLSearchParams({ department_id_type: 'open_department_id', fetch_child: 'true', page_size: '50' });
+    if (deptToken) deptQuery.set('page_token', deptToken);
+    const deptRes = await requestAPI('GET', `/contact/v3/departments/0/children?${deptQuery.toString()}`);
+    if (deptRes.code !== 0) throw new Error(`拉取部门失败: ${deptRes.msg} (${deptRes.code})`);
+    for (const d of (deptRes.data?.items || [])) deptIds.push(d.open_department_id);
+    deptToken = deptRes.data?.has_more ? (deptRes.data.page_token || '') : '';
+  } while (deptToken);
 
   const active = new Set();
   for (const deptId of deptIds) {

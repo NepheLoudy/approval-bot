@@ -46,7 +46,7 @@ function mkRecord() {
 }
 
 async function main() {
-  const { runInvoiceUrge, parseReply, parseDeferDays, announceTodayUrged } = require('../src/services/invoiceUrgeService');
+  const { runInvoiceUrge, parseReply, parseDeferDays, announceTodayUrged, pollAllReplies } = require('../src/services/invoiceUrgeService');
 
   // ---------- 单元：parseReply（无法提交优先于延期） ----------
   assert.equal(parseReply('无法提交'), 'cannot_submit');
@@ -149,7 +149,35 @@ async function main() {
   assert.equal(ar.reason, 'no_urge_today');
   assert.equal(sentCards.length, 0, '静默日不发卡');
 
-  console.log('✅ 桩测试全部通过：parseReply ×10 / parseDeferDays ×16 / 间隔闸（含 48h 边界） / 计数升级 / 满上限跳过 / 今日已催播报闸');
+  // ---------- 行为：回复轮询的时间参数单位契约（230001 回归锁） ----------
+  // GET /im/v1/messages 的 start_time/end_time 是秒级；曾把毫秒 lastReadTime 直接传
+  // start_time 且缺 end_time → 230001，回复轮询整体失效（桩此前从未执行过该路径）
+  const client = require('../src/feishu/client');
+  const realRequestAPI = client.requestAPI;
+  const capturedUrls = [];
+  client.requestAPI = async (method, urlPath) => {
+    if (String(urlPath).startsWith('/im/v1/messages')) {
+      capturedUrls.push(new URL('https://open.feishu.cn' + urlPath));
+      return { code: 0, data: { items: [{
+        message_id: 'om_poll1', msg_type: 'text', create_time: String(Date.now()),
+        sender: { sender_type: 'user', id_type: 'open_id', id: 'ou_poll' },
+        body: { content: JSON.stringify({ text: '延期7天' }) },
+      }] } };
+    }
+    return realRequestAPI(method, urlPath);
+  };
+  urgeStateStore.updateUser('ou_poll', { chatId: 'oc_test', lastReadTime: Date.now() - 3600e3 });
+  const pollStats = await pollAllReplies({ silent: true });
+  assert.equal(capturedUrls.length, 1, '有会话用户触发一次会话拉取');
+  const stParam = capturedUrls[0].searchParams.get('start_time');
+  const etParam = capturedUrls[0].searchParams.get('end_time');
+  assert.ok(stParam && /^\d{10}$/.test(stParam), `start_time 必须秒级 10 位，实际 ${stParam}`);
+  assert.ok(etParam && /^\d{10}$/.test(etParam), `end_time 必须秒级 10 位，实际 ${etParam}`);
+  assert.ok(Number(etParam) >= Number(stParam), 'end_time 不得早于 start_time');
+  assert.equal(pollStats.users, 1, '轮询统计覆盖该用户');
+  client.requestAPI = realRequestAPI;
+
+  console.log('✅ 桩测试全部通过：parseReply ×10 / parseDeferDays ×16 / 间隔闸（含 48h 边界） / 计数升级 / 满上限跳过 / 今日已催播报闸 / 回复轮询秒级参数（230001 回归锁）');
 }
 
 main()
