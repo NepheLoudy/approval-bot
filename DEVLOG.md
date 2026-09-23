@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v42**（2026-09-20，随本提交落地）。
+当前最新：**v43**（2026-09-24，随本提交落地）。上一版 v42（230001 秒级回归锁批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -289,3 +289,13 @@
 - **P1 · 回复轮询 230001 根因修复**：`listChatMessages` 把毫秒 `lastReadTime` 直接当 `GET /im/v1/messages` 的 `start_time` 传且不传 `end_time`——该接口查询参数是**秒级**（响应体 `create_time` 才是毫秒），13 位毫秒被解释为「未来」，end 缺省小于 start → 230001。凡成功私聊催过一次的用户回复轮询必失败：用户回「延期/无法提交」永远不被识别，延期者被反复私聊到催满、`lastReadTime` 永不推进。现 `start_time=秒(since/1000)` + 显式 `end_time=秒(now)`，客户端毫秒过滤口径不变。此病自催发票私聊上线起存在（v40 修的是同模块另外三处，桩测试从未执行过该路径所以漏网）。
 - **分页补齐**：①会话消息拉取补 `has_more/page_token` 循环（原 page_size=50 一页，未读超 50 条时延期识别按天拖沓）；②`contacts.listActiveOpenIds` 部门列表补翻页（原单页 50，组织超 50 部门时漏人 → 误标 resigned 持久化停催且无法自愈）。
 - **桩测试 230001 回归锁**：`invoiceUrgeService` 改经 `client.requestAPI` 模块引用以便打桩；新增场景断言 start_time/end_time 均为 10 位秒级且 end≥start。全绿。
+
+### v43 · 2026-09-24 · 随本提交落地 · fix
+
+**事件端点 fail-closed + auth 废除 ?token=（全仓复查批，附 README 回填）**
+
+- 提交说明：fix: /api/feishu/event fail-closed（同 ticket-bot 口径）+ auth 废除 ?token=
+- src/index.js：/api/feishu/event 原 fail-open（token 未配置即跳过校验），补「未配置 FEISHU_VERIFICATION_TOKEN 一律 403 拒绝 im.message.receive_v1 帧」；本仓该端点仅调试用消息处理消费，现网 .env 已配 token，行为无实际变化。
+- src/auth.js：删除 req.query.token 回退（R10② 同口径，token 会进访问/代理日志）。
+- 随本提交入库：README 部署路径 /opt/ → /c/qianli/opt/（09-22 遗留文档批）。
+- 测试：node --check ×2 + 催发票桩全套通过。

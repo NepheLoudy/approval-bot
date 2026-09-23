@@ -160,6 +160,14 @@ app.post('/api/feishu/event', async (req, res) => {
     return res.status(403).json({ error: 'Invalid verification token' });
   }
 
+  // fail-closed（2026-09-24 安全复查批，同 ticket-bot 口径）：token 未配置时旧实现整段跳过校验
+  // （fail-open），伪造的消息帧可直达调试用消息处理。未配置 token 一律 403 拒绝消息事件帧；
+  // url_verification 握手不受影响
+  if (!config.feishuEvent.verificationToken && header?.event_type === 'im.message.receive_v1') {
+    console.error(`[HTTP回调] 未配置 FEISHU_VERIFICATION_TOKEN，拒绝 ${header?.event_type} 事件帧（fail-closed）`);
+    return res.status(403).json({ error: 'Verification token not configured; event frames rejected' });
+  }
+
   if (type === 'url_verification') {
     return res.json({ challenge });
   }

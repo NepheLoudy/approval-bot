@@ -170,7 +170,7 @@ curl http://localhost:3002/api/health
 ```bash
 npm run push
 ```
-git push（失败自动降级 SFTP 直传）→ 部署目标 `/opt/approval-bot` 同步代码 → 单独上传 `.env` → `pm2 restart approval-bot`。
+git push（失败自动降级 SFTP 直传）→ 部署目标 `/c/qianli/opt/approval-bot` 同步代码 → 单独上传 `.env` → `pm2 restart approval-bot`。
 
 ### 检查部署状态
 ```bash
