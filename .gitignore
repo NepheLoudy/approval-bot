@@ -28,3 +28,6 @@ data/
 
 # 发票 OCR 字段提取规则（运行时本地配置，经 /api/ocr/fields 热改，勿提交）
 .ocr-fields.local.json
+
+# 演练输出（drill-ocr-compat/drill-online 产物，跑完人工查看）
+.drill/
