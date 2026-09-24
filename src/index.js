@@ -8,13 +8,15 @@ const approvalService = require('./services/approvalService');
 const ocrService = require('./services/ocrService');
 const invoiceCollectService = require('./services/invoiceCollectService');
 const backfillService = require('./services/backfillService');
+const bot = require('./feishu/bot');
 const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
 
 app.use(cors());
-// 网关会转发完整事件体（表格事件含 before/after 全量字段，可能超 100kb），放宽 body 限制
-app.use(express.json({ limit: '2mb' }));
+// 网关会转发完整事件体（表格事件含 before/after 全量字段，可能超 100kb）+ OCR 转录
+// 端点直传 base64 图片（5MB 图 base64 后约 6.7MB），放宽 body 限制到 10mb
+app.use(express.json({ limit: '10mb' }));
 
 // ---------- 健康检查 ----------
 
@@ -174,9 +176,8 @@ app.post('/api/ocr/fields', requireApiToken, (req, res) => {
 // 写端点挂 X-API-Token（hub 转发带头，同运维台代理）
 
 app.post('/api/invoice/collect', requireApiToken, async (req, res) => {
-  if (!config.ocr.enabled) {
-    return res.status(503).json({ error: 'OCR 功能未启用（.env 配 OCR_ENABLED=false 关闭中）' });
-  }
+  // 注意：采集主通道是二维码/PDF 文本直读，不依赖 OCR——这里不做 OCR_ENABLED 一刀切，
+  // OCR 兜底不可用只影响拍照件（会走识别失败打回链路，队员可改发 PDF/二维码截图）
   const { openId, senderName, messageId, fileKey, msgType, fileName, type } = req.body || {};
   if (type && type !== 'invoice_image') {
     return res.status(400).json({ error: `未知转发类型: ${type}` });
@@ -192,6 +193,8 @@ app.post('/api/invoice/collect', requireApiToken, async (req, res) => {
     res.json({ success: true, ...result });
   } catch (err) {
     console.error('发票采集失败:', err);
+    // 服务端失败时队员侧必须有感知（hub 是 fire-and-forget 不会转达）
+    await bot.sendTextToUser(openId, `⚠️ 发票接收失败：${err.message}\n请重发一次；仍失败请直接联系财务人工登记。`).catch(() => {});
     res.status(500).json({ error: err.message });
   }
 });

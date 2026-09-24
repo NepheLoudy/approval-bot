@@ -117,6 +117,14 @@ async function backfillCollect(options = {}) {
 
         // 历史批次同步：审批记录「报销单」栏已有值 → 采集表批次=该值（不建批次表记录）
         const historyBatch = f['报销单'] ? String(f['报销单']) : '';
+        // 金额比对（与 collectFromMessage 同口径）：超容差标「金额不符」，不恒写「通过」（复查 P2-3）
+        let verifyStatus = '通过';
+        const applyAmount = typeof f['总金额'] === 'number' ? f['总金额'] : null;
+        const amountDiff = applyAmount !== null ? Math.round((fields.totalAmount - applyAmount) * 100) / 100 : null;
+        if (applyAmount !== null) {
+          const tol = Math.max(Math.abs(applyAmount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
+          if (Math.abs(amountDiff) > tol) verifyStatus = '金额不符';
+        }
         const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.${buffer.slice(0, 4).toString('latin1') === '%PDF' ? 'pdf' : 'jpg'}`).catch(() => null);
         await collectStore.createCollect({
           '发票号码': fields.invoiceNo,
@@ -132,10 +140,10 @@ async function backfillCollect(options = {}) {
           '提交人': (Array.isArray(f['发起人']) && f['发起人'][0]?.id) || 'backfill',
           ...(Array.isArray(f['发起人']) && f['发起人'][0]?.name ? { '提交人姓名': f['发起人'][0].name } : {}),
           '关联申请编号': applyNo,
-          ...(typeof f['总金额'] === 'number' ? { '申请金额': f['总金额'] } : {}),
-          ...(typeof f['总金额'] === 'number' ? { '金额差': Math.round((fields.totalAmount - f['总金额']) * 100) / 100 } : {}),
+          ...(applyAmount !== null ? { '申请金额': applyAmount } : {}),
+          ...(amountDiff !== null ? { '金额差': amountDiff } : {}),
           '识别通道': parsed.source === 'qrcode+ocr' ? 'qrcode+ocr' : parsed.source,
-          '校验状态': '通过',
+          '校验状态': verifyStatus,
           ...(historyBatch ? { '批次': historyBatch } : {}),
           ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
           '采集时间': Date.now(),

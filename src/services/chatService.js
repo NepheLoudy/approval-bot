@@ -283,10 +283,22 @@ async function handleBatchCommand(args = []) {
   if (statusMap[sub]) {
     if (!batchNo) return `❌ 用法：/approval-batch ${sub} <批次号>`;
     const r = await batchService.markBatch(batchNo, statusMap[sub].status);
-    return `✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`;
+    const lines = [`✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`];
+    if (r.returnedToPool) lines.push(`· ${r.returnedToPool} 张退回票已回票池，可重新拟批`);
+    return lines.join('\n');
   }
 
-  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] | status | submit/paid/reject <批次号>';
+  if (sub === 'regen') {
+    if (!batchNo) return '❌ 用法：/approval-batch regen <批次号>（重新生成打印 PDF/BOM 附件）';
+    const r = await batchService.regenerateBatchFiles(batchNo);
+    return [
+      `🔄 批次 ${r.batchNo} 附件已重新生成（${r.count} 张）：`,
+      r.pdfToken ? '· 🖨️ 打印件 PDF 已更新 → 报销批次表附件' : '· ⚠️ 打印件 PDF 生成失败（见日志）',
+      r.bomToken ? '· 📊 BOM 表已更新 → 报销批次表附件' : '· ⚠️ BOM 生成失败（见日志）',
+    ].join('\n');
+  }
+
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] | status | submit/paid/reject <批次号> | regen <批次号>';
 }
 
 /**

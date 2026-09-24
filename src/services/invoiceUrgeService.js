@@ -157,6 +157,7 @@ async function pollAllReplies(options = {}) {
             source: 'urge_reply',
           });
           if (r.action === 'collected') stats.collected++;
+          else if (r.action === 'ignored' || r.action === 'already_collected') stats.ignored++;
           else if (r.action === 'duplicated') stats.duplicated++;
           else stats.rejected++;
         } catch (err) {

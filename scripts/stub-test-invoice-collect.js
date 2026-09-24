@@ -51,6 +51,20 @@ bitableApi.updateRecord = async (tableId, recordId, fields) => {
   if (row) row.fields = { ...row.fields, ...fields };
   return { record_id: recordId, fields: fields || {} };
 };
+// 镜像回写成功路径（P1-4 修复：GET 走带 code 校验的 getRecord）
+bitableApi.getRecord = async (tableId, recordId) => {
+  const fields = approvalRows.get(recordId);
+  if (!fields) throw new Error('获取记录失败: RecordIdNotFound (code: 1254043)');
+  return { record_id: recordId, fields };
+};
+let mirrorWrites = [];
+const realUpdateRecord = bitableApi.updateRecord;
+bitableApi.updateRecord = async (tableId, recordId, fields) => {
+  if (tableId === config.bitable.approvalTableId && fields && '补交发票' in fields) {
+    mirrorWrites.push({ recordId, attachments: fields['补交发票'] });
+  }
+  return realUpdateRecord(tableId, recordId, fields);
+};
 bitableApi.listAllRecords = async (tableId) => {
   if (tableId === config.bitable.collectTableId) return collectRows;
   if (tableId === config.bitable.batchTableId) return batchRows;
@@ -125,6 +139,16 @@ async function main() {
   assert.equal(qrOld.fields.checkCode, '567890', 'QR 校验码取后6位');
 
   assert.equal(invoiceParser.parseQrPayload('hello,world').ok, false, '非发票 QR 如实报不识别');
+  // 任意二维码（微信码/付款码）不构成发票特征——不得触发打回（复查 P1-3）
+  const notInvoiceQr = invoiceParser.parseQrPayload('some,random,text,payload,123');
+  assert.equal(notInvoiceQr.ok, false);
+  assert.equal(notInvoiceQr.invoiceShape, false, '无发票数字段的 QR 不算发票形状');
+  const shapeQr = invoiceParser.parseQrPayload('01,045032000111,12345678,88.00,20260115');
+  assert.equal(shapeQr.invoiceShape, true, '含发票代码段 → 发票形状');
+
+  // 日期钳制：OCR 噪声「19 月」不得写入（复查 P2-6）
+  const badDate = invoiceParser.parseInvoiceText('发票号码:24312000000123456789\n开票日期：2026年19月01日\n价税合计(小写)¥10.00');
+  assert.equal(badDate.fields.issueDate, null, '非法月份不落库');
 
   // ---------- 单元：特征词（非发票图静默忽略的判定基础） ----------
   assert.equal(invoiceParser.looksLikeInvoiceText(shuziText), true);
@@ -182,18 +206,29 @@ async function main() {
   assert.equal(collectRows[0].fields['关联申请编号'], '202607160001');
   assert.ok(uploadedFiles[0].startsWith('invoice_'), '发票原件应转存附件');
   const mirrorText = sentTexts.map(s => s.text).join('\n');
+  assert.equal(mirrorWrites.length, 1, '镜像回写应写入审批表补交发票栏');
+  assert.equal(mirrorWrites[0].attachments.length, 1, '补交发票栏 append 新附件');
   assert.ok(mirrorText.includes('已同步到审批表补交发票栏'), '回执含镜像结果');
 
   // 镜像回写：采集时通过 requestAPI 写审批表补交发票栏——mock requestAPI 捕获
   // （上面流程里 requestAPI 未被 mock，走真实 fetch 会失败但被 catch——此处验证降级路径与回执文案）
   assert.ok(true);
 
-  // ---------- 链路：查重拦截（精确 + 近似） ----------
+  // ---------- 链路：查重拦截（精确 → 本人24h内静默 already_collected，复查 P2-2） ----------
   sentTexts.length = 0;
   const r2 = await svc.collectFromMessage({
     openId: 'ou_member1', messageId: 'om_2', fileKey: 'img_v2_2', msgType: 'image', source: 'private',
   });
-  assert.equal(r2.action, 'duplicated', '同发票号第二次提交必须拦截');
+  assert.equal(r2.action, 'already_collected', '本人 24h 内重复提交（双入口碰同一消息）静默不再回执');
+  assert.equal(sentTexts.filter(s => s.text.includes('疑似重复')).length, 0, '静默路径不发吓人的重复回执');
+
+  // ---------- 链路：近似查重（同日期同金额不同号 → 拦截，复查 P1-1 毫秒口径修复） ----------
+  sentTexts.length = 0;
+  ocrSegments = shuziText.split('\n').map(l => l.replace('24312000000123456789', '24312000000123458888')); // 号错位但日期金额同
+  const r2b = await svc.collectFromMessage({
+    openId: 'ou_member2', messageId: 'om_2b', fileKey: 'img_v2_2b', msgType: 'image', source: 'private',
+  });
+  assert.equal(r2b.action, 'duplicated', '三元组近似命中（日期毫秒比对）必须拦截');
   assert.ok(sentTexts.some(s => s.text.includes('疑似重复')));
 
   // ---------- 链路：非发票图静默忽略 ----------
@@ -215,6 +250,16 @@ async function main() {
   assert.deepEqual(r4.missing, ['issueDate']);
   assert.ok(sentTexts.some(s => s.text.includes('打回') && s.text.includes('开票日期')), '打回回执带缺失要素与重发指引');
 
+  // ---------- 链路：PDF 文件失败也必须打回（不静默丢票，复查 P1-2） ----------
+  sentTexts.length = 0;
+  client.downloadMessageResource = async () => Buffer.from('%PDF-broken');
+  const r4b = await svc.collectFromMessage({
+    openId: 'ou_member1', messageId: 'om_4b', fileKey: 'file_v2_4b', msgType: 'file', fileName: '发票.pdf', source: 'private',
+  });
+  assert.equal(r4b.action, 'rejected', 'PDF 识别失败走打回（文件消息多为发票，静默=丢票）');
+  assert.ok(sentTexts.length > 0, 'PDF 失败有回执');
+  client.downloadMessageResource = async () => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]); // 恢复图片桩
+
   // ---------- 链路：金额不符标记 ----------
   sentTexts.length = 0;
   ocrSegments = shuziText.split('\n').map(l => l.replace('24312000000123456789', '24312000000123457777').replace('120.50', '500.00'));
@@ -231,7 +276,10 @@ async function main() {
   });
   assert.equal(r5.action, 'collected');
   assert.equal(r5.verifyStatus, '金额不符', '名下唯一候选直接归但金额超容忍→金额不符');
-  assert.equal(collectRows[collectRows.length - 1].fields['校验状态'], '金额不符');
+  const r5row = collectRows[collectRows.length - 1];
+  assert.equal(r5row.fields['校验状态'], '金额不符');
+  assert.ok(typeof r5row.fields['金额差'] === 'number', '金额差落字段（两入口口径统一，复查 P2-10）');
+  assert.ok(Math.abs(r5row.fields['金额差'] - 379.50) < 0.01, `金额差 = 发票-申请（实际 ${r5row.fields['金额差']}）`);
 
   // ---------- 链路：催办口径并入采集表（getCollectedApplyNoSet / fail-open） ----------
   const nos = await approvalService.getCollectedApplyNoSet();
@@ -302,10 +350,12 @@ async function main() {
     assert.equal(bf.status, 200);
     assert.ok('scanned' in bf.json);
 
-    // OCR 503 开关
+    // OCR 503 开关只管 /api/ocr/*；采集主通道（QR/PDF）不依赖 OCR，不再被一刀切（复查修复）
     config.ocr.enabled = false;
-    const off = await send(port, 'POST', '/api/invoice/collect', { openId: 'ou_x', messageId: 'om', fileKey: 'k' }, authHeader);
-    assert.equal(off.status, 503);
+    const off = await send(port, 'POST', '/api/ocr/transcribe', { imageBase64: Buffer.from('x').toString('base64') }, authHeader);
+    assert.equal(off.status, 503, 'transcribe 纯 OCR 端点受开关');
+    const collectStillOn = await send(port, 'POST', '/api/invoice/collect', { openId: 'ou_member1', messageId: 'om_off', fileKey: 'img_off', msgType: 'image' }, authHeader);
+    assert.equal(collectStillOn.status, 200, '采集端点不受 OCR 开关一刀切');
     config.ocr.enabled = true;
   } finally {
     server.close();

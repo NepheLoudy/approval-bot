@@ -11,6 +11,7 @@
 const config = require('../config');
 const client = require('../feishu/client');
 const bot = require('../feishu/bot');
+const bitableApi = require('../feishu/bitable');
 const approvalService = require('./approvalService');
 const collectStore = require('./collectStore');
 const ocrService = require('./ocrService');
@@ -143,77 +144,90 @@ async function collectFromMessage(payload) {
 
   const f = result.fields;
 
-  // 4. 查重双闸
-  const dupExact = await collectStore.findByInvoiceNo(f.invoiceNo);
-  if (dupExact.length) {
-    const first = dupExact[0].fields;
-    const detail = `该发票号（尾号 ${String(f.invoiceNo).slice(-6)}）已由 ${first['提交人姓名'] || first['提交人'] || '其他队员'} 于 ${first['采集时间'] || '此前'} 提交过`;
-    await bot.sendTextToUser(openId, `❌ 发票未能收录：疑似重复提交\n· ${detail}（关联申请 ${first['关联申请编号'] || '?'}）\n· 若确认不是重复（拼单各交各的），请联系财务人工处理`).catch(() => {});
-    return { ok: false, action: 'duplicated', reason: 'duplicate', detail };
-  }
-  const dupSimilar = await collectStore.findBySimilarity({ issueDate: f.issueDate, totalAmount: f.totalAmount, sellerTaxNo: f.sellerTaxNo });
-  if (dupSimilar.length) {
-    await bot.sendTextToUser(openId, `❌ 发票未能收录：疑似重复提交\n· 存在开票日期与金额完全一致的已收发票（关联申请 ${(dupSimilar[0].fields['关联申请编号'] || '?')}），发票号尾号 ${String(f.invoiceNo).slice(-6)} vs ${String(dupSimilar[0].fields['发票号码'] || '?').slice(-6)}\n· 若确认不是重复，请联系财务人工处理`).catch(() => {});
-    return { ok: false, action: 'duplicated', reason: 'duplicate', detail: '三元组近似命中' };
-  }
-
-  // 5. 金额归类匹配（senderName 缺失时从匹配到的审批记录发起人反查）
-  const openRecords = await listOpenRecordsByOpenId(openId);
-  const { match, status: matchStatus, note: matchNote } = matchRecord(f.totalAmount, openRecords);
-  const resolvedName = senderName || (match && match.senderName) || '';
-
-  // 6. 金额比对 + 抬头校验 → 校验状态（优先级：金额不符 > 抬头存疑 > 匹配状态 > 通过）
-  let verifyStatus = matchStatus || '通过';
-  const notes = [];
-  if (match && match.amount !== null) {
-    const diff = Math.round((f.totalAmount - match.amount) * 100) / 100;
-    const tol = Math.max(Math.abs(match.amount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
-    if (Math.abs(diff) > tol) {
-      verifyStatus = '金额不符';
-      notes.push(`发票 ¥${f.totalAmount.toFixed(2)} vs 申请 ¥${match.amount.toFixed(2)}（差 ${diff.toFixed(2)}，超容忍 ±${tol.toFixed(2)}）`);
+  // 4. 查重双闸 + 落表整体按发票号加锁（并发两条入口同票时串行化，第二遍会命中查重——复查 P1-6）
+  const dupGuard = await withRecordLock(`inv_${f.invoiceNo}`, async () => {
+    const dupExact = await collectStore.findByInvoiceNo(f.invoiceNo);
+    if (dupExact.length) {
+      const first = dupExact[0].fields;
+      const collectedAt = Number(first['采集时间']) || 0;
+      const mine = first['提交人'] === openId && Date.now() - collectedAt < 24 * 3600 * 1000;
+      const when = collectedAt ? new Date(collectedAt).toLocaleString('zh-CN') : '此前';
+      const detail = `该发票号（尾号 ${String(f.invoiceNo).slice(-6)}）已由 ${first['提交人姓名'] || first['提交人'] || '其他队员'} 于 ${when} 提交过`;
+      // 本人 24h 内重复提交（hub 实时采集 + 催办轮询双入口会先后碰到同一条消息）→ 静默，不再发吓人的重复回执（复查 P2-2）
+      if (mine) return { ok: false, action: 'already_collected', reason: 'duplicate', detail, silent: true };
+      await bot.sendTextToUser(openId, `❌ 发票未能收录：疑似重复提交\n· ${detail}（关联申请 ${first['关联申请编号'] || '?'}）\n· 若确认不是重复（拼单各交各的），请联系财务人工处理`).catch(() => {});
+      return { ok: false, action: 'duplicated', reason: 'duplicate', detail };
     }
-  }
-  const buyerCheck = checkBuyer(f);
-  if (buyerCheck.status && verifyStatus !== '金额不符') verifyStatus = buyerCheck.status;
-  if (buyerCheck.note) notes.push(buyerCheck.note);
-  if (matchNote) notes.push(matchNote);
+    const dupSimilar = await collectStore.findBySimilarity({ issueDate: f.issueDate, totalAmount: f.totalAmount, sellerTaxNo: f.sellerTaxNo });
+    if (dupSimilar.length) {
+      await bot.sendTextToUser(openId, `❌ 发票未能收录：疑似重复提交\n· 存在开票日期与金额完全一致的已收发票（关联申请 ${(dupSimilar[0].fields['关联申请编号'] || '?')}），发票号尾号 ${String(f.invoiceNo).slice(-6)} vs ${String(dupSimilar[0].fields['发票号码'] || '?').slice(-6)}\n· 若确认不是重复，请联系财务人工处理`).catch(() => {});
+      return { ok: false, action: 'duplicated', reason: 'duplicate', detail: '三元组近似命中' };
+    }
 
-  // 7. 发票原件转存附件 + 落采集表（真源）
-  const ext = msgType === 'file' ? 'pdf' : 'jpg';
-  const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${f.invoiceNo}.${ext}`).catch(() => null);
-  const collectFields = {
-    '发票号码': f.invoiceNo,
-    ...(f.invoiceCode ? { '发票代码': f.invoiceCode } : {}),
-    '票种': result.invoiceType || 'unknown',
-    ...(f.issueDate ? { '开票日期': Math.floor(new Date(f.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
-    '价税合计': f.totalAmount,
-    ...(f.buyerName ? { '购买方名称': f.buyerName } : {}),
-    ...(f.buyerTaxNo ? { '购买方税号': f.buyerTaxNo } : {}),
-    ...(f.sellerName ? { '销售方名称': f.sellerName } : {}),
-    ...(f.sellerTaxNo ? { '销售方税号': f.sellerTaxNo } : {}),
-    ...(f.checkCode ? { '校验码后6位': f.checkCode } : {}),
-    '提交人': openId,
-    ...(resolvedName ? { '提交人姓名': resolvedName } : {}),
-    ...(match ? { '关联申请编号': match.applyNo, '申请金额': match.amount } : {}),
-    '识别通道': result.source === 'qrcode+ocr' ? 'qrcode+ocr' : result.source,
-    '校验状态': verifyStatus,
-    ...(notes.length ? { '备注': notes.join('；') } : {}),
-    ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
-    '采集时间': Date.now(),
-  };
-  const created = await collectStore.createCollect(collectFields);
+    // 5. 金额归类匹配（senderName 缺失时从匹配到的审批记录发起人反查）
+    const openRecords = await listOpenRecordsByOpenId(openId);
+    const { match, status: matchStatus, note: matchNote } = matchRecord(f.totalAmount, openRecords);
+    const resolvedName = senderName || (match && match.senderName) || '';
 
-  // 8. 镜像回写审批表「补交发票」附件栏（按记录串行 + 先读后 append）
+    // 6. 金额比对 + 抬头校验 → 校验状态（优先级：金额不符 > 抬头存疑 > 匹配状态 > 通过）
+    let verifyStatus = matchStatus || '通过';
+    const notes = [];
+    let amountDiff = null;
+    if (match && match.amount !== null) {
+      amountDiff = Math.round((f.totalAmount - match.amount) * 100) / 100;
+      const tol = Math.max(Math.abs(match.amount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
+      if (Math.abs(amountDiff) > tol) {
+        verifyStatus = '金额不符';
+        notes.push(`发票 ¥${f.totalAmount.toFixed(2)} vs 申请 ¥${match.amount.toFixed(2)}（差 ${amountDiff.toFixed(2)}，超容忍 ±${tol.toFixed(2)}）`);
+      }
+    }
+    const buyerCheck = checkBuyer(f);
+    if (buyerCheck.status && verifyStatus !== '金额不符') verifyStatus = buyerCheck.status;
+    if (buyerCheck.note) notes.push(buyerCheck.note);
+    if (matchNote) notes.push(matchNote);
+
+    // 7. 发票原件转存附件 + 落采集表（真源）
+    const ext = msgType === 'file' ? 'pdf' : 'jpg';
+    const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${f.invoiceNo}.${ext}`).catch(() => null);
+    const collectFields = {
+      '发票号码': f.invoiceNo,
+      ...(f.invoiceCode ? { '发票代码': f.invoiceCode } : {}),
+      '票种': result.invoiceType || 'unknown',
+      ...(f.issueDate ? { '开票日期': Math.floor(new Date(f.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
+      '价税合计': f.totalAmount,
+      ...(f.buyerName ? { '购买方名称': f.buyerName } : {}),
+      ...(f.buyerTaxNo ? { '购买方税号': f.buyerTaxNo } : {}),
+      ...(f.sellerName ? { '销售方名称': f.sellerName } : {}),
+      ...(f.sellerTaxNo ? { '销售方税号': f.sellerTaxNo } : {}),
+      ...(f.checkCode ? { '校验码后6位': f.checkCode } : {}),
+      '提交人': openId,
+      ...(resolvedName ? { '提交人姓名': resolvedName } : {}),
+      ...(match ? { '关联申请编号': match.applyNo, '申请金额': match.amount } : {}),
+      ...(match && match.amount !== null ? { '金额差': amountDiff } : {}),
+      '识别通道': result.source === 'qrcode+ocr' ? 'qrcode+ocr' : result.source,
+      '校验状态': verifyStatus,
+      ...(notes.length ? { '备注': notes.join('；') } : {}),
+      ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
+      '采集时间': Date.now(),
+    };
+    const created = await collectStore.createCollect(collectFields);
+    return { created, match, verifyStatus, notes, matchNote, resolvedName, buyerCheck, fileToken };
+  });
+
+  if (dupGuard && dupGuard.action) return dupGuard; // 查重拦截（含静默 already_collected）
+  const { match, verifyStatus, notes, matchNote, buyerCheck, fileToken, created } = dupGuard;
+
+  // 8. 镜像回写审批表「补交发票」附件栏（按记录串行 + 先读后 append；GET 走带 code 校验的
+  //    getRecord——裸 requestAPI 不抛错会把读失败当空列，PUT 整列覆盖清掉已有附件，复查 P1-4）
   let mirrored = false;
   if (match) {
     try {
       await withRecordLock(match.record_id, async () => {
-        const record = await client.requestAPI('GET',
-          `/bitable/v1/apps/${config.bitable.appToken}/tables/${config.bitable.approvalTableId}/records/${match.record_id}`);
-        const existing = (record.data?.record?.fields?.['补交发票'] || []);
-        await client.requestAPI('PUT',
-          `/bitable/v1/apps/${config.bitable.appToken}/tables/${config.bitable.approvalTableId}/records/${match.record_id}`,
-          { fields: { '补交发票': [...existing, ...(fileToken ? [{ file_token: fileToken }] : [])] } });
+        const record = await bitableApi.getRecord(config.bitable.approvalTableId, match.record_id);
+        const existing = (record.fields['补交发票'] || []);
+        await bitableApi.updateRecord(config.bitable.approvalTableId, match.record_id, {
+          '补交发票': [...existing, ...(fileToken ? [{ file_token: fileToken }] : [])],
+        });
       });
       mirrored = true;
     } catch (err) {

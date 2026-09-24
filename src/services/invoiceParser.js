@@ -80,7 +80,12 @@ function parseInvoiceText(rawText) {
 
   const mDate = text.match(RE_ISSUE_DATE);
   if (mDate) {
-    fields.issueDate = `${mDate[1]}-${String(mDate[2]).padStart(2, '0')}-${String(mDate[3]).padStart(2, '0')}`;
+    const [, y, mRaw, dRaw] = mDate;
+    const m = parseInt(mRaw, 10), d = parseInt(dRaw, 10);
+    // 非法日期（OCR 噪声如 19 月）不落库：置空进 missing，防止 NaN/静默滚动（复查 P2-6）
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      fields.issueDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
   }
 
   const mTotal = text.match(RE_TOTAL) || text.match(RE_TOTAL_LOOSE);
@@ -117,10 +122,12 @@ function parseInvoiceText(rawText) {
  * 已知形态：
  *   老票:  01,<10-12位发票代码>,<8位号码>,<金额>,<YYYYMMDD>,<校验码>[,...]
  *   数电票: 01,<20位号码>,<金额>,<YYYYMMDD>[,...]（或含 33 开头随机码段）
+ * 返回带 invoiceShape：payload 是否形似发票 QR（区分「发票 QR 要素不全」与
+ * 微信码/付款码等任意二维码——后者不得触发打回，复查 P1-3）。
  */
 function parseQrPayload(payload) {
   const parts = String(payload || '').split(',').map(s => s.trim()).filter(s => s !== '');
-  if (parts.length < 4) return { ok: false, reason: 'qr 格式段数不足' };
+  if (parts.length < 4) return { ok: false, reason: 'qr 格式段数不足', invoiceShape: false };
 
   const fields = { invoiceCode: null, invoiceNo: null, issueDate: null, totalAmount: null, checkCode: null };
   for (const seg of parts) {
@@ -132,10 +139,11 @@ function parseQrPayload(payload) {
     else if (/^\d{6,20}$/.test(seg) && !fields.checkCode && fields.invoiceNo && seg !== fields.invoiceNo) fields.checkCode = seg.slice(-6);
   }
 
+  const invoiceShape = Boolean(fields.invoiceNo || fields.invoiceCode);
   const missing = ['invoiceNo', 'issueDate', 'totalAmount'].filter(k => !fields[k]);
-  if (missing.length) return { ok: false, reason: 'qr 可读但查验要素不全', missing, fields };
+  if (missing.length) return { ok: false, reason: 'qr 可读但查验要素不全', missing, fields, invoiceShape };
   const invoiceType = fields.invoiceNo.length === 20 ? '全电发票' : '增值税发票';
-  return { ok: true, fields, invoiceType, warnings: [] };
+  return { ok: true, fields, invoiceType, warnings: [], invoiceShape };
 }
 
 /** 图片 Buffer → 二维码解码 → parseQrPayload；无码/解码失败返回 null（调用方降级 OCR） */
@@ -150,8 +158,9 @@ async function tryQrChannel(buffer) {
   let { data, info } = raw;
   if (info.width > 1600) {
     const scale = 1600 / info.width;
-    data = await sharp(buffer).rotate().resize(Math.round(info.width * scale)).ensureAlpha().raw().toBuffer({ resolveWithObject: true }).then(o => o.data);
-    info = { ...info, width: Math.round(info.width * scale), height: Math.round(info.height * scale) };
+    const resized = await sharp(buffer).rotate().resize(Math.round(info.width * scale)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    data = resized.data;
+    info = resized.info; // 用 sharp 实际输出尺寸，避免自行推算 ±1px 导致 jsQR 静默失败（复查 P2-11）
   }
   const found = jsQR(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height);
   if (!found || !found.data) return { result: null, error: null };
@@ -186,7 +195,8 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
   if (isPdf) {
     const { result, error } = await tryPdfChannel(buffer).catch(err => ({ result: null, error: err.message }));
     if (result) return result;
-    return { ok: false, source: 'pdfText', reason: error || 'PDF 识别失败', fields: {}, missing: [], warnings: [] };
+    // 文件消息按指引多为发票 PDF（无文本层扫描件/版式变体），失败一律打回不静默（复查 P1-2）
+    return { ok: false, source: 'pdfText', reason: error || 'PDF 识别失败', fields: {}, missing: [], warnings: [], looksLikeInvoice: true };
   }
 
   // 图片：先二维码，后 OCR
@@ -208,7 +218,7 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
         }
         const stillMissing = ['invoiceNo', 'issueDate', 'totalAmount'].filter(k => !merged[k]);
         if (!stillMissing.length) return { ok: true, source: 'qrcode+ocr', fields: merged, missing: [], warnings: parsedInvoice.warnings, invoiceType: qrResult.invoiceType };
-        return { ok: false, source: 'ocr', reason: '识别要素不全', fields: merged, missing: stillMissing, warnings: parsedInvoice.warnings, looksLikeInvoice: like || true };
+        return { ok: false, source: 'ocr', reason: '识别要素不全', fields: merged, missing: stillMissing, warnings: parsedInvoice.warnings, looksLikeInvoice: like || Boolean(qrResult.invoiceShape) };
       }
       return { ok: false, source: 'ocr', reason: '识别要素不全', fields: parsedInvoice.fields, missing: parsedInvoice.missing, warnings: parsedInvoice.warnings, looksLikeInvoice: like };
     } catch (err) {
@@ -223,8 +233,8 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
     fields: {},
     missing: ['invoiceNo', 'issueDate', 'totalAmount'],
     warnings: [],
-    // 图片本身解不出码、也没有 OCR 文本可判——交由调用方决定静默或打回
-    looksLikeInvoice: Boolean(qrResult),
+    // 仅当扫出的 QR 形似发票码才算发票特征——微信码/付款码等任意 QR 不得触发打回（复查 P1-3）
+    looksLikeInvoice: Boolean(qrResult && qrResult.invoiceShape),
   };
 }
 

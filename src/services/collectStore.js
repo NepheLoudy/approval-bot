@@ -46,14 +46,19 @@ async function findByInvoiceNo(invoiceNo) {
 
 /**
  * 三元组近似查重（开票日期+价税合计+销售方税号）：发票号 OCR 错一位时的第二道闸。
+ * 注意「开票日期」在表内是毫秒时间戳（DATE 字段），入参 issueDate 是 'YYYY-MM-DD'，
+ * 这里统一转毫秒比对（此前直接字符串比较导致该闸恒不命中——复查 P1-1）。
  * 返回近似命中的采集记录列表。
  */
 async function findBySimilarity({ issueDate, totalAmount, sellerTaxNo }) {
   if (!issueDate || !totalAmount) return [];
+  const expectedMs = new Date(`${issueDate}T00:00:00+08:00`).getTime();
+  if (Number.isNaN(expectedMs)) return [];
   const all = await listCollect();
   return all.filter((r) => {
     const f = r.fields;
-    if (String(f['开票日期'] || '') !== String(issueDate)) return false;
+    const recorded = typeof f['开票日期'] === 'number' ? f['开票日期'] : parseInt(f['开票日期'], 10);
+    if (!(recorded === expectedMs)) return false;
     const amount = typeof f['价税合计'] === 'number' ? f['价税合计'] : parseFloat(f['价税合计']);
     if (!(Math.abs((amount || NaN) - totalAmount) < 0.005)) return false;
     if (sellerTaxNo && f['销售方税号'] && String(f['销售方税号']) !== String(sellerTaxNo)) return false;
