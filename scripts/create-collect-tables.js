@@ -30,7 +30,7 @@ const COLLECT_FIELDS = [
   { field_name: '识别通道', type: FIELD_TYPES.SINGLE_SELECT, property: { options: [{ name: 'pdfText' }, { name: 'qrcode' }, { name: 'qrcode+ocr' }, { name: 'ocr' }] } },
   { field_name: '校验状态', type: FIELD_TYPES.SINGLE_SELECT, property: { options: [{ name: '通过' }, { name: '金额不符' }, { name: '抬头存疑' }, { name: '待人工' }] } },
   { field_name: '批次', type: FIELD_TYPES.TEXT }, // = 审批表「报销单」批次号，锁定时回填
-  { field_name: '发票图片', type: 17, property: { multiple: true } }, // 附件：发票原件（下载重传的 file_token）
+  { field_name: '发票图片', type: 17 }, // 附件：发票原件（下载重传的 file_token）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
   { field_name: '采集时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
 ];
@@ -44,8 +44,8 @@ const BATCH_FIELDS = [
   { field_name: '锁定时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '提交时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '到账时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
-  { field_name: '打印文件', type: 17, property: { multiple: true } }, // 附件：按录入顺序一页两票的 PDF（财务三件套②）
-  { field_name: 'BOM表', type: 17, property: { multiple: true } }, // 附件：本批次 BOM xlsx（财务三件套③）
+  { field_name: '打印文件', type: 17 }, // 附件：按录入顺序一页两票的 PDF（财务三件套②）
+  { field_name: 'BOM表', type: 17 }, // 附件：本批次 BOM xlsx（财务三件套③）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
 ];
 
