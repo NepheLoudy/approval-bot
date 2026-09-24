@@ -345,10 +345,21 @@ async function main() {
     assert.equal(okRes.status, 200);
     assert.equal(okRes.json.success, true);
 
-    // backfill 端点（走桩：无 SourceID 的记录跳过）——只验证鉴权通过与形状
+    // backfill 端点：未配置 APPROVAL_CODE → 400 指引；配置后走桩链（实例列表空）→ 200
+    const bfNoCode = await send(port, 'POST', '/api/invoice/backfill', {}, authHeader);
+    assert.equal(bfNoCode.status, 400, '未配置 APPROVAL_CODE 返回 400 指引');
+    assert.match(bfNoCode.json.error, /APPROVAL_CODE/);
+    process.env.APPROVAL_CODE = 'TESTCODE123';
+    client.requestAPI = async (method, urlPath) => {
+      if (urlPath.startsWith('/approval/v4/instances?')) {
+        return { code: 0, data: { instance_ids: [], has_more: false } };
+      }
+      throw new Error(`测试未预期的飞书调用: ${urlPath}`);
+    };
     const bf = await send(port, 'POST', '/api/invoice/backfill', { limit: 1 }, authHeader);
     assert.equal(bf.status, 200);
     assert.ok('scanned' in bf.json);
+    delete process.env.APPROVAL_CODE;
 
     // OCR 503 开关只管 /api/ocr/*；采集主通道（QR/PDF）不依赖 OCR，不再被一刀切（复查修复）
     config.ocr.enabled = false;

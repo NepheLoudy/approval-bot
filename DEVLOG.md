@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v45**（2026-09-25，随本提交落地）。上一版 v44（e3bc757，发票 OCR 转录服务端能力批）。
+当前最新：**v46**（2026-09-25，随本提交落地）。上一版 v45（8f312d8+c1b0284，发票采集全链路批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -330,3 +330,15 @@
 - **依赖新增（全免费 npm）**：sharp/jsqr（二维码解码）、pdf-parse（数电票 PDF 文本）、pdf-lib（打印件排版）、exceljs（BOM）。**权限新增（后台待开通）**：`approval:approval:readonly`（存量回溯）、`drive:drive`（附件转存/打印件/BOM 落表）。
 - **桩测试** `scripts/stub-test-invoice-collect.js`（并入 npm test 与 push 闸门）：解析器（数电票/老票文本、QR 两代格式、特征词）、金额归类四场景、抬头三态、采集链路（收录+镜像+查重双闸+非发票静默+缺要素打回+金额不符）、三口径等价与 fail-open、拟批/锁定/状态流转、端点鉴权 403/400/200/503。**测试先行抓出三处实现缺陷并修复**：take=same 式跨段吞税号、PDF 排版下半页 y 坐标错位、addPage 参数形态错误。
 - 测试：npm test 全绿（node --check ×7 + 催发票桩 + OCR 桩 + 采集桩全套）。
+
+### v46 · 2026-09-25 · 随本提交落地 · fix
+
+**全量开发复查修复批 + OCR 兼容性演练（演练抓出 pdf-parse v2 API 断裂）**
+
+- 提交说明：fix: 全量复查修复批——近似查重日期毫秒口径/PDF失败改打回/任意QR不触发打回/镜像回写防整列覆盖/lockBatch先建批次/查重加锁+抬头校验配置+演练脚本
+- **独立复查战果（P1×6 全修）**：①近似查重闸恒不命中——采集表「开票日期」是毫秒而比对串是 'YYYY-MM-DD'，collectStore.findBySimilarity 改毫秒比对；②PDF 识别失败被静默忽略（按指引转发 PDF 的队员丢票无感知）→ PDF 失败分支置 looksLikeInvoice:true 走打回；③`looksLikeInvoice: like || true` 恒真——任意二维码（微信码/付款码）截图会被误打回，parseQrPayload 增加 invoiceShape（发票数字段形状判定），仅形似发票码才触发打回；④镜像回写裸 requestAPI GET 不校验业务码，读失败时 PUT 以空列覆盖「补交发票」栏 → 改用带 code 校验的 bitableApi.getRecord；⑤lockBatch 半途失败死局（票已出池、批次表无记录）→ 先建批次记录再打标，失败可 regen 自愈；⑥查重/落表与 lock 的 TOCTOU → 按发票号/批次号互斥锁。
+- **P2 系列同批**：hub 转发超时 15s→60s（正常慢识别被误报失败）；双入口碰同一消息的重复「疑似重复」回执改静默（本人 24h 内）；collectFromMessage 补写「金额差」字段（与 backfill 口径统一）；「金额差」两入口统一；日期解析钳制（19 月不落库）；/approval-batch reject 退回票回池（清批次标记）；新增 regen 子指令（打印件/BOM 失败自愈）；backfill 校验状态按金额容差不再恒「通过」；express body limit 2mb→10mb（transcribe 直传 base64 被 2mb 卡）；/api/invoice/collect 移除 OCR_ENABLED 一刀切（QR/PDF 主通道不依赖 OCR，503 只管 /api/ocr/*）；端点服务端失败补队员私聊回执；QR 大图缩放取 sharp 实际输出尺寸。
+- **OCR 兼容性演练（scripts/drill-ocr-compat.js，12/12 通过）**：真发票 QR（数电票/老票）经 jsQR 图片全链路解码、非发票 QR 不误判、PDF 文本层、OCR 噪声变体（全角/半角冒号、标签换行、买方卖方同段混排、千分位金额）、特征词静默判定、两票一页打印件 PDF 几何验证。**演练抓出 pdf-parse v2.4.5 API 断裂**（v1 函数调用已废弃 → `new PDFParse({data}).getText()`），修复后 PDF 通道真跑通过。
+- **在线真机演练（scripts/drill-online.js）**：health/policy/fields/403 负例/collect 缺参全过；**transcribe 真调 404**——路径与官方 OpenAPI 一致，判定为「图片识别」权限未开通时网关即 404，待权限开通+应用发布后复测；**backfill 实测表格 SourceID 调实例详情报 1390003**（SourceID 是飞书内部复合串非 instance_id）→ backfill 重构为 APPROVAL_CODE 驱动（批量拉实例→详情附件→同人±3天窗+金额精确匹配回填），code 从审批管理后台获取配 .env，未配置返回 400 指引。
+- **抬头校验配置落地**：INVOICE_ALLOWED_BUYERS=重庆大学|12100000400002697C（地址/开户行/账号留档 .env 注释）。
+- 测试：npm test 全绿（node --check ×7 + 催发票桩 + OCR 桩 + 采集桩全套，新增近似查重毫秒口径/静默重复/PDF 打回/invoiceShape/金额差/503 收窄断言）。

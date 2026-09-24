@@ -12,7 +12,8 @@
  */
 const sharp = require('sharp');
 const jsQR = require('jsqr');
-const pdfParse = require('pdf-parse');
+// pdf-parse v2（2.4.x）改为类 API：new PDFParse({data}).getText()；v1 的函数调用形态已废弃
+const { PDFParse } = require('pdf-parse');
 
 // ---------- 文本字段抽取（PDF 文本与 OCR 分段拼接文本共用） ----------
 
@@ -170,8 +171,14 @@ async function tryQrChannel(buffer) {
 // ---------- PDF 通道 ----------
 
 async function tryPdfChannel(buffer) {
-  const parsed = await pdfParse(buffer);
-  const text = parsed.text || '';
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  let text = '';
+  try {
+    const parsed = await parser.getText();
+    text = parsed.text || '';
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
   if (!text.trim()) return { result: null, error: 'PDF 无文本层（可能是扫描件，请发图片）' };
   const parsedInvoice = parseInvoiceText(text);
   if (parsedInvoice.missing.length) {

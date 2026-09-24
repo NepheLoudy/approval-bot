@@ -199,15 +199,15 @@ app.post('/api/invoice/collect', requireApiToken, async (req, res) => {
   }
 });
 
-// 存量发票回溯（管理端点）：把审批表已交票通过审批实例接口下载识别后回填采集表。
-// body 传 {"limit": 20} 控制单次条数；首次运行即验证审批附件下载路径（探测式）
+// 存量发票回溯（管理端点）：APPROVAL_CODE 驱动——批量拉审批实例→下载附件→识别回填采集表。
+// body 传 {"limit": 20, "sinceDays": 200}；未配置 APPROVAL_CODE 时返回 400 与配置指引
 app.post('/api/invoice/backfill', requireApiToken, async (req, res) => {
   try {
     const result = await backfillService.backfillCollect(req.body || {});
     res.json({ success: true, ...result });
   } catch (err) {
     console.error('存量发票回溯失败:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 
