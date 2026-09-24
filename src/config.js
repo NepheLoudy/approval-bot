@@ -94,4 +94,16 @@ module.exports = {
   cron: {
     schedule: process.env.CRON_SCHEDULE || '0 0 18 * * 1',
   },
+
+  // 发票图像 OCR 转录（飞书官方 OCR，免费，识别结果按区域分段返回）
+  ocr: {
+    // 默认开启；未开通飞书「图片识别」权限前调用会报错，可用 OCR_ENABLED=false 关闭
+    enabled: process.env.OCR_ENABLED !== 'false',
+    // OCR 请求超时（base64 大图比普通 API 慢，长于默认 15s）
+    timeoutMs: parseInt(process.env.OCR_TIMEOUT_MS, 10) || 30000,
+    maxImageBytes: parseInt(process.env.OCR_MAX_IMAGE_BYTES, 10) || 5 * 1024 * 1024,
+    // 字段提取规则文件（JSON）。部署目标的 SFTP 部署会清空项目目录，
+    // 生产应配到项目目录之外（同 INVOICE_URGE_STATE_FILE 口径）
+    fieldsFile: process.env.OCR_FIELDS_FILE || '.ocr-fields.local.json',
+  },
 };

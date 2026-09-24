@@ -25,3 +25,6 @@ data/
 
 # 晚间静默积压文件（运行时状态，勿提交）
 .quiet-backlog.json
+
+# 发票 OCR 字段提取规则（运行时本地配置，经 /api/ocr/fields 热改，勿提交）
+.ocr-fields.local.json

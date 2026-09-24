@@ -19,7 +19,7 @@
 
 ## 二、飞书应用配置（共用应用，仅需补充权限/事件）
 
-1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:message.p2p_msg:readonly`（回复轮询）、`contact:user.base:readonly`；`im:chat` 曾申请但后台未实际开通，勿依赖
+1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:message.p2p_msg:readonly`（回复轮询）、`contact:user.base:readonly`、`im:resource`（下载用户回传的发票图片）、`optical_char_recognition`（图片识别，发票 OCR 用，高级权限需后台申请）；`im:chat` 曾申请但后台未实际开通，勿依赖
 2. **事件订阅**：`im.message.receive_v1`（由 feishu-gateway 长连接接收）
 3. **审批群自定义机器人**：Webhook 完整地址存 `.env` 的 `BOT_WEBHOOK_URL`（勿写入文档/仓库）
 
@@ -151,8 +151,21 @@ curl http://localhost:3002/api/health
 | GET | `/api/bot/history` | 播报历史 |
 | POST | `/api/chat/command` | 指令转发端点（`{command, args}` → `{reply}`） |
 | POST | `/api/feishu/event` | feishu-gateway 事件转发入口（消息事件） |
+| POST | `/api/ocr/transcribe` | 发票图像 OCR 转录（X-API-Token）：body `{messageId, imageKey}` 或 `{imageBase64}` → `{segments, fullText, fields, misses, meta}` |
+| GET | `/api/ocr/fields` | 定制窗口：OCR 字段提取规则全景（只读） |
+| POST | `/api/ocr/fields` | OCR 字段提取规则热改（X-API-Token）：`{action:'set', rules:[...]}` 整表替换 / `{action:'reset'}` 恢复内置默认 |
 
-## 七、机器人指令（仅审批群，需 @爆米花机-对话型）
+## 七、发票 OCR 转录（2026-09-24 起）
+
+**引擎**：飞书开放平台「识别图片中的文字」（`POST /open-apis/optical_char_recognition/v1/image/basic_recognize`），**免费**（单租户 20 QPS，图片 <5MB），识别按区域分段返回文本列表。发票图下载自飞书消息、识别在飞书侧完成，**数据不经第三方**；图片不落盘（内存直传），转录结果不持久化。
+
+**「某些区域转录」**：飞书 OCR 无坐标，区域提取靠**可配置的字段规则**在分段文本上完成——`anchor`（标签关键词，take: `same` 本段冒号后 / `next` 下一段 / `same_or_next` 默认先本段后下一段；`occurrence` 指定第 N 次命中，区分买方/卖方同标签）与 `regex`（正则，取捕获组 1 或整个匹配）。内置默认规则覆盖：发票号码 / 开票日期 / 购买方与销售方名称及税号 / 价税合计（大写+小写）。规则经 `POST /api/ocr/fields` 热改即时生效，持久化在 `OCR_FIELDS_FILE`（默认 `.ocr-fields.local.json`；**生产配到项目目录之外**——SFTP 部署会清空项目目录，项目内该文件已加入 push.js 打包排除清单）。
+
+**权限前置**：需在飞书后台给共用应用开通「获取与上传图片或资源」(`im:resource`) 与「图片识别」(`optical_char_recognition`，高级权限) 两个权限，未开通时 OCR 调用报错，可 `OCR_ENABLED=false` 关闭端点（503）。
+
+**接入状态**：本期只暴露服务端能力（HTTP 端点 + `src/services/ocrService.js`），消息侧入口（私聊回传图片识别 / 审批群交互）待定后接入。真实票据的分段形态与内置规则如有出入，先调 `/api/ocr/transcribe` 看 `segments` 实况，再按实况热改字段规则。
+
+## 八、机器人指令（仅审批群，需 @爆米花机-对话型）
 
 | 指令 | 说明 |
 |------|------|
@@ -164,7 +177,7 @@ curl http://localhost:3002/api/health
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
-## 八、部署到部署目标（小电脑）
+## 九、部署到部署目标（小电脑）
 
 ### 一键部署（push.js，密钥存 .env 的 NAS_*；NAS_* 为历史命名，语义=部署目标）
 ```bash
@@ -178,7 +191,7 @@ ssh mechax@192.168.31.57 "pm2 logs approval-bot --lines 30"
 ```
 （2026-09-14 起部署目标=小电脑 DESKTOP-FE1MIGI 192.168.31.57:22；旧 NAS `qianli@10.253.33.233:8500` 已停用）
 
-## 九、项目结构
+## 十、项目结构
 
 ```
 approval-bot/
@@ -194,6 +207,7 @@ approval-bot/
 │   │   ├── approvalService.js     # 数据查询 + 财务催办三分支 + 超期未交发票 + 周统计按项目分组
 │   │   ├── broadcastService.js    # 每周财务催办周报（支持 dryRun 预览）
 │   │   ├── invoiceUrgeService.js  # 催发票私聊（回复轮询/通讯录兜底/间隔闸/状态过滤/计数升级，支持 dryRun）
+│   │   ├── ocrService.js          # 发票 OCR 转录（飞书免费 OCR + 字段提取规则引擎 + 规则持久化热改）
 │   │   ├── urgeStateStore.js      # 催发票状态持久化（JSON 文件，路径可配）
 │   │   ├── reminderService.js     # 每日待审批提醒
 │   │   └── chatService.js         # 群隔离 + /approval-* 指令

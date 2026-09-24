@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v43**（2026-09-24，随本提交落地）。上一版 v42（230001 秒级回归锁批）。
+当前最新：**v44**（2026-09-24，随本提交落地）。上一版 v43（432e8a0，事件端点 fail-closed 批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -290,7 +290,7 @@
 - **分页补齐**：①会话消息拉取补 `has_more/page_token` 循环（原 page_size=50 一页，未读超 50 条时延期识别按天拖沓）；②`contacts.listActiveOpenIds` 部门列表补翻页（原单页 50，组织超 50 部门时漏人 → 误标 resigned 持久化停催且无法自愈）。
 - **桩测试 230001 回归锁**：`invoiceUrgeService` 改经 `client.requestAPI` 模块引用以便打桩；新增场景断言 start_time/end_time 均为 10 位秒级且 end≥start。全绿。
 
-### v43 · 2026-09-24 · 随本提交落地 · fix
+### v43 · 2026-09-24 · 432e8a0 · fix
 
 **事件端点 fail-closed + auth 废除 ?token=（全仓复查批，附 README 回填）**
 
@@ -299,3 +299,18 @@
 - src/auth.js：删除 req.query.token 回退（R10② 同口径，token 会进访问/代理日志）。
 - 随本提交入库：README 部署路径 /opt/ → /c/qianli/opt/（09-22 遗留文档批）。
 - 测试：node --check ×2 + 催发票桩全套通过。
+
+### v44 · 2026-09-24 · 随本提交落地 · feat
+
+**发票图像 OCR 转录（飞书免费 OCR + 字段提取规则引擎 + 定制窗口热改）**
+
+- 提交说明：feat: 发票图像 OCR 转录——飞书免费 OCR+字段规则引擎+定制窗口热改+桩测试
+- **引擎选型**：飞书开放平台「识别图片中的文字」（`POST /open-apis/optical_char_recognition/v1/image/basic_recognize`），**免费**（官方 API 清单 chargingMethod=none，单租户 20 QPS，图片 <5MB）；发票图下载自飞书消息、识别在飞书侧完成，数据不经第三方，图片不落盘（内存直传）、转录结果不持久化。飞书 OCR 返回按区域分段文本但无坐标，「某些区域转录」用可配置字段规则在分段上实现（anchor 标签锚点 same/next/same_or_next + occurrence 区分买方/卖方同标签；regex 取捕获组）。内置默认规则：发票号码/开票日期/买卖方名称与税号/价税合计大写+小写。
+- **新增 src/services/ocrService.js**：`recognizeBuffer`（base64 调 OCR，非 0 错误码如实透出、超限前置拒绝不发请求）、`transcribe`（message 入口=downloadImage+OCR；base64 入口直连；组装 segments/fullText/fields/misses/meta）、`extractFields` 纯函数规则引擎、规则持久化 `.ocr-fields.local.json`（首次种子落盘，`setFieldRules` 整表校验替换即时生效，`resetFieldRules` 回内置默认）。
+- **client.js**：+`downloadImage`（duty-bot v28 同款：用户图片必须走消息资源接口 `/im/v1/messages/:id/resources/:file_key`，走 `/im/v1/images` 对用户图片报 234001；需 `im:resource` 权限）；`requestAPI` 加 `opts.timeoutMs`（OCR 大 base64 体用 30s，默认仍 15s，向后兼容）。
+- **index.js 端点**：`POST /api/ocr/transcribe`（requireApiToken；`{messageId, imageKey}` 或 `{imageBase64}`；OCR_ENABLED=false 时 503）、`GET /api/ocr/fields`（只读窗口）、`POST /api/ocr/fields`（热改，requireApiToken，action=set/reset）；`GET /api/approval/policy` 增 `ocr` 段（engine/enabled/fieldCount/fields 清单）。
+- **config/.env.example**：`OCR_ENABLED`（默认开）、`OCR_TIMEOUT_MS`（默认 30000）、`OCR_MAX_IMAGE_BYTES`（默认 5MB）、`OCR_FIELDS_FILE`（默认项目内 `.ocr-fields.local.json`，生产应配项目外——SFTP 部署清目录；push.js 打包排除清单同步加该文件，防「本地种子覆盖部署目标运行时规则」）。
+- **桩测试 scripts/stub-test-ocr.js**（并入 npm test 与 push.js 闸门）：validateRules 非法形态 ×7、extractFields（三种 take/occurrence 第 N 命中/regex 捕获组与整匹配/全未命中 misses）、OCR 调用契约（路径/base64 往返/timeoutMs 透传/错误码透出/空与超限拒绝不发请求/空识别报错）、transcribe 双入口与参数校验、规则窗口热改与落盘（校验失败不丢生效规则）、端点 403 鉴权/200 链路/500 错误透出/503 开关/policy ocr 段。**take=same 误跨段回落 bug 由本套件抓出后修复**（stub 先行红绿流程）。
+- **权限（后台待开通）**：`im:resource`（获取与上传图片或资源）、`optical_char_recognition`（图片识别，高级权限）；feishu-permissions.json/.txt 与 README 权限节同步。开通前调用 OCR 会报错。
+- **接入状态**：本期只落服务端能力（HTTP 端点 + service），消息侧入口（私聊回传识别/审批群交互）待需求方定接口形态后另批接入；真实票据分段形态联调后可经 `/api/ocr/fields` 热改规则。
+- 测试：npm test 全绿（node --check ×3 + 催发票桩全套 + OCR 桩全套）。

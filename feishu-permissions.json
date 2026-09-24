@@ -22,5 +22,13 @@
   {
     "scope": "contact:user.base:readonly",
     "description": "获取用户基本信息，用于显示审批发起人姓名"
+  },
+  {
+    "scope": "im:resource",
+    "description": "获取与上传图片或资源，用于下载用户回传的发票图片（OCR 前置）"
+  },
+  {
+    "scope": "optical_char_recognition",
+    "description": "图片识别（高级权限），用于发票图像 OCR 转录（免费接口，20 QPS）"
   }
 ]

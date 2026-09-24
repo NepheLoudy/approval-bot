@@ -5,6 +5,7 @@ const config = require('./config');
 const { startEventSubscription } = require('./feishu/eventSubscription');
 const { processChatMessage, executeCommand } = require('./services/chatService');
 const approvalService = require('./services/approvalService');
+const ocrService = require('./services/ocrService');
 const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
@@ -35,6 +36,7 @@ app.get('/api/approval/policy', (req, res) => {
     invoiceUrge: config.invoiceUrge,
     reminder: config.reminder,
     cron: config.cron,
+    ocr: ocrService.getPolicySummary(),
   });
 });
 
@@ -124,6 +126,45 @@ app.get('/api/bot/cron-status', (req, res) => {
 
 app.get('/api/bot/history', (req, res) => {
   res.json(getBroadcastHistory());
+});
+
+// ---------- 发票 OCR 转录（飞书官方 OCR，免费） ----------
+// 图片侧接入（消息入口）待定，本期只暴露服务端能力；调用方传
+// {messageId, imageKey}（机器人可读的飞书消息）或 {imageBase64}。
+
+// 触发动作类端点（调 OCR API），按全局工程规则挂 X-API-Token
+app.post('/api/ocr/transcribe', requireApiToken, async (req, res) => {
+  if (!config.ocr.enabled) {
+    return res.status(503).json({ error: 'OCR 功能未启用（.env 配 OCR_ENABLED=false 关闭中）' });
+  }
+  try {
+    const result = await ocrService.transcribe(req.body || {});
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('发票 OCR 转录失败:', err);
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// 字段提取规则定制窗口：只读全景
+app.get('/api/ocr/fields', (req, res) => {
+  res.json({ fields: ocrService.getFieldRules() });
+});
+
+// 字段提取规则热改：{action: 'set', rules: [...]} 整表替换 或 {action: 'reset'} 恢复内置默认
+app.post('/api/ocr/fields', requireApiToken, (req, res) => {
+  const { action, rules } = req.body || {};
+  try {
+    if (action === 'set') {
+      res.json({ success: true, fields: ocrService.setFieldRules(rules) });
+    } else if (action === 'reset') {
+      res.json({ success: true, fields: ocrService.resetFieldRules() });
+    } else {
+      res.status(400).json({ error: "action 只支持 'set'（带 rules 整表替换）或 'reset'（恢复内置默认）" });
+    }
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
 });
 
 // ---------- 指令转发端点（bambu 同款契约） ----------
