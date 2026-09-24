@@ -26,6 +26,9 @@ module.exports = {
   bitable: {
     appToken: process.env.BITABLE_APP_TOKEN || '',
     approvalTableId: process.env.BITABLE_APPROVAL_TABLE_ID || '',
+    // 发票采集/报销批次表（机器人自建自写，先跑 scripts/create-collect-tables.js 再把 table_id 配进来）
+    collectTableId: process.env.BITABLE_COLLECT_TABLE_ID || '',
+    batchTableId: process.env.BITABLE_BATCH_TABLE_ID || '',
   },
 
   feishuEvent: {
@@ -105,5 +108,15 @@ module.exports = {
     // 字段提取规则文件（JSON）。部署目标的 SFTP 部署会清空项目目录，
     // 生产应配到项目目录之外（同 INVOICE_URGE_STATE_FILE 口径）
     fieldsFile: process.env.OCR_FIELDS_FILE || '.ocr-fields.local.json',
+  },
+
+  // 发票采集（私聊/催办回复交票 → 识别 → 采集表）
+  invoiceCollect: {
+    // 报销抬头校验（可选，逗号分隔多套「名称|税号」；不配则只记录不校验）。
+    // 名称与税号命中其一即放行，都不匹配 → 校验状态=抬头存疑（打回提醒）
+    allowedBuyers: parseArrayConfig(process.env.INVOICE_ALLOWED_BUYERS),
+    // 金额比对阈值：发票价税合计 vs 审批「总金额」，绝对差超过 max(比例, 固定) 即标记金额不符
+    amountToleranceRatio: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_RATIO) || 0.05,
+    amountToleranceFixed: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_FIXED) || 10,
   },
 };

@@ -6,3 +6,5 @@ im:chat
 contact:user.base:readonly
 im:resource
 optical_char_recognition
+approval:approval:readonly
+drive:drive

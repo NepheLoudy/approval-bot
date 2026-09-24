@@ -1,5 +1,6 @@
 const config = require('../config');
 const bitableApi = require('../feishu/bitable');
+const collectStore = require('./collectStore');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -32,10 +33,32 @@ function hasAttachment(value) {
 
 /**
  * 是否已交发票：「发票」（Url）或「补交发票」（附件）任一栏有值即算已交
- * （补交发票为财务新增的补录栏，与发票栏等效）
+ * （补交发票为财务新增的补录栏，与发票栏等效；机器人采集通道亦写补交发票栏）
  */
 function hasInvoiceSubmitted(fields) {
   return hasAttachment(fields['发票']) || hasAttachment(fields['补交发票']);
+}
+
+/**
+ * 已采集台账的申请编号集合（fail-open：采集表未配置/查询失败时返回空集，
+ * 退回两栏判断——本地开发与采集表未建的部署不崩）。
+ * 口径：机器人采集成功即视为已交票（采集表为真源，补交发票栏是镜像）。
+ */
+async function getCollectedApplyNoSet() {
+  try {
+    const collects = await collectStore.listCollect();
+    const set = new Set();
+    for (const r of collects) {
+      const applyNo = r.fields['关联申请编号'];
+      if (applyNo) set.add(String(applyNo));
+    }
+    return set;
+  } catch (err) {
+    if (!/未配置发票采集表/.test(err.message)) {
+      console.warn('[审批服务] 采集台账查询失败，退回两栏判断:', err.message);
+    }
+    return new Set();
+  }
 }
 
 /** 完成时间是否已超过 N 个月（无完成时间返回 false，不提醒） */
@@ -143,6 +166,7 @@ async function getApprovalStats() {
 async function getOverdueInvoices() {
   const all = await fetchAllApprovals();
   const APPROVED = config.approvalStatus.APPROVED;
+  const collectedNos = await getCollectedApplyNoSet();
   const graceMs = config.invoiceUrge.graceDays * 24 * 60 * 60 * 1000;
 
   const overdue = all.filter((record) => {
@@ -150,6 +174,8 @@ async function getOverdueInvoices() {
     if (f['申请状态'] !== APPROVED) return false;
     if (!isActiveProcess(f)) return false;
     if (hasInvoiceSubmitted(f)) return false; // 发票/补交发票任一栏有值即不算超期
+    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+    if (applyNo && collectedNos.has(applyNo)) return false; // 采集台账已收录（真源口径）不算超期
     const ms = typeof f['完成时间'] === 'number' ? f['完成时间'] : parseInt(f['完成时间'], 10);
     if (!ms || Number.isNaN(ms)) return false; // 无完成时间不催
     return ms + graceMs <= Date.now();
@@ -170,6 +196,7 @@ async function getOverdueInvoices() {
 async function getFinanceFollowUp() {
   const all = await fetchAllApprovals();
   const APPROVED = config.approvalStatus.APPROVED;
+  const collectedNos = await getCollectedApplyNoSet();
 
   const missingInvoice = [];  // 未交发票
   const missingForm = [];     // 未制单（缺报销单）
@@ -180,7 +207,8 @@ async function getFinanceFollowUp() {
     if (f['申请状态'] !== APPROVED) continue;
     if (!isActiveProcess(f)) continue;
 
-    const hasInvoice = hasInvoiceSubmitted(f);
+    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+    const hasInvoice = hasInvoiceSubmitted(f) || (applyNo && collectedNos.has(applyNo));
     // 报销单为单选：null=未制单；「无需报销」=无需制单，视为已完成该环节
     const form = f['报销单'];
     const hasForm = form !== null && form !== undefined && form !== '';
@@ -217,4 +245,7 @@ module.exports = {
   getApprovalStats,
   getFinanceFollowUp,
   getOverdueInvoices,
+  isActiveProcess,
+  hasInvoiceSubmitted,
+  getCollectedApplyNoSet,
 };

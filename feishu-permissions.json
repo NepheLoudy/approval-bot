@@ -30,5 +30,13 @@
   {
     "scope": "optical_char_recognition",
     "description": "图片识别（高级权限），用于发票图像 OCR 转录（免费接口，20 QPS）"
+  },
+  {
+    "scope": "approval:approval:readonly",
+    "description": "查看审批实例（含表单附件引用），用于存量发票回溯下载原件"
+  },
+  {
+    "scope": "drive:drive",
+    "description": "云空间文件上传下载，用于发票原件转存附件字段与批次打印件/BOM 落表"
   }
 ]

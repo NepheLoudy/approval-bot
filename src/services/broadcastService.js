@@ -1,6 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
+const collectStore = require('./collectStore');
 const { buildWeeklyFinanceCard, sendMessage } = require('../feishu/bot');
 
 /**
@@ -29,12 +30,21 @@ async function runWeeklyBroadcast(options = {}) {
     (projects.new.length ? ` | 新增项目: ${projects.new.map(g => `${g.project}(${g.count})`).join(' ')}` : '')
   );
 
+  // 报销台账（采集/批次工作状态）：采集表未配置或查询失败时降级跳过，不影响周报主体
+  let ledger = null;
+  try {
+    ledger = await collectStore.getLedgerSummary();
+  } catch (err) {
+    console.warn('[周播报] 报销台账摘要跳过:', err.message);
+  }
+
   const card = buildWeeklyFinanceCard(followUp, stats, {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
     projects,
     // 未交发票行的私聊状态徽标（无法提交/已延期/已催N次）
     urgeStates: urgeStateStore.init(config.invoiceUrge.stateFile).allRecords(),
+    ledger,
   });
 
   if (options.dryRun) {

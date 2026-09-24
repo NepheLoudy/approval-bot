@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v44**（2026-09-24，随本提交落地）。上一版 v43（432e8a0，事件端点 fail-closed 批）。
+当前最新：**v45**（2026-09-25，随本提交落地）。上一版 v44（e3bc757，发票 OCR 转录服务端能力批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -314,3 +314,19 @@
 - **权限（后台待开通）**：`im:resource`（获取与上传图片或资源）、`optical_char_recognition`（图片识别，高级权限）；feishu-permissions.json/.txt 与 README 权限节同步。开通前调用 OCR 会报错。
 - **接入状态**：本期只落服务端能力（HTTP 端点 + service），消息侧入口（私聊回传识别/审批群交互）待需求方定接口形态后另批接入；真实票据分段形态联调后可经 `/api/ocr/fields` 热改规则。
 - 测试：npm test 全绿（node --check ×3 + 催发票桩全套 + OCR 桩全套）。
+
+### v45 · 2026-09-25 · 随本提交落地 · feat
+
+**发票采集全链路 + 报销批次三件套（对接重庆大学财务/小翼Plus 流程，hub 同批联动）**
+
+- 提交说明：feat: 发票采集全链路(私聊/催办回票+三通道识别+双闸查重+金额归类+采集台账)+报销批次三件套(自动拟批/锁定/打印PDF/BOM)+存量回溯
+- **队员侧交票（减负：干掉「修改审批」交票）**：队员私聊机器人（或催发票私聊直接回图）发 发票 PDF/二维码截图/拍照 → `invoiceParser` 三通道识别（数电票 PDF 文本层直读 > 发票二维码解码（与重大小翼Plus 扫码同源）> OCR 兜底，`looksLikeInvoiceText` 特征词判定非发票图静默忽略不打回）→ 校验闸：查重双闸（发票号精确+日期/金额/销售方三元组近似）→ 抬头校验（`INVOICE_ALLOWED_BUYERS`「名称|税号」可多套，不配只记录）→ 金额归类匹配（精确唯一自动归；名下唯一候选直接归由金额比对闸 ±5%/¥10 兜底标「金额不符」；多候选转财务人工；**候选排除采集台账已收录申请——「发票/补交发票/采集台账」三口径等价的函数级落地**，修连续交多张票时旧记录干扰归类）→ 落「发票采集」表（真源）+回写审批表「补交发票」附件栏（镜像，先读后 append+按记录串行锁防丢图）→ 私聊回执核对单/打回提醒（带缺失要素与重发指引）。
+- **hub 同批联动**（pm-robot chatService）：p2p 图片/文件消息 fire-and-forget 转发 approval-bot `POST /api/invoice/collect`（X-API-Token，usageReport 同源 token）；值日照片线照旧，两条线靠「特征词静默」互不干扰。
+- **催办闭环**：`invoiceUrgeService` 回复轮询扩展 image/file 消息 → 走采集链路；采集成功→补交发票栏回写→下轮催办名单自动排除（`getOverdueInvoices`/`getFinanceFollowUp` 并入采集台账口径，fail-open：采集表未配置退回两栏判断不崩）。
+- **财务三件套（/approval-batch 指令）**：`preview` 票池按项目分组拟批建议；`lock <批次号> [项目]` 锁定（批次号沿用财务既有命名 27备赛N×X，回写采集表「批次」+审批表「报销单」栏，**锁定后顺序不可变、迟到票进下一批**）；`submit/paid/reject <批次号>` 状态流转。锁定即自动生成 ②打印件 PDF（A4 竖版一页两票、严格按录入顺序，pdf-lib；原件缺失生成 ASCII 占位页——pdf-lib 内置字体无中文）③BOM xlsx（exceljs，申请/物资/型号/金额/发票/校验状态+合计），均落「报销批次」表附件。批次状态机 拟批→已锁定→已提交→已到账/已退回。
+- **存量回溯**：`POST /api/invoice/backfill`（X-API-Token）——审批表已交票经 SourceID→`GET /approval/v4/instances/:id` 附件引用→`downloadApprovalFile` 探测式下载（两个候选路径，**飞书各文档源对下载路径表述不一，首次运行即验证，路径有变改 client.js 候选清单**）→识别回填采集表；历史「报销单」批次值同步到采集表（历史批次只记录不重建状态机）。
+- **播报增强**：周报卡新增「报销台账」段（票池待归集张数/金额+各状态批次汇总；采集表未配置降级跳过）。
+- **新表**：审批 base 下「发票采集」「报销批次」（`scripts/create-collect-tables.js` 幂等建表，表 ID 配 `BITABLE_COLLECT_TABLE_ID`/`BITABLE_BATCH_TABLE_ID`）。**采集表为唯一真源，补交发票栏为镜像**（曼波确认：修改审批仅一次机会、队员交票后不再改审批，镜像覆盖风险可忽略）。
+- **依赖新增（全免费 npm）**：sharp/jsqr（二维码解码）、pdf-parse（数电票 PDF 文本）、pdf-lib（打印件排版）、exceljs（BOM）。**权限新增（后台待开通）**：`approval:approval:readonly`（存量回溯）、`drive:drive`（附件转存/打印件/BOM 落表）。
+- **桩测试** `scripts/stub-test-invoice-collect.js`（并入 npm test 与 push 闸门）：解析器（数电票/老票文本、QR 两代格式、特征词）、金额归类四场景、抬头三态、采集链路（收录+镜像+查重双闸+非发票静默+缺要素打回+金额不符）、三口径等价与 fail-open、拟批/锁定/状态流转、端点鉴权 403/400/200/503。**测试先行抓出三处实现缺陷并修复**：take=same 式跨段吞税号、PDF 排版下半页 y 坐标错位、addPage 参数形态错误。
+- 测试：npm test 全绿（node --check ×7 + 催发票桩 + OCR 桩 + 采集桩全套）。

@@ -6,6 +6,8 @@ const { startEventSubscription } = require('./feishu/eventSubscription');
 const { processChatMessage, executeCommand } = require('./services/chatService');
 const approvalService = require('./services/approvalService');
 const ocrService = require('./services/ocrService');
+const invoiceCollectService = require('./services/invoiceCollectService');
+const backfillService = require('./services/backfillService');
 const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
@@ -164,6 +166,45 @@ app.post('/api/ocr/fields', requireApiToken, (req, res) => {
     }
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// ---------- 发票采集（hub 转发 p2p 图片/文件消息，duty observe 同款契约） ----------
+// body: {type:'invoice_image', openId, senderName?, messageId, fileKey, msgType('image'|'file'), fileName?}
+// 写端点挂 X-API-Token（hub 转发带头，同运维台代理）
+
+app.post('/api/invoice/collect', requireApiToken, async (req, res) => {
+  if (!config.ocr.enabled) {
+    return res.status(503).json({ error: 'OCR 功能未启用（.env 配 OCR_ENABLED=false 关闭中）' });
+  }
+  const { openId, senderName, messageId, fileKey, msgType, fileName, type } = req.body || {};
+  if (type && type !== 'invoice_image') {
+    return res.status(400).json({ error: `未知转发类型: ${type}` });
+  }
+  if (!openId || !messageId || !fileKey) {
+    return res.status(400).json({ error: '缺少参数：openId/messageId/fileKey 必填' });
+  }
+  try {
+    const result = await invoiceCollectService.collectFromMessage({
+      openId, senderName, messageId, fileKey,
+      msgType: msgType || 'image', fileName: fileName || '', source: 'private',
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('发票采集失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 存量发票回溯（管理端点）：把审批表已交票通过审批实例接口下载识别后回填采集表。
+// body 传 {"limit": 20} 控制单次条数；首次运行即验证审批附件下载路径（探测式）
+app.post('/api/invoice/backfill', requireApiToken, async (req, res) => {
+  try {
+    const result = await backfillService.backfillCollect(req.body || {});
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('存量发票回溯失败:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

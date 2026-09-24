@@ -19,7 +19,7 @@
 
 ## 二、飞书应用配置（共用应用，仅需补充权限/事件）
 
-1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:message.p2p_msg:readonly`（回复轮询）、`contact:user.base:readonly`、`im:resource`（下载用户回传的发票图片）、`optical_char_recognition`（图片识别，发票 OCR 用，高级权限需后台申请）；`im:chat` 曾申请但后台未实际开通，勿依赖
+1. **权限**（见 `feishu-permissions.json`）：`bitable:app`、`im:message`、`im:message:send_as_bot`、`im:message.p2p_msg:readonly`（回复轮询）、`contact:user.base:readonly`、`im:resource`（下载用户回传的发票图片）、`optical_char_recognition`（图片识别，发票 OCR 用，高级权限需后台申请）、`approval:approval:readonly`（审批实例读取，存量回溯用）、`drive:drive`（云空间文件上传下载，附件转存/打印件/BOM 落表用）；`im:chat` 曾申请但后台未实际开通，勿依赖
 2. **事件订阅**：`im.message.receive_v1`（由 feishu-gateway 长连接接收）
 3. **审批群自定义机器人**：Webhook 完整地址存 `.env` 的 `BOT_WEBHOOK_URL`（勿写入文档/仓库）
 
@@ -154,16 +154,24 @@ curl http://localhost:3002/api/health
 | POST | `/api/ocr/transcribe` | 发票图像 OCR 转录（X-API-Token）：body `{messageId, imageKey}` 或 `{imageBase64}` → `{segments, fullText, fields, misses, meta}` |
 | GET | `/api/ocr/fields` | 定制窗口：OCR 字段提取规则全景（只读） |
 | POST | `/api/ocr/fields` | OCR 字段提取规则热改（X-API-Token）：`{action:'set', rules:[...]}` 整表替换 / `{action:'reset'}` 恢复内置默认 |
+| POST | `/api/invoice/collect` | 发票采集（X-API-Token，hub 转发 p2p 图片/文件）：`{openId, messageId, fileKey, msgType}` → 识别+归类+落采集台账+私聊回执 |
+| POST | `/api/invoice/backfill` | 存量发票回溯（X-API-Token）：`{"limit":20}` 拉审批实例附件识别回填采集表（探测式下载路径，首次运行即验证） |
 
-## 七、发票 OCR 转录（2026-09-24 起）
+## 七、发票采集与报销批次（2026-09-25 起，对接重庆大学财务流程）
 
-**引擎**：飞书开放平台「识别图片中的文字」（`POST /open-apis/optical_char_recognition/v1/image/basic_recognize`），**免费**（单租户 20 QPS，图片 <5MB），识别按区域分段返回文本列表。发票图下载自飞书消息、识别在飞书侧完成，**数据不经第三方**；图片不落盘（内存直传），转录结果不持久化。
+**队员侧交票（私聊直交，含催办私聊）**：队员把发票（数电票 PDF / 二维码截图 / 拍照）直接私聊机器人，或催发票私聊里直接回图——机器人三通道识别（PDF 文本层直读 > 发票二维码解码（与小翼Plus 扫码同源）> OCR 兜底），自动完成：查重双闸（发票号精确 + 日期/金额/销售方三元组近似）→ 抬头校验（`INVOICE_ALLOWED_BUYERS` 配置「名称|税号」，可多套）→ 金额归类匹配（金额精确唯一自动归类；名下仅一条待交票直接归，金额比对闸 ±5%/¥10 兜底标「金额不符」；多候选转财务人工）→ 落「发票采集」表（**真源**）+ 回写审批表「补交发票」附件栏（镜像，先读后 append 按记录串行）→ 私聊回执（归类明细+金额核对单）。**非发票图（表情包等）按特征词静默忽略不打回**；识别出是发票但缺查验三要素（号码/日期/价税合计）→ 打回提醒（带缺失项与重发指引）。采集成功即视为已交票（与「发票/补交发票」两栏等价口径），自动出催办名单。
 
-**「某些区域转录」**：飞书 OCR 无坐标，区域提取靠**可配置的字段规则**在分段文本上完成——`anchor`（标签关键词，take: `same` 本段冒号后 / `next` 下一段 / `same_or_next` 默认先本段后下一段；`occurrence` 指定第 N 次命中，区分买方/卖方同标签）与 `regex`（正则，取捕获组 1 或整个匹配）。内置默认规则覆盖：发票号码 / 开票日期 / 购买方与销售方名称及税号 / 价税合计（大写+小写）。规则经 `POST /api/ocr/fields` 热改即时生效，持久化在 `OCR_FIELDS_FILE`（默认 `.ocr-fields.local.json`；**生产配到项目目录之外**——SFTP 部署会清空项目目录，项目内该文件已加入 push.js 打包排除清单）。
+**财务三件套（/approval-batch）**：
+- ① 选批+扫码：`/approval-batch` 拟批建议（票池按项目分组、张数/金额/异常数）；`/approval-batch lock <批次号> [项目]` 锁定（批次号沿用财务既有命名如 `27备赛20步兵5`）→ 自动回写采集表「批次」+ 审批表「报销单」栏；输出逐张查验要素清单照单扫小翼Plus；
+- ② 打印文件：锁定即自动生成 **A4 竖版一页两票 PDF，严格按录入顺序**（=扫码顺序），落「报销批次」表「打印文件」附件；原件缺失/解码失败的票生成占位页标明槽位；
+- ③ BOM 表：锁定即自动生成 xlsx（申请编号/项目/物资/型号规格/发起人/申请金额/发票号/发票金额/校验状态+合计），落「报销批次」表「BOM表」附件；
+- 状态机：拟批 → 已锁定 → `/approval-batch submit|paid|reject <批次号>`（已提交/已到账/已退回）。**锁定后顺序不可变**，迟到票只能进下一批。
 
-**权限前置**：需在飞书后台给共用应用开通「获取与上传图片或资源」(`im:resource`) 与「图片识别」(`optical_char_recognition`，高级权限) 两个权限，未开通时 OCR 调用报错，可 `OCR_ENABLED=false` 关闭端点（503）。
+**台账与播报**：周报卡新增「报销台账」段（票池待归集张数/金额 + 各状态批次汇总）；`GET /api/approval/policy` 含 ocr 段。采集/批次两表建在审批 base 下（`scripts/create-collect-tables.js` 幂等建表），**采集表为唯一真源**，审批表「补交发票」栏仅为财务可见镜像（队员交票后不会自行修改审批，镜像被覆盖风险可忽略）。
 
-**接入状态**：本期只暴露服务端能力（HTTP 端点 + `src/services/ocrService.js`），消息侧入口（私聊回传图片识别 / 审批群交互）待定后接入。真实票据的分段形态与内置规则如有出入，先调 `/api/ocr/transcribe` 看 `segments` 实况，再按实况热改字段规则。
+**权限前置**：在「图片识别」`optical_char_recognition` +「获取与上传图片或资源」`im:resource`（v44 已列）基础上，需再开通**审批只读**（审批实例详情/附件下载）与**云文档**读写（附件上传下载）；后台开通前采集链路会在下载/识别环节报错，报错信息如实透出。
+
+**OCR 引擎说明（v44 落地）**：飞书开放平台「识别图片中的文字」（`POST /open-apis/optical_char_recognition/v1/image/basic_recognize`），免费（20 QPS、图片 <5MB），数据不出飞书体系；图片不落盘（内存直传）。`POST /api/ocr/transcribe` + `GET/POST /api/ocr/fields`（字段规则热改）仍独立可用。
 
 ## 八、机器人指令（仅审批群，需 @爆米花机-对话型）
 
@@ -174,6 +182,7 @@ curl http://localhost:3002/api/health
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
 | `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「今日已催」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
+| `/approval-batch` | 报销批次三件套：`/approval-batch` 拟批建议；`lock <批次号> [项目]` 锁定（回写两表+生成打印PDF+BOM）；`status` 总览；`submit/paid/reject <批次号>` 标记已提交/已到账/已退回 |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
@@ -205,8 +214,13 @@ approval-bot/
 │   │   └── eventSubscription.js   # 消息事件接入（长连接调试模式；生产走网关转发）
 │   ├── services/
 │   │   ├── approvalService.js     # 数据查询 + 财务催办三分支 + 超期未交发票 + 周统计按项目分组
+│   │   ├── backfillService.js     # 存量发票回溯（审批实例附件下载识别回填采集表）
+│   │   ├── batchService.js        # 报销批次三件套（拟批/锁定/打印PDF一页两票/BOM xlsx）
 │   │   ├── broadcastService.js    # 每周财务催办周报（支持 dryRun 预览）
-│   │   ├── invoiceUrgeService.js  # 催发票私聊（回复轮询/通讯录兜底/间隔闸/状态过滤/计数升级，支持 dryRun）
+│   │   ├── collectStore.js        # 发票采集表+报销批次表数据层（真源台账/查重/状态机）
+│   │   ├── invoiceCollectService.js # 发票采集（校验闸/金额归类/落表/回执打回）
+│   │   ├── invoiceParser.js       # 三通道识别解析（PDF文本/二维码/OCR特征词）
+│   │   ├── invoiceUrgeService.js  # 催发票私聊（回复轮询/回票采集/通讯录兜底/间隔闸/状态过滤/计数升级，支持 dryRun）
 │   │   ├── ocrService.js          # 发票 OCR 转录（飞书免费 OCR + 字段提取规则引擎 + 规则持久化热改）
 │   │   ├── urgeStateStore.js      # 催发票状态持久化（JSON 文件，路径可配）
 │   │   ├── reminderService.js     # 每日待审批提醒

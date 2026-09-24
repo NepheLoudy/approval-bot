@@ -80,10 +80,12 @@ async function handleHelpCommand() {
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
+    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] | status | submit/paid/reject <批次号>',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
-    '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账）',
-    '催发票私聊：已通过满 14 天未交发票将私聊发起人催交（每天 10:30）',
+    '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账 + 报销台账状态）',
+    '催发票私聊：已通过满 14 天未交发票将私聊发起人催交（每天 10:30）；',
+    '  私聊直接回发票图片/PDF 即可交票，机器人自动识别归类并回执',
   ].join('\n');
 }
 
@@ -222,7 +224,70 @@ const commandHandlers = {
   '/approval-pending': handlePendingCommand,
   '/approval-status': handleStatusCommand,
   '/approval-urge': handleUrgeCommand,
+  '/approval-batch': handleBatchCommand,
 };
+
+/**
+ * 报销批次三件套指令（财务三件套自动化）：
+ *   /approval-batch                      → 拟批建议（票池按项目分组）
+ *   /approval-batch lock <批次号> [项目]  → 锁定（回写两表+生成打印PDF+BOM）
+ *   /approval-batch status               → 批次总览
+ *   /approval-batch submit <批次号>      → 标记已提交学校
+ *   /approval-batch paid <批次号>        → 标记已到账
+ *   /approval-batch reject <批次号>      → 标记已退回（退回票自动回票池可重新归批）
+ */
+async function handleBatchCommand(args = []) {
+  const batchService = require('./batchService'); // 延迟 require：重依赖（pdf-lib/exceljs）仅在用到时加载
+  const [sub, batchNo, project] = args;
+
+  if (!sub || sub === 'preview') {
+    const { poolSize, suggestions } = await batchService.previewBatch();
+    if (!poolSize) return '📥 票池为空：没有待归集的已采集发票（队员私聊/催办回票后自动入池）';
+    const lines = [`📋 票池 ${poolSize} 张待归集，按项目分组建议：`];
+    for (const s of suggestions) {
+      lines.push(`· ${s.project}：${s.count} 张 ¥${s.amount.toFixed(2)}（${s.range}）${s.warningCount ? `⚠️ 含 ${s.warningCount} 张待人工/异常` : ''}`);
+    }
+    lines.push('锁定：/approval-batch lock <批次号> [项目]（批次号沿用财务命名，如 27备赛20步兵5；不传项目=锁定全池）');
+    lines.push('锁定后自动生成 打印件PDF（按录入顺序一页两票）+ BOM表，落「报销批次」表附件');
+    return lines.join('\n');
+  }
+
+  if (sub === 'lock') {
+    if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目]';
+    const r = await batchService.lockBatch(batchNo, project || '');
+    const lines = [
+      `✅ 批次已锁定：${r.batchNo}（${r.projects.join('/')}）`,
+      `· ${r.count} 张发票 ¥${r.amount.toFixed(2)}，已回写审批表「报销单」栏 ${r.approvalWritten} 条`,
+      r.pdfToken ? '· 🖨️ 打印件 PDF 已生成（按录入顺序，一页两票）→ 报销批次表附件' : '· ⚠️ 打印件 PDF 生成失败（见日志，可稍后重试）',
+      r.bomToken ? '· 📊 BOM 表已生成 → 报销批次表附件' : '· ⚠️ BOM 生成失败（见日志）',
+      `· 逐张扫小翼Plus 录入后：/approval-batch submit ${r.batchNo}`,
+    ];
+    return lines.join('\n');
+  }
+
+  if (sub === 'status') {
+    const batches = await batchService.batchOverview();
+    if (!batches.length) return '📊 暂无报销批次（/approval-batch 先看拟批建议）';
+    const lines = ['📊 报销批次总览：'];
+    for (const b of batches) {
+      lines.push(`· ${b.batchNo}（${b.project}）：${b.count} 张 ¥${b.amount.toFixed(2)}【${b.status}】`);
+    }
+    return lines.join('\n');
+  }
+
+  const statusMap = {
+    submit: { status: '已提交', label: '已提交学校' },
+    paid: { status: '已到账', label: '已到账' },
+    reject: { status: '已退回', label: '已退回' },
+  };
+  if (statusMap[sub]) {
+    if (!batchNo) return `❌ 用法：/approval-batch ${sub} <批次号>`;
+    const r = await batchService.markBatch(batchNo, statusMap[sub].status);
+    return `✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`;
+  }
+
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] | status | submit/paid/reject <批次号>';
+}
 
 /**
  * 执行指令并返回回复文本（群聊消息与 HTTP 转发共用）

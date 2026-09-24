@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "deploy": "node push.js",
-    "test": "node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js",
+    "test": "node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node --check src/services/invoiceParser.js && node --check src/services/invoiceCollectService.js && node --check src/services/batchService.js && node --check src/services/backfillService.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js && node scripts/stub-test-invoice-collect.js",
     "push": "node push.js"
   },
   "keywords": [
@@ -22,8 +22,15 @@
     "@larksuiteoapi/node-sdk": "^1.2.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "express": "^4.19.2",
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
     "node-cron": "^3.0.3",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^2.4.5",
+    "pngjs": "^7.0.0",
+    "sharp": "^0.35.4",
     "ssh2": "^1.17.0"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const urgeStateStore = require('./urgeStateStore');
+const invoiceCollectService = require('./invoiceCollectService');
 const contacts = require('../feishu/contacts');
 const bot = require('../feishu/bot');
 const client = require('../feishu/client');
@@ -117,7 +118,7 @@ function fmtDay(ms) {
  */
 async function pollAllReplies(options = {}) {
   ensureInit();
-  const stats = { users: 0, deferred: 0, cannotSubmit: 0, ignored: 0 };
+  const stats = { users: 0, deferred: 0, cannotSubmit: 0, ignored: 0, collected: 0, rejected: 0, duplicated: 0, collectFailed: 0 };
 
   // 遍历有会话的用户（open_id 从 state 里取；sendTextToUser 只收 open_id）
   for (const [openId, user] of Object.entries(urgeStateStore.allUsers())) {
@@ -136,7 +137,38 @@ async function pollAllReplies(options = {}) {
     for (const msg of messages) {
       const createTime = Number(msg.create_time) || 0;
       if (createTime > lastRead) lastRead = createTime;
-      if (!isFromUser(msg) || msg.msg_type !== 'text') continue;
+      if (!isFromUser(msg)) continue;
+
+      // 催办私聊直接回发票（图片/PDF，2026-09-25 起）：走发票采集链路，
+      // 采集成功→回写补交发票栏→下轮催办名单自动排除；dry-run(silent) 不消费
+      if (msg.msg_type === 'image' || msg.msg_type === 'file') {
+        if (options.silent) { stats.ignored++; continue; }
+        const content = parseMsgContent(msg);
+        const fileKey = msg.msg_type === 'image' ? content.image_key : content.file_key;
+        if (!fileKey) { stats.ignored++; continue; }
+        try {
+          const r = await invoiceCollectService.collectFromMessage({
+            openId,
+            senderName: user.name || '',
+            messageId: msg.message_id,
+            fileKey,
+            msgType: msg.msg_type,
+            fileName: content.file_name || '',
+            source: 'urge_reply',
+          });
+          if (r.action === 'collected') stats.collected++;
+          else if (r.action === 'duplicated') stats.duplicated++;
+          else stats.rejected++;
+        } catch (err) {
+          stats.collectFailed++;
+          console.warn(`[催发票] 回票采集失败 ${openId}: ${err.message}`);
+          try {
+            await bot.sendTextToUser(openId, `⚠️ 发票接收失败：${err.message}\n请重发一次；仍失败请直接联系财务人工登记。`);
+          } catch (e) { /* 回执失败不中断轮询 */ }
+        }
+        continue;
+      }
+      if (msg.msg_type !== 'text') continue;
 
       const text = extractMsgText(msg);
       const kind = parseReply(text);
@@ -234,6 +266,18 @@ function extractMsgText(message) {
     return (content && content.text) || '';
   } catch (e) {
     return '';
+  }
+}
+
+/** 消息 content JSON 解析（image/file 的 image_key/file_key 提取用） */
+function parseMsgContent(message) {
+  try {
+    const content = typeof message.body?.content === 'string'
+      ? JSON.parse(message.body.content)
+      : message.body?.content;
+    return content || {};
+  } catch (e) {
+    return {};
   }
 }
 

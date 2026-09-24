@@ -26,7 +26,7 @@ function runTestGate() {
     return true;
   }
   const { spawnSync } = require('child_process');
-  const cmd = 'node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js';
+  const cmd = 'node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node --check src/services/invoiceParser.js && node --check src/services/invoiceCollectService.js && node --check src/services/batchService.js && node --check src/services/backfillService.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js && node scripts/stub-test-invoice-collect.js';
   if (!cmd) { console.log('[测试闸门] 无测试命令，跳过'); return true; }
   console.log('[测试闸门] 运行:', cmd);
   const r = spawnSync(cmd, { shell: true, stdio: 'inherit', cwd: __dirname });

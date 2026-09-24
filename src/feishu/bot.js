@@ -277,6 +277,17 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     note: '（完成时间已超 3 个月）',
   });
 
+  // 4. 报销台账（发票采集/批次工作状态，2026-09-25 起；采集服务异常时缺省跳过）
+  if (options.ledger) {
+    const L = options.ledger;
+    const ledgerLines = ['**📚 报销台账（采集/批次工作状态）**', `- 票池待归集：${L.poolCount} 张 ¥${Number(L.poolAmount).toFixed(2)}（/approval-batch 锁定成批）`];
+    for (const [status, s] of Object.entries(L.batches || {})) {
+      ledgerLines.push(`- ${status}：${s.count} 批 ¥${Number(s.amount).toFixed(2)}`);
+    }
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: ledgerLines.join('\n') });
+  }
+
   // 底部：本周统计（仅本周结果，不放全量数据）+ 按项目粗分类
   elements.push({ tag: 'hr' });
   const statLines = [
