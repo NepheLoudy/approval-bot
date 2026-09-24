@@ -366,8 +366,16 @@ async function markBatch(batchNo, status) {
   };
 }
 
-/** 批次总览（/approval-batch status 用） */
+/** 批次总览（/approval-batch status 用）：按状态机先后分组（未知的排最后），组内金额降序 */
 async function batchOverview() {
+  const { BATCH_STATUS } = collectStore;
+  const statusOrder = {
+    [BATCH_STATUS.DRAFT]: 0,
+    [BATCH_STATUS.LOCKED]: 1,
+    [BATCH_STATUS.SUBMITTED]: 2,
+    [BATCH_STATUS.PAID]: 3,
+    [BATCH_STATUS.REJECTED]: 4,
+  };
   const batches = await collectStore.listBatches();
   return batches
     .map(b => ({
@@ -377,7 +385,7 @@ async function batchOverview() {
       amount: typeof b.fields['金额合计'] === 'number' ? b.fields['金额合计'] : (parseFloat(b.fields['金额合计']) || 0),
       status: b.fields['状态'] || collectStore.BATCH_STATUS.LOCKED,
     }))
-    .sort((a, b) => (a.status === b.status ? b.amount - a.amount : 0));
+    .sort((a, b) => ((statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99) || b.amount - a.amount));
 }
 
 module.exports = {

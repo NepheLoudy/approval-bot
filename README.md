@@ -61,7 +61,8 @@
 │    └─ 卡片底部：本周统计（近7天新增/通过/拒绝，
 │         并按「项目」字段粗分类：各项目条数分布）
 │
-├─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE）
+├─ 每天 09:00（DAILY_INVOICE_REMINDER_SCHEDULE，代码默认留空=不启用，
+│    现网 .env 已配置 09:00）
 │    ⏰ 待审批提醒：有「审批中」记录才发送，@当前处理人
 │    （仅当全部待审批记录的处理人均为空时，才整体回落 @ 配置审批人）
 │
@@ -144,9 +145,9 @@ curl http://localhost:3002/api/health
 | GET | `/api/approvals/pending` | 审批中列表 |
 | GET | `/api/approvals/stats` | 审批统计 |
 | GET | `/api/approvals/:id` | 审批详情 |
-| POST | `/api/bot/test-broadcast` | 立即触发一次周播报（测试） |
-| POST | `/api/bot/test-reminder` | 立即触发一次每日提醒（测试） |
-| POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，body 传 `{"dryRun":true}` 只预览不发送、不消费申请人回复、不改状态） |
+| POST | `/api/bot/test-broadcast` | 立即触发一次周播报（测试，X-API-Token） |
+| POST | `/api/bot/test-reminder` | 立即触发一次每日提醒（测试，X-API-Token） |
+| POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，X-API-Token；body 传 `{"dryRun":true}` 只预览不发送、不消费申请人回复、不改状态） |
 | GET | `/api/bot/cron-status` | 定时任务状态 + 下次执行时间 |
 | GET | `/api/bot/history` | 播报历史 |
 | POST | `/api/chat/command` | 指令转发端点（`{command, args}` → `{reply}`） |
@@ -155,7 +156,7 @@ curl http://localhost:3002/api/health
 | GET | `/api/ocr/fields` | 定制窗口：OCR 字段提取规则全景（只读） |
 | POST | `/api/ocr/fields` | OCR 字段提取规则热改（X-API-Token）：`{action:'set', rules:[...]}` 整表替换 / `{action:'reset'}` 恢复内置默认 |
 | POST | `/api/invoice/collect` | 发票采集（X-API-Token，hub 转发 p2p 图片/文件）：`{openId, messageId, fileKey, msgType}` → 识别+归类+落采集台账+私聊回执 |
-| POST | `/api/invoice/backfill` | 存量发票回溯（X-API-Token）：`{"limit":20}` 拉审批实例附件识别回填采集表（探测式下载路径，首次运行即验证） |
+| POST | `/api/invoice/backfill` | 存量发票回溯（X-API-Token）：`{"limit":20}` 拉审批实例附件识别回填采集表（探测式下载路径，首次运行即验证）。**前置：`.env` 需配 `APPROVAL_CODE`（审批实例 code）**，未配置时按设计返回 400 指引 |
 
 ## 七、发票采集与报销批次（2026-09-25 起，对接重庆大学财务流程）
 
@@ -182,7 +183,7 @@ curl http://localhost:3002/api/health
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
 | `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「今日已催」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
-| `/approval-batch` | 报销批次三件套：`/approval-batch` 拟批建议；`lock <批次号> [项目]` 锁定（回写两表+生成打印PDF+BOM）；`status` 总览；`submit/paid/reject <批次号>` 标记已提交/已到账/已退回 |
+| `/approval-batch` | 报销批次三件套：`/approval-batch` 拟批建议；`lock <批次号> [项目]` 锁定（回写两表+生成打印PDF+BOM）；`status` 总览；`submit/paid/reject <批次号>` 标记已提交/已到账/已退回；`regen <批次号>` 重新生成该批次打印PDF/BOM附件（附件缺失或损坏时自愈，不改动状态与票池） |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
 
@@ -234,6 +235,12 @@ approval-bot/
 ├── scripts/dryrun-invoice-urge.js # 催发票私聊 dry-run 预览（不发送）
 ├── scripts/dryrun-urge-state.js   # 催发票本地状态检查/清理工具
 ├── scripts/test-invoice-urge.js   # 催发票桩测试（回复解析/间隔闸/计数升级，接入 push 闸门）
+├── scripts/create-collect-tables.js # 发票采集表+报销批次表幂等建表（改表结构先改这里）
+├── scripts/stub-test-ocr.js       # OCR 字段规则引擎桩测试
+├── scripts/stub-test-invoice-collect.js # 发票采集链路桩测试（查重/归类/打回闸）
+├── scripts/drill-ocr-compat.js    # OCR 兼容性演练（离线 12 用例合成；产物落 .drill/ 不进 git）
+├── scripts/drill-online.js        # OCR 在线端点探测演练（产物落 .drill/ 不进 git）
+├── 财务协作指南.md                 # 面向财务的人机协作流程（交票/三件套/例外处理/FAQ）
 ├── feishu-permissions.json        # 飞书应用权限清单
 ├── push.js                        # 一键部署（git/SFTP + .env 上传）
 └── package.json

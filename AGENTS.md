@@ -1,7 +1,7 @@
 # approval-bot 开发边界（防需求发错会话）
 
 ## 本项目职能
-财务审批机器人：仅服务审批群（BOT_CHAT_ID），`/approval-*` 指令；每周财务催办周报（催发票→催制单→催转账，周一 18:00）；每日待审批提醒（09:00）；催发票私聊（每 2 天一催、任务每天 10:30 跑，已通过满 14 天仍未交发票 → 私聊发起人并附审批实例链接；私聊后轮询 p2p 会话消息识别「延期/无法提交」回复，同一笔满 5 次升级周报；实际催交日独立群播「今日已催」卡——今日明细+需财务关注（多次催交/无法提交/发起人退队），与周报分开）。**纯定时拉取，无事件消费**；群指令由 feishu-gateway/hub 转发。工单审批任务的自动通过是 ticket-bot 在做（approvalLinkService），本项目不碰工单审批定义与审批人白名单。
+财务审批机器人：仅服务审批群（BOT_CHAT_ID），`/approval-*` 指令；每周财务催办周报（催发票→催制单→催转账，周一 18:00）；每日待审批提醒（09:00）；催发票私聊（每 2 天一催、任务每天 10:30 跑，已通过满 14 天仍未交发票 → 私聊发起人并附审批实例链接；私聊后轮询 p2p 会话消息识别「延期/无法提交」回复，同一笔满 5 次升级周报；实际催交日独立群播「今日已催」卡——今日明细+需财务关注（多次催交/无法提交/发起人退队），与周报分开）。**发票采集全链路（v44-v46 起）**：hub 把 p2p 图片/文件观察转发到本仓 `POST /api/invoice/collect`，三通道识别（PDF 文本层/二维码/飞书 OCR 兜底）+ 双闸查重（发票号精确 + 日期/金额/税号三元组近似）+ 抬头校验，落「发票采集」表并镜像回写审批表「补交发票」；`/approval-batch` 报销批次三件套（lock 拟批/打印 PDF+BOM xlsx/submit|paid|reject 状态机/regen 附件自愈）；`/api/invoice/backfill` 存量票回溯（APPROVAL_CODE 驱动）。**纯定时拉取+hub 观察转发，无事件消费**；群指令由 feishu-gateway/hub 转发。工单审批任务的自动通过是 ticket-bot 在做（approvalLinkService），本项目不碰工单审批定义与审批人白名单。
 
 
 ## 顶层规则与交互性（每次开工先读）
@@ -13,10 +13,10 @@
 - 指令交互契约：`POST /api/chat/command`，入参 `{command, args}`，回 `{reply}`（回复由调用方——网关或 hub——代发）；
 - 群播报走群自定义机器人 webhook，对话回复走飞书 IM API；
 - 部署一律项目内 `npm run push "说明"`（规则见 qianli-deploy skill 与顶层 AGENTS.md），NAS 凭证在 .env 的 NAS_*；
-- 通用坑：@识别要兼容 mentioned_type='bot'；多维表格字段值先过 fieldText 类工具再拼字符串；express.json 建议放宽到 2mb。
+- 通用坑：@识别要兼容 mentioned_type='bot'；多维表格字段值先过 fieldText 类工具再拼字符串；express.json 需放宽到 10mb（OCR base64 直传，v46）。
 
 顶层职能速览（需求跨项目即停，走上方"发错时的规定动作"）：
-ticket-bot=工单域｜approval-bot=财务审批｜project-management-robot=对话枢纽+DDL｜bambu-print-reservation=打印预约｜feishu-gateway=事件接入｜qianli 顶层=部署/架构/整理。
+ticket-bot=工单域｜approval-bot=财务审批｜project-management-robot=对话枢纽+DDL｜bambu-print-reservation=打印预约｜duty-bot=值日+快递｜wecom-attendance-bot=企业微信考勤周报｜feishu-gateway=事件接入｜qianli 顶层=部署/架构/整理。
 
 ## 只管这些（归属信号）
 审批、发票、报销单、转账、财务、采购、审批群指令、催办、APPROVERS、审批多维表格字段。

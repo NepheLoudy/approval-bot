@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v47**（2026-09-25，随本提交落地）。上一版 v46（全量复查修复批）。
+当前最新：**v48**（2026-09-25，随本提交落地）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -351,3 +351,12 @@
 - 面向财务同学的实战手册，以工作流为主线：人机分工总览表 → 平时收票（全自动+四类例外处理表）→ 报销三件套四步（拟批/锁定/小翼Plus 录入/submit-paid-reject）→ 台账与周报 → 五条 FAQ → 机器人边界（学校系统操作与最终核对责任在人）。
 - 随批同步：桌面《机器人总成使用指南.html》财务卡片补发票直交/三件套/台账能力与周报台账段表述。
 - 纯文档批，无行为改动；npm test 闸门照跑全绿。
+
+## v48 · 2026-09-25 · 随本提交落地 · fix+docs
+
+**batchOverview 排序比较器修复 + 全量审查文档批**
+
+- 提交说明：fix: /approval-batch status 排序比较器失效修复（状态机分组+组内金额降序）+ README/AGENTS 文档批
+- **排序修复**：`batchOverview` 原比较器 `(a.status === b.status ? b.amount - a.amount : 0)` 对不同状态恒返回 0 等于不排序，总览分组直觉失效；改为 BATCH_STATUS 状态机先后分组（拟批→已锁定→已提交→已到账→已退回，未知状态排最后）、组内金额降序。
+- **文档批（全量审查对齐，v45-v47 文档欠账收口）**：README 补 `/approval-batch regen` 子指令（v46 P2-5）、API 表 test-* 三行补 X-API-Token 标注、每日提醒注明「代码默认留空=不启用」、backfill 前置 APPROVAL_CODE（未配置按设计返 400）、项目结构补 v44-v46 五个新脚本与财务协作指南；AGENTS 职能段补发票采集全链路/批次三件套（v44-v47）、express.json 表述改 10mb 现状、速览补 duty/wecom；quietHours/urgeStateStore 两处过时注释修正（/api/broadcast→/api/bot/test-*、NAS→部署目标）。
+- **测试**：npm test 全链过（语法检查×7 + test-invoice-urge + stub-test-ocr + stub-test-invoice-collect）；排序为纯展示层修复，桩无新断言（batchOverview 不在桩覆盖面，行为人工核对）。
