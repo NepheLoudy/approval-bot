@@ -146,4 +146,12 @@ module.exports = {
     bankCardNo: process.env.CQ_BANK_CARD_NO || '',
     bankName: process.env.CQ_BANK_NAME || '',
   },
+
+  // 报销台账电子表格同步（submit 追加行 / paid·reject 回填状态；空 token = 关闭）
+  ledger: {
+    // 《2027年千里团队报销台账》
+    spreadsheetToken: process.env.LEDGER_SPREADSHEET_TOKEN || '',
+    // 工作表 sheet_id（留空 = 取第一个工作表）
+    sheetId: process.env.LEDGER_SHEET_ID || '',
+  },
 };

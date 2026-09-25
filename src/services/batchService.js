@@ -126,6 +126,8 @@ async function lockBatch(batchNo, project, options = {}) {
     const purpose = String(options.purpose || '').trim() || primaryProject;
     const feeItem = String(options.feeItem || '').trim() || config.batch.feeItem;
     const purchaseType = String(options.purchaseType || '').trim() || config.batch.purchaseType;
+    const payee = String(options.payee || '').trim() || config.batch.reporterName;
+    const payeeAccount = String(options.payeeAccount || '').trim() || config.batch.bankCardNo;
     const ordinal = await nextProjectOrdinal(primaryProject);
     const summary = composeSummary({ project: primaryProject, purpose, ordinal });
 
@@ -143,6 +145,8 @@ async function lockBatch(batchNo, project, options = {}) {
       '笔序': ordinal,
       '费用项': feeItem,
       '采购类型': purchaseType,
+      '收款方': payee,
+      '收款账号': payeeAccount,
       ...(options.note ? { '备注': options.note } : {}),
     });
 

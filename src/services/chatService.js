@@ -80,8 +80,9 @@ async function handleHelpCommand() {
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
-    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] | status |',
-    '                    submit/paid/reject <批次号> | regen <批次号>',
+    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [收款方=xx] | status |',
+    '                    submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger <批次号>',
+    '                    （submit/paid/reject 自动同步《报销台账》电子表格）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
@@ -237,9 +238,11 @@ const commandHandlers = {
  *                                        → 锁定（回写两表 + 生成 打印PDF/BOM/物料清单/投递底单
  *                                          + 审批群发交付卡，回复「接取」领取）
  *   /approval-batch status               → 批次总览（含接取人）
- *   /approval-batch submit <批次号>      → 标记已提交学校
- *   /approval-batch paid <批次号>        → 标记已到账（回执附归档文件夹名建议）
- *   /approval-batch reject <批次号>      → 标记已退回（退回票自动回票池可重新归批）
+ *   /approval-batch submit <批次号> [投递单号] → 标记已提交学校 + 台账表追加行（幂等）
+ *   /approval-batch paid <批次号>        → 标记已到账（台账回填入账日期+已到账）+ 归档名建议
+ *   /approval-batch reject <批次号>      → 标记已退回（台账标记已退回；退回票自动回票池）
+ *   /approval-batch regen <批次号>       → 四件附件重新生成
+ *   /approval-batch ledger <批次号> [投递单号] → 手动把批次同步进台账电子表格
  *   /approval-batch regen <批次号>       → 四件附件重新生成
  *   接取 [批次号]                        → 审批群回复「接取」领取交付包（登记接取人）
  */
@@ -260,20 +263,22 @@ async function handleBatchCommand(args = [], ctx = {}) {
   }
 
   if (sub === 'lock') {
-    // 位置参数：批次号 [项目]；键值参数：用途=/费用项=/采购类型=（覆盖投递底单/物料清单默认值）
+    // 位置参数：批次号 [项目]；键值参数：用途=/费用项=/采购类型=/收款方=/收款账号=（覆盖 .env 默认）
     const kv = {};
     const positional = [];
     for (const a of args.slice(1)) {
-      const m = a.match(/^(用途|费用项|采购类型)=(.+)$/);
+      const m = a.match(/^(用途|费用项|采购类型|收款方|收款账号)=(.+)$/);
       if (m) kv[m[1]] = m[2].trim();
       else positional.push(a);
     }
     const [batchNo, project] = positional;
-    if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]';
+    if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx 收款账号=xx]';
     const r = await batchService.lockBatch(batchNo, project || '', {
       purpose: kv['用途'] || '',
       feeItem: kv['费用项'] || '',
       purchaseType: kv['采购类型'] || '',
+      payee: kv['收款方'] || '',
+      payeeAccount: kv['收款账号'] || '',
     });
     const lines = [
       `✅ 批次已锁定：${r.batchNo}（${r.projects.join('/')}）`,
@@ -317,12 +322,26 @@ async function handleBatchCommand(args = [], ctx = {}) {
     reject: { status: '已退回', label: '已退回' },
   };
   if (statusMap[sub]) {
-    if (!args[1]) return `❌ 用法：/approval-batch ${sub} <批次号>`;
+    if (!args[1]) return `❌ 用法：/approval-batch ${sub} <批次号>${sub === 'submit' ? ' [投递单号]' : ''}`;
+    const deliveryNo = sub === 'submit' ? (args[2] || '') : '';
     const r = await batchService.markBatch(args[1], statusMap[sub].status);
     const lines = [`✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`];
+    // 报销台账电子表格同步（写失败不影响批次状态流转，回执如实提示可重试）
+    lines.push(await syncLedgerQuietly(sub, r.batchNo, deliveryNo));
     if (r.archiveFolder) lines.push(`· 🗂️ 归档文件夹名建议：${r.archiveFolder}`);
     if (r.returnedToPool) lines.push(`· ${r.returnedToPool} 张退回票已回票池，可重新拟批`);
-    return lines.join('\n');
+    return lines.filter(Boolean).join('\n');
+  }
+
+  if (sub === 'ledger') {
+    if (!args[1]) return '❌ 用法：/approval-batch ledger <批次号> [投递单号]（把批次同步进台账表；已存在则只补投递单号）';
+    const ledger = require('./ledgerSheetService');
+    const ls = await ledger.syncOnSubmit(args[1], args[2] || '');
+    if (ls.action === 'appended') return `📗 台账已同步：${args[1]} → 第 ${ls.rowIndex} 行`;
+    if (ls.action === 'exists') return `📗 台账已有该批次行（第 ${ls.rowIndex} 行）${ls.updated === 'deliveryNo' ? '，已补填投递单号' : '，未重复添加'}`;
+    if (ls.action === 'no_summary') return '⚠️ 该批次无摘要（旧批次），没有台账口径，请人工登记';
+    if (ls.action === 'disabled') return '⚠️ 未配置台账表（LEDGER_SPREADSHEET_TOKEN），同步关闭';
+    return '❌ 台账同步失败（见日志）';
   }
 
   if (sub === 'regen') {
@@ -337,7 +356,43 @@ async function handleBatchCommand(args = [], ctx = {}) {
     ].join('\n');
   }
 
-  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit/paid/reject <批次号> | regen <批次号>';
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger <批次号> [投递单号]';
+}
+
+/**
+ * 台账同步（submit/paid/reject 生命周期点）：
+ * submit 追加行（可带投递单号），paid 回填入账日期+已到账，reject 标记已退回。
+ * 未配置台账表 / 写失败 → 返回提示行（不抛错，不阻断批次状态流转）。
+ */
+async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
+  try {
+    const ledger = require('./ledgerSheetService');
+    if (sub === 'submit') {
+      const ls = await ledger.syncOnSubmit(batchNo, deliveryNo);
+      if (ls.action === 'appended') return `· 📗 台账已同步：第 ${ls.rowIndex} 行（投递单号${deliveryNo ? '已填' : '留空，可在表内补'}）`;
+      if (ls.action === 'exists') return `· 📗 台账已有该批次行（第 ${ls.rowIndex} 行），未重复添加${ls.updated === 'deliveryNo' ? '，已补填投递单号' : ''}`;
+      if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次），请人工登记';
+      return '';
+    }
+    if (sub === 'paid') {
+      const ls = await ledger.syncOnStatus(batchNo, { paid: true });
+      if (ls.action === 'updated') return `· 📗 台账已回填：入账日期 + 已到账（第 ${ls.rowIndex} 行）`;
+      if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次）';
+      if (ls.action === 'not_found') return '· ⚠️ 台账未找到该批次行（按摘要匹配），请人工核对补记';
+      return '';
+    }
+    if (sub === 'reject') {
+      const ls = await ledger.syncOnStatus(batchNo, { rejected: true });
+      if (ls.action === 'updated') return `· 📗 台账已标记：已退回（第 ${ls.rowIndex} 行）`;
+      if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次）';
+      if (ls.action === 'not_found') return ''; // 尚未 submit 过的批次本就没进台账，静默
+      return '';
+    }
+    return '';
+  } catch (err) {
+    console.error('[对话服务] 台账同步失败:', err.message);
+    return `· ⚠️ 台账同步失败：${err.message}（批次状态已变更，可 /approval-batch ledger ${batchNo} 重试）`;
+  }
 }
 
 /**

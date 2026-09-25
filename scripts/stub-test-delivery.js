@@ -9,6 +9,17 @@ config.bitable.collectTableId = 'tblCollectTest';
 config.bitable.batchTableId = 'tblBatchTest';
 // 摘要拼装口径照实样（机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔）
 config.batch.season = '27赛季';
+// 标黄断言需要确定的「未配置」基线（真实 .env 可能已填 CQ_* 实值，测试内固定清空）
+config.batch.reporterStuId = '';
+config.batch.reporterName = '';
+config.batch.reporterPhone = '';
+config.batch.projectCode = '';
+config.batch.projectName = '';
+config.batch.projectDept = '';
+config.batch.projectLeader = '';
+config.batch.bankCardNo = '';
+config.batch.bankName = '';
+config.batch.preparer = '';
 
 const client = require('../src/feishu/client');
 const collectStore = require('../src/services/collectStore');

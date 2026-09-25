@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "deploy": "node push.js",
-    "test": "node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node --check src/services/invoiceParser.js && node --check src/services/invoiceCollectService.js && node --check src/services/batchService.js && node --check src/services/backfillService.js && node --check src/utils/cny.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js && node scripts/stub-test-invoice-collect.js && node scripts/stub-test-delivery.js",
+    "test": "node --check src/index.js && node --check src/services/chatService.js && node --check src/services/ocrService.js && node --check src/services/invoiceParser.js && node --check src/services/invoiceCollectService.js && node --check src/services/batchService.js && node --check src/services/backfillService.js && node --check src/services/ledgerSheetService.js && node --check src/utils/cny.js && node scripts/test-invoice-urge.js && node scripts/stub-test-ocr.js && node scripts/stub-test-invoice-collect.js && node scripts/stub-test-delivery.js && node scripts/stub-test-ledger.js",
     "push": "node push.js"
   },
   "keywords": [

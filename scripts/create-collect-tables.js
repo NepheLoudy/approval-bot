@@ -54,6 +54,8 @@ const BATCH_FIELDS = [
   { field_name: '采购类型', type: FIELD_TYPES.TEXT }, // 物料清单「采购类型」列（lock 采购类型= 覆盖）
   { field_name: '接取人', type: FIELD_TYPES.TEXT }, // 审批群回复「接取」的领取人
   { field_name: '接取时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
+  { field_name: '收款方', type: FIELD_TYPES.TEXT }, // 台账「收款方」（lock 收款方= 覆盖，默认=报销人）
+  { field_name: '收款账号', type: FIELD_TYPES.TEXT }, // 台账「收款账号」（lock 收款账号= 覆盖，敏感）
   { field_name: '物料清单', type: 17 }, // 附件：校格式物料清单 xlsx（交付包④）
   { field_name: '投递底单', type: 17 }, // 附件：学校系统填报预填稿 xlsx（交付包⑤）
   { field_name: '备注', type: FIELD_TYPES.TEXT },

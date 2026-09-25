@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v49**（2026-09-25，随本提交落地；部署待实验室网段恢复后 npm run push 补上并回填哈希）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
+当前最新：**v50**（2026-09-25，随本提交落地；部署待实验室网段恢复后 npm run push 补上并回填哈希，与 v49 同批部署）。上一版 v49（报销交付包，`f8ac36a`）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -374,3 +374,16 @@
 - 测试：`npm test` 全绿（node --check ×8 + 催发票桩 + OCR 桩 + 采集桩 + 新增 `stub-test-delivery.js`：大写金额/序号/摘要/归档名/两生成器读回断言（含标黄 fill/合并/SUM 公式）/claimBatch 状态机；采集桩补开票内容抽取与落表、lock 四附件/摘要/笔序断言）。
 - 文档：README §六/§七/§八/§十、财务协作指南（分工表/第1-3步）、本 AGENTS、registry、桌面 HTML 财务卡、hub v115（接取转发）联动。
 - 部署状态：代码与文档随本提交入库；**部署待笔记本回实验室网段后 `npm run push` 补上**（下一批回填哈希）。
+
+## v50 · 2026-09-25 · 随本提交落地 · feat
+
+**报销台账电子表格同步（《2027年千里团队报销台账》submit 追加行 / paid·reject 按摘要回填）**
+
+- 提交说明：feat: 报销台账电子表格同步——submit 追加行、paid/reject 摘要匹配回填、ledger 子指令手动补
+- 曼波给台账表（`LEDGER_SPREADSHEET_TOKEN=Y4AXsvHsnhBuvHto1thcWyEKnwh`）：列结构照实表 A..M（序号/投递单号/报销摘要/报销金额/项目编号/支付方式/收款方/收款账号/经办人/申请日期/投递日期/入账日期/状态），日期写 'YYYY/M/D' 字符串与人工风格一致，状态沿用财务词表「已提交至中心」起步、机器人侧「已到账/已退回」。
+- `ledgerSheetService`：`resolveSheet`（LEDGER_SHEET_ID 可指定，默认首工作表）+ `syncOnSubmit`（幂等追加——摘要已存在跳过，仅投递单号留空时补填；序号=上一行+1；收款方/收款账号回退 CQ_* 报销人配置，批次记录优先；经办人=接取人回退报销人）+ `syncOnStatus`（paid 回填入账日期+已到账 / reject 标记已退回，**按批次摘要精确等值匹配**，摘要含「第N笔」唯一；not_found 如实上报绝不误改财务手填的行；no_summary（旧批次）跳过）。
+- 指令接线：`submit <批次号> [投递单号]`（投递号纯数字写数值同实表）、`paid`/`reject` 自动同步（`syncLedgerQuietly` 写失败不阻断状态流转，回执如实提示可 `ledger` 重试）；新增 `/approval-batch ledger <批次号> [投递单号]` 手动补同步；lock 新参数 `收款方=/收款账号=`（批次表新列，已对生产 base 执行迁移）。
+- 权限：写电子表格经临时表建→写→删全链验证（drive 权限覆盖，临时表已删）。
+- 测试：`npm test` 全绿（新增 `stub-test-ledger.js`：追加行 13 列逐格断言/幂等/投递单号补填/收款方覆盖与回退/paid·reject 回填/not_found 不误写/no_summary/disabled；`stub-test-delivery` 基线修正——CQ_* 断言固定为「未配置」基线，不再受真实 .env 实值影响）。
+- 文档：README §七/§八/§十、财务协作指南（第3步/台账与周报）、本 AGENTS、registry、桌面 HTML 财务卡、.env(+example) LEDGER_* 键。
+- 部署状态：与 v49 同批，**待实验室网段恢复后一次 `npm run push` 上线**（下一批回填哈希）。
