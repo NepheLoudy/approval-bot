@@ -1,7 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const invoiceUrgeService = require('./invoiceUrgeService');
-const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard } = require('../feishu/bot');
+const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildDeliveryCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -80,7 +80,9 @@ async function handleHelpCommand() {
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
-    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] | status | submit/paid/reject <批次号>',
+    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] | status |',
+    '                    submit/paid/reject <批次号> | regen <批次号>',
+    '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
     '定时播报：每周一 18:00 财务催办周报（催发票/报销单/转账 + 报销台账状态）',
@@ -225,20 +227,25 @@ const commandHandlers = {
   '/approval-status': handleStatusCommand,
   '/approval-urge': handleUrgeCommand,
   '/approval-batch': handleBatchCommand,
+  '接取': handleTakeCommand, // 审批群交付卡领取（hub 转发裸词，非 / 指令）
 };
 
 /**
  * 报销批次三件套指令（财务三件套自动化）：
  *   /approval-batch                      → 拟批建议（票池按项目分组）
- *   /approval-batch lock <批次号> [项目]  → 锁定（回写两表+生成打印PDF+BOM）
- *   /approval-batch status               → 批次总览
+ *   /approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]
+ *                                        → 锁定（回写两表 + 生成 打印PDF/BOM/物料清单/投递底单
+ *                                          + 审批群发交付卡，回复「接取」领取）
+ *   /approval-batch status               → 批次总览（含接取人）
  *   /approval-batch submit <批次号>      → 标记已提交学校
- *   /approval-batch paid <批次号>        → 标记已到账
+ *   /approval-batch paid <批次号>        → 标记已到账（回执附归档文件夹名建议）
  *   /approval-batch reject <批次号>      → 标记已退回（退回票自动回票池可重新归批）
+ *   /approval-batch regen <批次号>       → 四件附件重新生成
+ *   接取 [批次号]                        → 审批群回复「接取」领取交付包（登记接取人）
  */
-async function handleBatchCommand(args = []) {
+async function handleBatchCommand(args = [], ctx = {}) {
   const batchService = require('./batchService'); // 延迟 require：重依赖（pdf-lib/exceljs）仅在用到时加载
-  const [sub, batchNo, project] = args;
+  const [sub] = args;
 
   if (!sub || sub === 'preview') {
     const { poolSize, suggestions } = await batchService.previewBatch();
@@ -247,21 +254,50 @@ async function handleBatchCommand(args = []) {
     for (const s of suggestions) {
       lines.push(`· ${s.project}：${s.count} 张 ¥${s.amount.toFixed(2)}（${s.range}）${s.warningCount ? `⚠️ 含 ${s.warningCount} 张待人工/异常` : ''}`);
     }
-    lines.push('锁定：/approval-batch lock <批次号> [项目]（批次号沿用财务命名，如 27备赛20步兵5；不传项目=锁定全池）');
-    lines.push('锁定后自动生成 打印件PDF（按录入顺序一页两票）+ BOM表，落「报销批次」表附件');
+    lines.push('锁定：/approval-batch lock <批次号> [项目] [用途=xx]（批次号沿用财务命名，如 27备赛20步兵5；不传项目=锁定全池）');
+    lines.push('锁定后自动生成 打印件PDF + BOM + 物料清单（校格式）+ 投递底单，落「报销批次」表附件并向本群发交付卡，回复「接取」领取');
     return lines.join('\n');
   }
 
   if (sub === 'lock') {
-    if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目]';
-    const r = await batchService.lockBatch(batchNo, project || '');
+    // 位置参数：批次号 [项目]；键值参数：用途=/费用项=/采购类型=（覆盖投递底单/物料清单默认值）
+    const kv = {};
+    const positional = [];
+    for (const a of args.slice(1)) {
+      const m = a.match(/^(用途|费用项|采购类型)=(.+)$/);
+      if (m) kv[m[1]] = m[2].trim();
+      else positional.push(a);
+    }
+    const [batchNo, project] = positional;
+    if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]';
+    const r = await batchService.lockBatch(batchNo, project || '', {
+      purpose: kv['用途'] || '',
+      feeItem: kv['费用项'] || '',
+      purchaseType: kv['采购类型'] || '',
+    });
     const lines = [
       `✅ 批次已锁定：${r.batchNo}（${r.projects.join('/')}）`,
       `· ${r.count} 张发票 ¥${r.amount.toFixed(2)}，已回写审批表「报销单」栏 ${r.approvalWritten} 条`,
-      r.pdfToken ? '· 🖨️ 打印件 PDF 已生成（按录入顺序，一页两票）→ 报销批次表附件' : '· ⚠️ 打印件 PDF 生成失败（见日志，可稍后重试）',
-      r.bomToken ? '· 📊 BOM 表已生成 → 报销批次表附件' : '· ⚠️ BOM 生成失败（见日志）',
-      `· 逐张扫小翼Plus 录入后：/approval-batch submit ${r.batchNo}`,
-    ];
+      r.summary ? `· 摘要：${r.summary}` : '',
+      r.pdfToken ? '· 🖨️ 打印件 PDF ✅（按录入顺序，一页两票）' : '· ⚠️ 打印件 PDF 生成失败（可 /approval-batch regen 重试）',
+      r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（可 regen）',
+      r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（可 regen）',
+      r.dsToken ? '· 📮 投递底单 ✅（照单录入小翼Plus）' : '· ⚠️ 投递底单生成失败（可 regen）',
+    ].filter(Boolean);
+    if (r.warningCount) lines.push(`· ⚠️ 含 ${r.warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
+    if (r.missingContent) lines.push(`· ⚠️ ${r.missingContent} 张缺「开票内容」（底单已标黄），录入时现场补填`);
+    // 交付卡（人工锁定触发的直接回路，即时发群；失败不阻断锁定）
+    try {
+      await sendMessage(buildDeliveryCard({
+        batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
+        summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
+        generated: { pdf: !!r.pdfToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken },
+      }));
+    } catch (err) {
+      console.error('[对话服务] 交付卡发送失败:', err.message);
+      lines.push('· ⚠️ 交付卡发送失败（文件已在报销批次表附件，不影响使用）');
+    }
+    lines.push(`· 📦 交付卡已发本群，@机器人 回复「接取」领取后录入小翼Plus；完成后：/approval-batch submit ${r.batchNo}`);
     return lines.join('\n');
   }
 
@@ -270,7 +306,7 @@ async function handleBatchCommand(args = []) {
     if (!batches.length) return '📊 暂无报销批次（/approval-batch 先看拟批建议）';
     const lines = ['📊 报销批次总览：'];
     for (const b of batches) {
-      lines.push(`· ${b.batchNo}（${b.project}）：${b.count} 张 ¥${b.amount.toFixed(2)}【${b.status}】`);
+      lines.push(`· ${b.batchNo}（${b.project}）：${b.count} 张 ¥${b.amount.toFixed(2)}【${b.status}】${b.taker ? ` 接取:${b.taker}` : ''}`);
     }
     return lines.join('\n');
   }
@@ -281,39 +317,58 @@ async function handleBatchCommand(args = []) {
     reject: { status: '已退回', label: '已退回' },
   };
   if (statusMap[sub]) {
-    if (!batchNo) return `❌ 用法：/approval-batch ${sub} <批次号>`;
-    const r = await batchService.markBatch(batchNo, statusMap[sub].status);
+    if (!args[1]) return `❌ 用法：/approval-batch ${sub} <批次号>`;
+    const r = await batchService.markBatch(args[1], statusMap[sub].status);
     const lines = [`✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`];
+    if (r.archiveFolder) lines.push(`· 🗂️ 归档文件夹名建议：${r.archiveFolder}`);
     if (r.returnedToPool) lines.push(`· ${r.returnedToPool} 张退回票已回票池，可重新拟批`);
     return lines.join('\n');
   }
 
   if (sub === 'regen') {
-    if (!batchNo) return '❌ 用法：/approval-batch regen <批次号>（重新生成打印 PDF/BOM 附件）';
-    const r = await batchService.regenerateBatchFiles(batchNo);
+    if (!args[1]) return '❌ 用法：/approval-batch regen <批次号>（重新生成 打印PDF/BOM/物料清单/投递底单）';
+    const r = await batchService.regenerateBatchFiles(args[1]);
     return [
       `🔄 批次 ${r.batchNo} 附件已重新生成（${r.count} 张）：`,
-      r.pdfToken ? '· 🖨️ 打印件 PDF 已更新 → 报销批次表附件' : '· ⚠️ 打印件 PDF 生成失败（见日志）',
-      r.bomToken ? '· 📊 BOM 表已更新 → 报销批次表附件' : '· ⚠️ BOM 生成失败（见日志）',
+      r.pdfToken ? '· 🖨️ 打印件 PDF ✅' : '· ⚠️ 打印件 PDF 生成失败（见日志）',
+      r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（见日志）',
+      r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（见日志）',
+      r.dsToken ? '· 📮 投递底单 ✅' : '· ⚠️ 投递底单生成失败（见日志）',
     ].join('\n');
   }
 
-  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] | status | submit/paid/reject <批次号> | regen <批次号>';
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit/paid/reject <批次号> | regen <批次号>';
+}
+
+/**
+ * 接取批次（审批群交付卡的领取回路）：回复「接取」= 接最近锁定的未接取批次；
+ * 「接取 <批次号>」= 指定批次。登记接取人（hub 透传 senderName）与时间。
+ */
+async function handleTakeCommand(args = [], ctx = {}) {
+  const batchService = require('./batchService');
+  const r = await batchService.claimBatch(args[0] || '', (ctx && ctx.senderName) || '');
+  return [
+    `✅ 批次 ${r.batchNo} 已接取（${r.taker}）${r.reClaim ? '· 重复接取，登记不变' : ''}`,
+    `· ${r.count} 张 ¥${Number(r.amount).toFixed(2)}（${r.project}）`,
+    r.summary ? `· 摘要：${r.summary}` : '',
+    `· 按打印件顺序扫小翼Plus 录入，开票内容缺失的现场补；完成后：/approval-batch submit ${r.batchNo}`,
+  ].filter(Boolean).join('\n');
 }
 
 /**
  * 执行指令并返回回复文本（群聊消息与 HTTP 转发共用）
  * @param {string} command
  * @param {string[]} args
+ * @param {{senderName?: string, senderId?: string}} ctx hub 转发透传的发送者身份（「接取」登记用）
  * @returns {Promise<string|null>} 未匹配指令返回 null
  */
-async function executeCommand(command, args = []) {
+async function executeCommand(command, args = [], ctx = {}) {
   // 审批群内 /help 即为财务帮助
   if (command === '/help') command = '/approval-help';
   const handler = commandHandlers[command];
   if (!handler) return null;
   try {
-    return await handler(args);
+    return await handler(args, ctx);
   } catch (err) {
     console.error(`[对话服务] 指令执行失败 ${command}:`, err);
     return `❌ 指令执行失败：${err.message}`;

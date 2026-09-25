@@ -477,6 +477,46 @@ function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = []
 }
 
 /**
+ * 报销交付卡（锁定批次后审批群播报）：四件附件清单 + 摘要草稿 + 接取指引。
+ * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 四列）。
+ */
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, generated = {} } = {}) {
+  const base = config.bitable.appToken;
+  const tableUrl = base ? `https://feishu.cn/base/${base}?table=${config.bitable.batchTableId}` : '';
+  const mark = (ok, label, desc) => `- ${ok ? '✅' : '⚠️'} **${label}** — ${desc}${ok ? '' : '（生成失败，可 /approval-batch regen 重试）'}`;
+
+  const lines = [
+    `**项目** ${project || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
+    '',
+    `**摘要**（录入学校系统时直接复制）：`,
+    `${summary || '（未生成）'}`,
+    '',
+    `**📎 交付文件**（「报销批次」表该行附件下载）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,
+    mark(generated.pdf, '打印文件', '按录入顺序一页两票，照序扫描'),
+    mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
+    mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途/采购类型），交学校'),
+    mark(generated.deliverySheet, '投递底单', '学校系统填报预填稿，照单录入小翼Plus'),
+  ];
+  if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
+  if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);
+
+  lines.push(
+    ``,
+    `👉 **认领：@机器人 回复「接取」**（可带批次号，如「接取 ${batchNo}」）`,
+    `✅ 录入完成后：/approval-batch submit ${batchNo}`
+  );
+
+  return {
+    config: { wide_screen_mode: true },
+    elements: [{ tag: 'markdown', content: lines.join('\n') }],
+    header: {
+      template: 'orange',
+      title: { content: `📦 报销交付包 · ${batchNo}`, tag: 'plain_text' },
+    },
+  };
+}
+
+/**
  * 催发票私聊富文本（发给申请发起人，一人一条可含多笔）
  * 「申请编号」是 Url 字段，其 link 即审批实例链接（打开审批详情页，非表格链接）；
  * post 富文本里超链接可点击，展示文本简化为「项目名 + 金额」。
@@ -551,6 +591,7 @@ module.exports = {
   buildReminderCard,
   buildUrgeCard,
   buildTodayUrgedCard,
+  buildDeliveryCard,
   buildInvoiceUrgePost,
   previewInvoiceUrgePost,
   // 字段格式化工具（供其他服务复用）

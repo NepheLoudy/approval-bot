@@ -119,4 +119,31 @@ module.exports = {
     amountToleranceRatio: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_RATIO) || 0.05,
     amountToleranceFixed: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_FIXED) || 10,
   },
+
+  // 报销交付包（锁定批次后自动生成：校格式物料清单 + 投递底单，照学校「智能财务服务大厅
+  // 投递单」与财务《物料清单》模板口径；敏感信息（卡号）只存 .env，不进 git）
+  batch: {
+    // 摘要拼装：`${summaryPrefix}-${season}-${项目}-${用途}-${feeType}-第N笔`
+    // 模板实例：机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔
+    summaryPrefix: process.env.BATCH_SUMMARY_PREFIX || '机甲大师实验室',
+    season: process.env.BATCH_SEASON || '',
+    feeType: process.env.BATCH_FEE_TYPE || '材料费',
+    // 投递单「费用项」与物料清单「采购类型」默认值（锁定时可用 费用项=/采购类型= 覆盖）
+    feeItem: process.env.BATCH_FEE_ITEM || '实验室用品',
+    purchaseType: process.env.BATCH_PURCHASE_TYPE || '机器人零件',
+    // 物料清单「制单人」（留空回落报销人姓名）
+    preparer: process.env.BATCH_PREPARER_NAME || '',
+    // 报销人（投递单抬头；工号/电话缺失底单标黄）
+    reporterStuId: process.env.CQ_REPORTER_STU_ID || '',
+    reporterName: process.env.CQ_REPORTER_NAME || '',
+    reporterPhone: process.env.CQ_REPORTER_PHONE || '',
+    // 项目归属（学校经费卡）
+    projectCode: process.env.CQ_PROJECT_CODE || '',
+    projectName: process.env.CQ_PROJECT_NAME || '',
+    projectDept: process.env.CQ_PROJECT_DEPT || '',
+    projectLeader: process.env.CQ_PROJECT_LEADER || '',
+    // 转卡收款账户（敏感：只存 .env）
+    bankCardNo: process.env.CQ_BANK_CARD_NO || '',
+    bankName: process.env.CQ_BANK_NAME || '',
+  },
 };

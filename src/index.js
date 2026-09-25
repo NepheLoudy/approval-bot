@@ -224,7 +224,10 @@ app.post('/api/chat/command', async (req, res) => {
       return res.status(400).json({ error: '指令不能为空' });
     }
 
-    const reply = await executeCommand(command, args || []);
+    const reply = await executeCommand(command, args || [], {
+      senderName: req.body.senderName || '',
+      senderId: req.body.senderId || '',
+    });
     if (reply === null) {
       return res.json({ reply: `❌ 未知指令：${command}\n本群仅支持财务指令，发送 /help 查看可用指令` });
     }

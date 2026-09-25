@@ -150,7 +150,7 @@ curl http://localhost:3002/api/health
 | POST | `/api/bot/test-invoice-urge` | 立即触发一次催发票私聊（测试，X-API-Token；body 传 `{"dryRun":true}` 只预览不发送、不消费申请人回复、不改状态） |
 | GET | `/api/bot/cron-status` | 定时任务状态 + 下次执行时间 |
 | GET | `/api/bot/history` | 播报历史 |
-| POST | `/api/chat/command` | 指令转发端点（`{command, args}` → `{reply}`） |
+| POST | `/api/chat/command` | 指令转发端点（`{command, args, senderName?, senderId?}` → `{reply}`；`command:'接取'` 为审批群裸词放行指令，senderName 用于登记接取人） |
 | POST | `/api/feishu/event` | feishu-gateway 事件转发入口（消息事件） |
 | POST | `/api/ocr/transcribe` | 发票图像 OCR 转录（X-API-Token）：body `{messageId, imageKey}` 或 `{imageBase64}` → `{segments, fullText, fields, misses, meta}` |
 | GET | `/api/ocr/fields` | 定制窗口：OCR 字段提取规则全景（只读） |
@@ -162,11 +162,15 @@ curl http://localhost:3002/api/health
 
 **队员侧交票（私聊直交，含催办私聊）**：队员把发票（数电票 PDF / 二维码截图 / 拍照）直接私聊机器人，或催发票私聊里直接回图——机器人三通道识别（PDF 文本层直读 > 发票二维码解码（与小翼Plus 扫码同源）> OCR 兜底），自动完成：查重双闸（发票号精确 + 日期/金额/销售方三元组近似）→ 抬头校验（`INVOICE_ALLOWED_BUYERS` 配置「名称|税号」，可多套）→ 金额归类匹配（金额精确唯一自动归类；名下仅一条待交票直接归，金额比对闸 ±5%/¥10 兜底标「金额不符」；多候选转财务人工）→ 落「发票采集」表（**真源**）+ 回写审批表「补交发票」附件栏（镜像，先读后 append 按记录串行）→ 私聊回执（归类明细+金额核对单）。**非发票图（表情包等）按特征词静默忽略不打回**；识别出是发票但缺查验三要素（号码/日期/价税合计）→ 打回提醒（带缺失项与重发指引）。采集成功即视为已交票（与「发票/补交发票」两栏等价口径），自动出催办名单。
 
-**财务三件套（/approval-batch）**：
-- ① 选批+扫码：`/approval-batch` 拟批建议（票池按项目分组、张数/金额/异常数）；`/approval-batch lock <批次号> [项目]` 锁定（批次号沿用财务既有命名如 `27备赛20步兵5`）→ 自动回写采集表「批次」+ 审批表「报销单」栏；输出逐张查验要素清单照单扫小翼Plus；
+**财务三件套 + 交付包（/approval-batch）**：
+- ① 选批+扫码：`/approval-batch` 拟批建议（票池按项目分组、张数/金额/异常数）；`/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]` 锁定（批次号沿用财务既有命名如 `27备赛20步兵5`；`用途` 默认=项目）→ 自动回写采集表「批次」+ 审批表「报销单」栏 + 群发**交付卡**；输出逐张查验要素清单照单扫小翼Plus；
 - ② 打印文件：锁定即自动生成 **A4 竖版一页两票 PDF，严格按录入顺序**（=扫码顺序），落「报销批次」表「打印文件」附件；原件缺失/解码失败的票生成占位页标明槽位；
 - ③ BOM 表：锁定即自动生成 xlsx（申请编号/项目/物资/型号规格/发起人/申请金额/发票号/发票金额/校验状态+合计），落「报销批次」表「BOM表」附件；
-- 状态机：拟批 → 已锁定 → `/approval-batch submit|paid|reject <批次号>`（已提交/已到账/已退回）。**锁定后顺序不可变**，迟到票只能进下一批。
+- ④ 物料清单（校格式，v49）：严格照财务《物料清单》模板排版（A1:E1 标题合并/序号/项目/金额/用途/采购类型/总金额 SUM 公式/制单人），「项目」列=票面**开票内容**（`*电子元件*存储器` 星号分类，采集时从票面抽取落库）；纯 QR 通道的票拿不到该信息 → 单元格留空**标黄**，录入小翼Plus 时现场补；
+- ⑤ 投递底单（v49）：照学校「智能财务服务大厅投递单」字段全预填（投递号/公章/认证状态留空——学校系统与纸质流程生成；报销人三件套/项目编号·名称·部门·负责人/摘要/费用项/申请总金额+**大写金额**/转卡收款人/电子发票明细），配置在 `.env`（`BATCH_*`/`CQ_*`，缺项标黄）；财务照单录入小翼Plus，不再逐字段手拼；
+- **接取**（v49）：锁定后交付卡发审批群，财务 **@机器人 回复「接取」**（可带批次号）领取——登记批次「接取人/接取时间」（重复接取幂等、他人已接取报错）；`接取` 裸词由 hub 转发（审批群放行词，非 `/approval-*`），转发载荷带 senderName 登记用；
+- 状态机：拟批 → 已锁定 →（接取）→ `/approval-batch submit|paid|reject <批次号>`（已提交/已到账/已退回）。**锁定后顺序不可变**，迟到票只能进下一批；`paid` 回执附**归档文件夹名建议**（`YYYYMMDD-项目-用途-第N笔-金额`，照财务实样 `20260920-对抗赛-飞镖-第二十四笔-237.04`）；`regen` 重新生成全部四件附件（摘要/用途/笔序/费用项/采购类型从批次记录读回）。
+- 摘要自动拼装：`BATCH_SUMMARY_PREFIX-BATCH_SEASON-项目-用途-BATCH_FEE_TYPE-第N笔`（实样：`机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔`），「第N笔」按同项目既有批次数自动计中文序号，落批次表「摘要/用途/笔序」列。
 
 **台账与播报**：周报卡新增「报销台账」段（票池待归集张数/金额 + 各状态批次汇总）；`GET /api/approval/policy` 含 ocr 段。采集/批次两表建在审批 base 下（`scripts/create-collect-tables.js` 幂等建表），**采集表为唯一真源**，审批表「补交发票」栏仅为财务可见镜像（队员交票后不会自行修改审批，镜像被覆盖风险可忽略）。
 
@@ -183,9 +187,10 @@ curl http://localhost:3002/api/health
 | `/approval-pending` | 查看审批中列表 |
 | `/approval-status` | 查看审批统计（含本周通过/拒绝） |
 | `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「今日已催」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
-| `/approval-batch` | 报销批次三件套：`/approval-batch` 拟批建议；`lock <批次号> [项目]` 锁定（回写两表+生成打印PDF+BOM）；`status` 总览；`submit/paid/reject <批次号>` 标记已提交/已到账/已退回；`regen <批次号>` 重新生成该批次打印PDF/BOM附件（附件缺失或损坏时自愈，不改动状态与票池） |
+| `/approval-batch` | 报销批次三件套+交付包：`/approval-batch` 拟批建议；`lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]` 锁定（回写两表+生成 打印PDF/BOM/物料清单/投递底单 + 群发交付卡）；`status` 总览（含接取人）；`submit/paid/reject <批次号>` 标记已提交/已到账/已退回（paid 附归档文件夹名建议）；`regen <批次号>` 重新生成全部四件附件（自愈，不改动状态与票池） |
+| `接取 [批次号]` | 领取交付包（v49）：锁定后群里 @机器人 回复「接取」= 接最近锁定的未接取批次，登记接取人/接取时间；重复接取幂等 |
 
-指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；本服务的消息处理模块仅用于本地调试。
+指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；审批群交付卡领取词 **「接取」**（裸词，v49）同由 hub 转发并透传 senderName；本服务的消息处理模块仅用于本地调试。
 
 ## 九、部署到部署目标（小电脑）
 
@@ -227,6 +232,7 @@ approval-bot/
 │   │   ├── reminderService.js     # 每日待审批提醒
 │   │   └── chatService.js         # 群隔离 + /approval-* 指令
 │   ├── utils/fields.js            # 多维表格字段值 → 展示文本
+│   ├── utils/cny.js               # 人民币大写金额 / 中文序号（投递底单「大写金额」、摘要「第N笔」）
 │   ├── utils/quietHours.js        # 晚间静默闸门（播报积压补发）
 │   ├── config.js                  # 配置中心
 │   └── index.js                   # 主入口（Express API + 事件接收）
@@ -238,6 +244,7 @@ approval-bot/
 ├── scripts/create-collect-tables.js # 发票采集表+报销批次表幂等建表（改表结构先改这里）
 ├── scripts/stub-test-ocr.js       # OCR 字段规则引擎桩测试
 ├── scripts/stub-test-invoice-collect.js # 发票采集链路桩测试（查重/归类/打回闸）
+├── scripts/stub-test-delivery.js  # 交付包桩测试（大写金额/摘要/物料清单/投递底单/接取）
 ├── scripts/drill-ocr-compat.js    # OCR 兼容性演练（离线 12 用例合成；产物落 .drill/ 不进 git）
 ├── scripts/drill-online.js        # OCR 在线端点探测演练（产物落 .drill/ 不进 git）
 ├── 财务协作指南.md                 # 面向财务的人机协作流程（交票/三件套/例外处理/FAQ）

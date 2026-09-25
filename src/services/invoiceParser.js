@@ -27,6 +27,23 @@ const RE_TOTAL_LOOSE = /[¥￥]\s*([0-9,]+\.[0-9]{2})/;
 const RE_CHECK_CODE = /(?:校验码|校验)\s*[:：]?\s*([0-9]{6,20})/;
 const RE_TAX_NO = /(?:统一社会信用代码|纳税人识别号)\s*[\/／]?\s*[:：]?\s*([0-9A-Z]{15,20})/;
 
+/**
+ * 开票内容（票面货物名称行的星号分类，如「*电子元件*存储器」）。
+ * 学校投递单「电子发票明细.开票内容」与校格式物料清单「项目」列同源；
+ * 仅 PDF 文本层/OCR 通道可见（票面印刷信息，二维码里没有）。
+ * 多行货物取第一行（与投递单一票一行「开票内容」口径一致）。
+ */
+function extractInvoiceContent(rawText) {
+  const text = String(rawText || '').replace(/＊/g, '*');
+  const m = text.match(/\*\s*([^*\n]{1,20}?)\s*\*\s*([^*\n]{1,80})/);
+  if (!m) return null;
+  // 列分隔截断：PDF 文本层列间多空格；行尾数量/金额（如「1 张」「3.97」）剥掉
+  let name = m[2].split(/\s{2,}/)[0];
+  name = name.replace(/\s*[0-9.]+\s*(张|个|台|件|只|枚|套|米|卷|次)?\s*$/, '').trim();
+  if (!m[1].trim() || !name) return null;
+  return `*${m[1].trim()}*${name}`;
+}
+
 /** 发票特征词（私聊转发图片的「是不是发票」前置判断：非发票图静默忽略不打回） */
 function looksLikeInvoiceText(text) {
   return /(发票|价税合计|统一社会信用代码|纳税人识别号|增值税|机器编号|开票日期)/.test(String(text || ''));
@@ -65,7 +82,7 @@ function extractParty(text, role) {
  */
 function parseInvoiceText(rawText) {
   const text = String(rawText || '').replace(/\u00a0/g, ' ');
-  const fields = { invoiceCode: null, invoiceNo: null, issueDate: null, totalAmount: null, checkCode: null, buyerName: null, buyerTaxNo: null, sellerName: null, sellerTaxNo: null };
+  const fields = { invoiceCode: null, invoiceNo: null, issueDate: null, totalAmount: null, checkCode: null, buyerName: null, buyerTaxNo: null, sellerName: null, sellerTaxNo: null, invoiceContent: null };
   const warnings = [];
 
   const m20 = text.match(RE_INVOICE_NO_20);
@@ -105,6 +122,7 @@ function parseInvoiceText(rawText) {
   fields.buyerTaxNo = buyer.taxNo;
   fields.sellerName = seller.name;
   fields.sellerTaxNo = seller.taxNo;
+  fields.invoiceContent = extractInvoiceContent(text);
 
   // 票种推断
   let invoiceType = 'unknown';
@@ -252,4 +270,5 @@ module.exports = {
   tryPdfChannel,
   looksLikeInvoiceText,
   recognizeInvoice,
+  extractInvoiceContent,
 };

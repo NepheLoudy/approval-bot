@@ -199,6 +199,7 @@ async function collectFromMessage(payload) {
       ...(f.buyerTaxNo ? { '购买方税号': f.buyerTaxNo } : {}),
       ...(f.sellerName ? { '销售方名称': f.sellerName } : {}),
       ...(f.sellerTaxNo ? { '销售方税号': f.sellerTaxNo } : {}),
+      ...(f.invoiceContent ? { '开票内容': f.invoiceContent } : {}),
       ...(f.checkCode ? { '校验码后6位': f.checkCode } : {}),
       '提交人': openId,
       ...(resolvedName ? { '提交人姓名': resolvedName } : {}),

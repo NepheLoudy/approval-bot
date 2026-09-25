@@ -101,7 +101,7 @@ function send(port, method, path, body, headers = {}) {
 
 async function main() {
   // ---------- 单元：parseInvoiceText ----------
-  const shuziText = '数电票\n发票号码：24312000000123456789\n开票日期：2026年09月01日\n价税合计（大写）壹佰贰拾圆整 （小写）¥120.50\n购买方名称:重庆大学 统一社会信用代码/纳税人识别号:50000000TESTXX01\n销售方名称:某某科技公司 纳税人识别号:91500000AAA';
+  const shuziText = '数电票\n发票号码：24312000000123456789\n开票日期：2026年09月01日\n价税合计（大写）壹佰贰拾圆整 （小写）¥120.50\n*电子元件*存储器 1 张\n购买方名称:重庆大学 统一社会信用代码/纳税人识别号:50000000TESTXX01\n销售方名称:某某科技公司 纳税人识别号:91500000AAA';
   const shuzi = invoiceParser.parseInvoiceText(shuziText);
   assert.equal(shuzi.fields.invoiceNo, '24312000000123456789');
   assert.equal(shuzi.invoiceType, '全电发票');
@@ -109,7 +109,14 @@ async function main() {
   assert.equal(shuzi.fields.totalAmount, 120.50);
   assert.equal(shuzi.fields.buyerTaxNo, '50000000TESTXX01');
   assert.equal(shuzi.fields.sellerName, '某某科技公司');
+  assert.equal(shuzi.fields.invoiceContent, '*电子元件*存储器', '开票内容抽取（行尾数量剥离）');
   assert.deepEqual(shuzi.missing, []);
+
+  // 开票内容：全角星号容错 / 无星号行 → null
+  const fullWidth = invoiceParser.parseInvoiceText('发票号码：24312000000123456789\n开票日期：2026年09月01日\n价税合计(小写)¥10.00\n＊电子元件＊连接器');
+  assert.equal(fullWidth.fields.invoiceContent, '*电子元件*连接器', '全角＊归一化为半角');
+  const noContent = invoiceParser.parseInvoiceText('一张无关的图片文字');
+  assert.equal(noContent.fields.invoiceContent, null, '无星号分类 → 开票内容为空');
 
   const oldText = '增值税电子普通发票\n发票代码:045032000111\n发票号码:12345678\n开票日期 2026年01月15日\n价税合计(小写)¥88.00\n校验码 12345678901234567890';
   const old = invoiceParser.parseInvoiceText(oldText);
@@ -204,6 +211,7 @@ async function main() {
   assert.equal(collectRows.length, 1);
   assert.equal(collectRows[0].fields['提交人姓名'], '小张', 'senderName 缺失时从审批记录反查');
   assert.equal(collectRows[0].fields['关联申请编号'], '202607160001');
+  assert.equal(collectRows[0].fields['开票内容'], '*电子元件*存储器', '开票内容随采集落表');
   assert.ok(uploadedFiles[0].startsWith('invoice_'), '发票原件应转存附件');
   const mirrorText = sentTexts.map(s => s.text).join('\n');
   assert.equal(mirrorWrites.length, 1, '镜像回写应写入审批表补交发票栏');
@@ -309,6 +317,13 @@ async function main() {
   assert.equal(batchRows[0].fields['状态'], '已锁定');
   assert.ok(batchRows[0].fields['BOM表'], 'BOM xlsx 应生成落附件');
   assert.ok(batchRows[0].fields['打印文件'], '打印 PDF 应生成落附件');
+  assert.ok(batchRows[0].fields['物料清单'], '校格式物料清单应生成落附件（交付包④）');
+  assert.ok(batchRows[0].fields['投递底单'], '投递底单应生成落附件（交付包⑤）');
+  assert.equal(locked.ordinal, 1, '同项目首笔笔序=1');
+  assert.equal(locked.purpose, '步兵机器人', '用途缺省=主项目');
+  assert.match(locked.summary, /^机甲大师实验室-.*-步兵机器人-材料费-第一笔$/, `摘要拼装（实际 ${locked.summary}）`);
+  assert.equal(batchRows[0].fields['摘要'], locked.summary, '摘要落批次记录');
+  assert.equal(batchRows[0].fields['笔序'], 1, '笔序落批次记录');
   const lockedCollect = collectRows.find(r => r.fields['发票号码'] === '24312000000123456789');
   assert.equal(lockedCollect.fields['批次'], '27备赛99步兵9', '锁定回写采集表批次');
 
