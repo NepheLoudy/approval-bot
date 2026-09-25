@@ -7,7 +7,9 @@ const path = require('path');
 const sharp = require('sharp');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const BASE = process.env.DRILL_TARGET || 'http://192.168.31.57:3002';
+// 2026-09-25 v51 起服务仅回环监听（安全审查 #1）：演练须在目标机上跑
+// （ssh mechax@192.168.31.57 后执行 node scripts/drill-online.js，即默认 localhost）
+const BASE = process.env.DRILL_TARGET || 'http://localhost:3002';
 const TOKEN = process.env.API_TOKEN || '';
 
 async function call(method, p, body, withToken = true) {

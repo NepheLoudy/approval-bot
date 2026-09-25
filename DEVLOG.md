@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v50**（2026-09-25，随本提交落地；部署待实验室网段恢复后 npm run push 补上并回填哈希，与 v49 同批部署）。上一版 v49（报销交付包，`f8ac36a`）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
+当前最新：**v51**（2026-09-25，随本提交落地；部署待实验室网段恢复后 npm run push 补上并回填哈希，与 v49/v50 同批部署）。上一版 v50（台账同步）。上一版 v49（报销交付包，`f8ac36a`）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -387,3 +387,14 @@
 - 测试：`npm test` 全绿（新增 `stub-test-ledger.js`：追加行 13 列逐格断言/幂等/投递单号补填/收款方覆盖与回退/paid·reject 回填/not_found 不误写/no_summary/disabled；`stub-test-delivery` 基线修正——CQ_* 断言固定为「未配置」基线，不再受真实 .env 实值影响）。
 - 文档：README §七/§八/§十、财务协作指南（第3步/台账与周报）、本 AGENTS、registry、桌面 HTML 财务卡、.env(+example) LEDGER_* 键。
 - 部署状态：与 v49 同批，**待实验室网段恢复后一次 `npm run push` 上线**（下一批回填哈希）。
+
+## v51 · 2026-09-25 · 随本提交落地 · fix
+
+**全量安全审查修复批（曼波要求「涉及钱的全量对抗性审查」后的 P0/P1 修复，审查报告见会话）**
+
+- 提交说明：fix: 安全审查修复——回环监听、操作人实名留痕、台账并发互斥
+- **#1（HIGH）回环监听**：`src/index.js` listen 显式绑 `127.0.0.1`——原全网卡监听使 31.x 网段任意主机可未鉴权调 `/api/chat/command` 篡改资金状态（假到账）/写台账/触发全量私聊。合法消费方零感知：hub 同机 `localhost:3002`、运维台 `/api/nas/api` SSH 代理本机 curl。配套：`drill-online.js` 默认目标改 localhost（演练 ssh 到目标机跑）、运维台 NET_TARGETS 摘除 3002（LAN 探测恒 ✗ 属预期，dashboard 仓同批）。故意不做成配置项——放开暴露必须改代码。
+- **#2（MEDIUM）操作人实名留痕（防冒名）**：新增 `chatService.resolveOperator`——资金指令操作人以 hub 透传的 senderId（open_id）**反查通讯录实名**为准，不信自报 senderName（防「接取嫁祸/经办人冒名」）；通讯录失败 fail-open 回落自报且回执标注「未经通讯录校验」。`feishu/contacts` 新增 `listActiveUsers`（Map<open_id,姓名>，5 分钟缓存，`listActiveOpenIds` 语义不变）；`markBatch` 留痕批次表新列「最后操作人/最后操作时间」（**已对生产 base 迁移**），`status` 总览与回执显示操作人。hub v116 同批：`/approval-*` 全量（含 /help）透传 senderName/senderId，不再只「接取」带。
+- **#3（MEDIUM）台账读改写互斥**：`ledgerSheetService` 按 spreadsheetToken 加进程内互斥（withLock 同款 promise 链）——修复并发 submit 在 readGrid await 点交错、算出同一追加行互相覆盖丢账的竞态。
+- 测试：`npm test` 五套全绿；`stub-test-ledger` 新增并发互斥回归（首次读网格延迟 50ms 制造交错窗口，断言两次追加落不同行）；`stub-test-delivery` 新增 resolveOperator 四态断言（实名优先/查无此人降级/通讯录失败 fail-open/无身份不编造）+ markBatch 留痕与无身份不覆盖断言。
+- 部署状态：与 v49/v50 同批，待实验室网段恢复后一次 `npm run push` 上线（下一批回填哈希）。审查报告其余管理项（token 拆分/webhook 签名/台账对账/审批 base 权限盘点等）按清单排期，见顶层 DEVLOG v109。

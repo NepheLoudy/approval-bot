@@ -1,6 +1,7 @@
 const config = require('../config');
 const approvalService = require('./approvalService');
 const invoiceUrgeService = require('./invoiceUrgeService');
+const contacts = require('../feishu/contacts');
 const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildDeliveryCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
@@ -311,7 +312,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
     if (!batches.length) return '📊 暂无报销批次（/approval-batch 先看拟批建议）';
     const lines = ['📊 报销批次总览：'];
     for (const b of batches) {
-      lines.push(`· ${b.batchNo}（${b.project}）：${b.count} 张 ¥${b.amount.toFixed(2)}【${b.status}】${b.taker ? ` 接取:${b.taker}` : ''}`);
+      lines.push(`· ${b.batchNo}（${b.project}）：${b.count} 张 ¥${b.amount.toFixed(2)}【${b.status}】${b.taker ? ` 接取:${b.taker}` : ''}${b.operator ? ` 操作:${b.operator}` : ''}`);
     }
     return lines.join('\n');
   }
@@ -324,8 +325,10 @@ async function handleBatchCommand(args = [], ctx = {}) {
   if (statusMap[sub]) {
     if (!args[1]) return `❌ 用法：/approval-batch ${sub} <批次号>${sub === 'submit' ? ' [投递单号]' : ''}`;
     const deliveryNo = sub === 'submit' ? (args[2] || '') : '';
-    const r = await batchService.markBatch(args[1], statusMap[sub].status);
+    const { operator, verified } = await resolveOperator(ctx);
+    const r = await batchService.markBatch(args[1], statusMap[sub].status, operator);
     const lines = [`✅ 批次 ${r.batchNo} 已标记【${statusMap[sub].label}】：${r.count} 张 ¥${r.amount.toFixed(2)}`];
+    if (operator) lines.push(`· 👤 操作人：${operator}${verified ? '' : '（自报，未经通讯录校验）'}`);
     // 报销台账电子表格同步（写失败不影响批次状态流转，回执如实提示可重试）
     lines.push(await syncLedgerQuietly(sub, r.batchNo, deliveryNo));
     if (r.archiveFolder) lines.push(`· 🗂️ 归档文件夹名建议：${r.archiveFolder}`);
@@ -396,12 +399,32 @@ async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
 }
 
 /**
+ * 操作人归属（2026-09-25 安全审查 #2 防冒名）：资金指令的操作人身份以 hub 透传的
+ * senderId（open_id）反查通讯录实名为准，**不信自报 senderName**；
+ * 通讯录失败 fail-open 回落自报名（同催发票通讯录兜底口径），查无此人如实降级。
+ */
+async function resolveOperator(ctx = {}) {
+  const senderId = ctx.senderId || '';
+  const selfReported = ctx.senderName || '';
+  if (!senderId) return { operator: selfReported, verified: false };
+  try {
+    const users = await contacts.listActiveUsers();
+    if (users.has(senderId)) return { operator: users.get(senderId) || selfReported || senderId, verified: true };
+    return { operator: selfReported || senderId, verified: false };
+  } catch (err) {
+    console.error('[对话服务] 通讯录实名反查失败（fail-open 回落自报名）:', err.message);
+    return { operator: selfReported, verified: false };
+  }
+}
+
+/**
  * 接取批次（审批群交付卡的领取回路）：回复「接取」= 接最近锁定的未接取批次；
  * 「接取 <批次号>」= 指定批次。登记接取人（hub 透传 senderName）与时间。
  */
 async function handleTakeCommand(args = [], ctx = {}) {
   const batchService = require('./batchService');
-  const r = await batchService.claimBatch(args[0] || '', (ctx && ctx.senderName) || '');
+  const { operator } = await resolveOperator(ctx);
+  const r = await batchService.claimBatch(args[0] || '', operator);
   return [
     `✅ 批次 ${r.batchNo} 已接取（${r.taker}）${r.reClaim ? '· 重复接取，登记不变' : ''}`,
     `· ${r.count} 张 ¥${Number(r.amount).toFixed(2)}（${r.project}）`,
@@ -518,4 +541,5 @@ module.exports = {
   executeCommand,
   isMentionedBot,
   parseCommand,
+  resolveOperator, // 安全审查 #2：操作人实名反查（桩测试断言用）
 };

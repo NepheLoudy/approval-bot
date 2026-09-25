@@ -11,6 +11,20 @@ const { requestAPI } = require('./client');
 
 /** 活跃成员 open_id 集合（Set<open_id>；失败抛错） */
 async function listActiveOpenIds() {
+  const users = await listActiveUsers();
+  return new Set(users.keys());
+}
+
+/**
+ * 活跃成员映射（Map<open_id, 姓名>；失败抛错）。
+ * 5 分钟进程内缓存：接取/submit/paid 等指令链的「open_id 反查实名」防冒名用，
+ * 全租户部门×成员扫描成本不低，不缓存会对每条资金指令打一轮通讯录。
+ */
+let userCache = { map: null, expiresAt: 0 };
+async function listActiveUsers() {
+  const now = Date.now();
+  if (userCache.map && now < userCache.expiresAt) return userCache.map;
+
   // 部门列表也要翻页（has_more/page_token）：组织超 50 个部门时单页拉取会漏人，
   // 漏掉的部门成员被误判「离职」持久化停催且无法自动恢复（2026-09-20 审查发现）
   const deptIds = ['0'];
@@ -24,7 +38,7 @@ async function listActiveOpenIds() {
     deptToken = deptRes.data?.has_more ? (deptRes.data.page_token || '') : '';
   } while (deptToken);
 
-  const active = new Set();
+  const users = new Map();
   for (const deptId of deptIds) {
     let pageToken = '';
     do {
@@ -35,12 +49,13 @@ async function listActiveOpenIds() {
       for (const u of (res.data?.items || [])) {
         if (!u.open_id) continue;
         if (u.status && u.status.activated === false) continue; // 停用成员视为无效
-        active.add(u.open_id);
+        users.set(u.open_id, u.name || '');
       }
       pageToken = res.data?.has_more ? (res.data.page_token || '') : '';
     } while (pageToken);
   }
-  return active;
+  userCache = { map: users, expiresAt: now + 5 * 60 * 1000 };
+  return users;
 }
 
-module.exports = { listActiveOpenIds };
+module.exports = { listActiveOpenIds, listActiveUsers };

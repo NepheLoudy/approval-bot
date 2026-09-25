@@ -18,6 +18,17 @@ const collectStore = require('./collectStore');
 const SUMMARY_COL_INDEX = 2; // C 列（0 基）
 const GRID_COLS = 13; // A..M
 
+// 台账读改写互斥（2026-09-25 安全审查 #3）：syncOnSubmit 是 read-then-write，
+// 并发调用会在 readGrid await 点交错算出同一个追加行互相覆盖（丢一行账）——
+// 按 spreadsheetToken 全程串行化（batchService withLock 同款 promise 链）
+const locks = new Map();
+async function withLedgerLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  locks.set(key, run.catch(() => {}));
+  return run;
+}
+
 function ledgerEnabled() {
   return Boolean(config.ledger.spreadsheetToken);
 }
@@ -81,48 +92,50 @@ function fmtDate(ms) {
  */
 async function syncOnSubmit(batchNo, deliveryNo = '') {
   if (!ledgerEnabled()) return { action: 'disabled' };
-  const batch = await collectStore.findBatchByName(batchNo);
-  if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  const f = batch.fields;
-  const summary = String(f['摘要'] || '').trim();
-  if (!summary) return { action: 'no_summary' }; // 老批次无摘要，不进台账（如实上报调用方）
+  return withLedgerLock(config.ledger.spreadsheetToken, async () => {
+    const batch = await collectStore.findBatchByName(batchNo);
+    if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    const f = batch.fields;
+    const summary = String(f['摘要'] || '').trim();
+    if (!summary) return { action: 'no_summary' }; // 老批次无摘要，不进台账（如实上报调用方）
 
-  const { sheetId, rowCount } = await resolveSheet();
-  const grid = await readGrid(sheetId);
-  const existRow = findRowBySummary(grid, summary);
-  if (existRow) {
-    // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动
-    const existing = grid[existRow - 1] || [];
-    if (deliveryNo && String(existing[1] ?? '').trim() === '') {
-      await writeRange(sheetId, `B${existRow}:B${existRow}`, [[/^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo]]);
-      return { action: 'appended', rowIndex: existRow, updated: 'deliveryNo' };
+    const { sheetId, rowCount } = await resolveSheet();
+    const grid = await readGrid(sheetId);
+    const existRow = findRowBySummary(grid, summary);
+    if (existRow) {
+      // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动
+      const existing = grid[existRow - 1] || [];
+      if (deliveryNo && String(existing[1] ?? '').trim() === '') {
+        await writeRange(sheetId, `B${existRow}:B${existRow}`, [[/^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo]]);
+        return { action: 'appended', rowIndex: existRow, updated: 'deliveryNo' };
+      }
+      return { action: 'exists', rowIndex: existRow };
     }
-    return { action: 'exists', rowIndex: existRow };
-  }
 
-  const next = lastNonEmptyRow(grid) + 1;
-  if (next > rowCount) throw new Error(`台账表行数已满（${rowCount} 行），请人工插入行后重试`);
-  const seq = next >= 3 ? Number(grid[next - 2]?.[0]) + 1 || next - 2 : next - 2; // 序号=上一行序号+1
-  const payee = String(f['收款方'] || '').trim() || config.batch.reporterName;
-  const payeeAccount = String(f['收款账号'] || '').trim() || config.batch.bankCardNo;
-  const operator = String(f['接取人'] || '').trim() || config.batch.reporterName;
-  const row = [
-    seq,
-    /^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo,
-    summary,
-    Number(f['金额合计']) || 0,
-    config.batch.projectCode,
-    '转卡',
-    payee,
-    payeeAccount,
-    operator,
-    fmtDate(Number(f['锁定时间']) || Date.now()),
-    fmtDate(Date.now()),
-    '',
-    '已提交至中心',
-  ];
-  await writeRange(sheetId, `A${next}:M${next}`, [row]);
-  return { action: 'appended', rowIndex: next, row };
+    const next = lastNonEmptyRow(grid) + 1;
+    if (next > rowCount) throw new Error(`台账表行数已满（${rowCount} 行），请人工插入行后重试`);
+    const seq = next >= 3 ? Number(grid[next - 2]?.[0]) + 1 || next - 2 : next - 2; // 序号=上一行序号+1
+    const payee = String(f['收款方'] || '').trim() || config.batch.reporterName;
+    const payeeAccount = String(f['收款账号'] || '').trim() || config.batch.bankCardNo;
+    const operator = String(f['接取人'] || '').trim() || config.batch.reporterName;
+    const row = [
+      seq,
+      /^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo,
+      summary,
+      Number(f['金额合计']) || 0,
+      config.batch.projectCode,
+      '转卡',
+      payee,
+      payeeAccount,
+      operator,
+      fmtDate(Number(f['锁定时间']) || Date.now()),
+      fmtDate(Date.now()),
+      '',
+      '已提交至中心',
+    ];
+    await writeRange(sheetId, `A${next}:M${next}`, [row]);
+    return { action: 'appended', rowIndex: next, row };
+  });
 }
 
 /**
@@ -132,23 +145,25 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
  */
 async function syncOnStatus(batchNo, mode = {}) {
   if (!ledgerEnabled()) return { action: 'disabled' };
-  const batch = await collectStore.findBatchByName(batchNo);
-  if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  const summary = String(batch.fields['摘要'] || '').trim();
-  if (!summary) return { action: 'no_summary' };
+  return withLedgerLock(config.ledger.spreadsheetToken, async () => {
+    const batch = await collectStore.findBatchByName(batchNo);
+    if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    const summary = String(batch.fields['摘要'] || '').trim();
+    if (!summary) return { action: 'no_summary' };
 
-  const { sheetId } = await resolveSheet();
-  const grid = await readGrid(sheetId);
-  const row = findRowBySummary(grid, summary);
-  if (!row) return { action: 'not_found' };
+    const { sheetId } = await resolveSheet();
+    const grid = await readGrid(sheetId);
+    const row = findRowBySummary(grid, summary);
+    if (!row) return { action: 'not_found' };
 
-  if (mode.paid) {
-    // L 入账日期 + M 状态
-    await writeRange(sheetId, `L${row}:M${row}`, [[fmtDate(Date.now()), '已到账']]);
-  } else if (mode.rejected) {
-    await writeRange(sheetId, `M${row}:M${row}`, [['已退回']]);
-  }
-  return { action: 'updated', rowIndex: row };
+    if (mode.paid) {
+      // L 入账日期 + M 状态
+      await writeRange(sheetId, `L${row}:M${row}`, [[fmtDate(Date.now()), '已到账']]);
+    } else if (mode.rejected) {
+      await writeRange(sheetId, `M${row}:M${row}`, [['已退回']]);
+    }
+    return { action: 'updated', rowIndex: row };
+  });
 }
 
 module.exports = {

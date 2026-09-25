@@ -139,6 +139,33 @@ async function main() {
   const r7 = await ledgerSheetService.syncOnSubmit('27备赛20步兵5');
   assert.equal(r7.action, 'no_summary');
 
+  // ---------- 并发互斥（安全审查 #3）：两个 submit 同时追加，必须落在不同行 ----------
+  batches['27对抗赛无人机26'] = { record_id: 'bat26', fields: { '批次号': '27对抗赛无人机26', '摘要': '机甲大师实验室-27赛季-对抗赛-无人机-材料费-第二十六笔', '金额合计': 50, '锁定时间': Date.now(), '接取人': '贺韵洁', '收款方': '', '收款账号': '' } };
+  batches['27对抗赛重装27'] = { record_id: 'bat27', fields: { '批次号': '27对抗赛重装27', '摘要': '机甲大师实验室-27赛季-对抗赛-重装-材料费-第二十七笔', '金额合计': 60, '锁定时间': Date.now(), '接取人': '贺韵洁', '收款方': '', '收款账号': '' } };
+  writes = [];
+  const realRequestAPI = client.requestAPI;
+  let readDelayArmed = true;
+  client.requestAPI = async (method, urlPath, body) => {
+    // 首次读网格延迟 50ms，制造 await 交错窗口：无互斥时两个调用会算出同一追加行
+    if (readDelayArmed && method === 'GET' && urlPath.includes('/values/')) {
+      readDelayArmed = false;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return realRequestAPI(method, urlPath, body);
+  };
+  try {
+    const [c1, c2] = await Promise.all([
+      ledgerSheetService.syncOnSubmit('27对抗赛无人机26'),
+      ledgerSheetService.syncOnSubmit('27对抗赛重装27'),
+    ]);
+    assert.equal(c1.action, 'appended');
+    assert.equal(c2.action, 'appended');
+    assert.notEqual(c1.rowIndex, c2.rowIndex, `互斥下两次追加必须落在不同行（实际 ${c1.rowIndex}/${c2.rowIndex}）`);
+    assert.deepEqual([c1.rowIndex, c2.rowIndex].sort((a, b) => a - b), [7, 8], '串行化：第二次写入看到第一次的结果');
+  } finally {
+    client.requestAPI = realRequestAPI;
+  }
+
   // ---------- disabled：未配置 token 时整体关闭 ----------
   config.ledger.spreadsheetToken = '';
   const r8 = await ledgerSheetService.syncOnSubmit('27对抗赛步兵25');

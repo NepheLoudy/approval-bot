@@ -647,13 +647,18 @@ async function claimBatch(batchNo, claimer = '') {
 
 // ---------- 批次状态流转（已提交/已到账/已退回） ----------
 
-async function markBatch(batchNo, status) {
+async function markBatch(batchNo, status, operator = '') {
   const batch = await collectStore.findBatchByName(batchNo);
   if (!batch) throw new Error(`批次不存在：${batchNo}`);
   const now = Date.now();
   const fields = { '状态': status };
   if (status === collectStore.BATCH_STATUS.SUBMITTED) fields['提交时间'] = now;
   if (status === collectStore.BATCH_STATUS.PAID) fields['到账时间'] = now;
+  // 操作留痕（2026-09-25 安全审查 #2：资金状态变更必须可追责；operator 经 open_id 反查实名）
+  if (operator) {
+    fields['最后操作人'] = operator;
+    fields['最后操作时间'] = now;
+  }
   await collectStore.updateBatch(batch.record_id, fields);
 
   // 已退回 → 该批次票清空「批次」标记自动回票池（与 /approval-batch 帮助文案一致——复查 P2-4）
@@ -706,6 +711,7 @@ async function batchOverview() {
       amount: typeof b.fields['金额合计'] === 'number' ? b.fields['金额合计'] : (parseFloat(b.fields['金额合计']) || 0),
       status: b.fields['状态'] || collectStore.BATCH_STATUS.LOCKED,
       taker: String(b.fields['接取人'] || ''),
+      operator: String(b.fields['最后操作人'] || ''),
     }))
     .sort((a, b) => ((statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99) || b.amount - a.amount));
 }

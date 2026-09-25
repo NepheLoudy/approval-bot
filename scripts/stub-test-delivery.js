@@ -199,6 +199,37 @@ async function main() {
     await batchService.claimBatch('27对抗赛飞镖24', '贺韵洁'); // 唯一剩余未接取 → 成功
     await batchService.claimBatch('', '别人'); // 此后无未接取 → 报错
   }, /没有待接取/);
+
+  // ---------- 安全审查 #2：操作人实名反查（open_id 优先于自报名）+ markBatch 留痕 ----------
+  const contacts = require('../src/feishu/contacts');
+  const chatService = require('../src/services/chatService');
+  const realListUsers = contacts.listActiveUsers;
+  contacts.listActiveUsers = async () => new Map([['ou_hh', '贺韵洁'], ['ou_cj', '陈嘉豪']]);
+  const verified = await chatService.resolveOperator({ senderId: 'ou_hh', senderName: '冒名者' });
+  assert.equal(verified.operator, '贺韵洁', 'open_id 反查实名优先于自报名（防冒名）');
+  assert.equal(verified.verified, true);
+  const unknown = await chatService.resolveOperator({ senderId: 'ou_ghost', senderName: '自报名' });
+  assert.equal(unknown.operator, '自报名', '查无此人如实降级为自报名');
+  assert.equal(unknown.verified, false);
+  contacts.listActiveUsers = async () => { throw new Error('通讯录挂了'); };
+  const failOpen = await chatService.resolveOperator({ senderId: 'ou_hh', senderName: '自报名' });
+  assert.equal(failOpen.operator, '自报名', '通讯录失败 fail-open 回落自报名');
+  assert.equal(failOpen.verified, false);
+  const noIdentity = await chatService.resolveOperator({});
+  assert.equal(noIdentity.operator, '', '无身份不编造操作人');
+  contacts.listActiveUsers = realListUsers;
+
+  const mbOp = await batchService.markBatch('27备赛20步兵5', '已提交', '陈嘉豪');
+  assert.equal(mbOp.status, '已提交');
+  const mbRow = batchRows.find(b => b.record_id === 'bat3');
+  assert.equal(mbRow.fields['最后操作人'], '陈嘉豪', '操作留痕落表');
+  assert.ok(mbRow.fields['最后操作时间'] > 0, '操作时间落表');
+  await batchService.markBatch('27备赛20步兵5', '已到账', '');
+  assert.equal(mbRow.fields['最后操作人'], '陈嘉豪', '无身份调用不覆盖既有留痕');
+  // status 总览带操作人
+  const overview = await batchService.batchOverview();
+  const opRow = overview.find(b => b.batchNo === '27备赛20步兵5');
+  assert.equal(opRow.operator, '陈嘉豪', '总览含最后操作人');
 }
 
 (async () => {
