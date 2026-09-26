@@ -477,6 +477,18 @@ function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = []
 }
 
 /**
+ * 交付卡注入消毒（2026-09-27 对抗审查 P2）：project/summary 等字段源头是表格数据
+ * （队员/财务可写），剥掉 <at> 标记与 markdown 链接语法（保留链接文本），
+ * 防伪造 @人 / 钓鱼链接经交付卡注入群消息。
+ */
+function stripCardInjection(s) {
+  return String(s || '')
+    .replace(/<at[^>]*>/gi, '')
+    .replace(/<\/at>/gi, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+}
+
+/**
  * 报销交付卡（锁定批次后审批群播报）：四件附件清单 + 摘要草稿 + 接取指引。
  * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 四列）。
  */
@@ -486,12 +498,15 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
     : '';
   const mark = (ok, label, desc) => `- ${ok ? '✅' : '⚠️'} **${label}** — ${desc}${ok ? '' : '（生成失败，可 /approval-batch regen 重试）'}`;
+  // 外部可影响字段先消毒再拼 markdown（复查 P2-16）
+  const safeProject = stripCardInjection(project);
+  const safeSummary = stripCardInjection(summary);
 
   const lines = [
-    `**项目** ${project || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
+    `**项目** ${safeProject || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
     '',
     `**摘要**（录入学校系统时直接复制）：`,
-    `${summary || '（未生成）'}`,
+    `${safeSummary || '（未生成）'}`,
     '',
     `**📎 交付文件**（「报销批次」表该行附件下载）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,
     mark(generated.pdf, '打印文件', '按录入顺序一页两票，照序扫描'),
@@ -594,6 +609,7 @@ module.exports = {
   buildUrgeCard,
   buildTodayUrgedCard,
   buildDeliveryCard,
+  stripCardInjection, // 交付卡注入消毒（桩测试断言用）
   buildInvoiceUrgePost,
   previewInvoiceUrgePost,
   // 字段格式化工具（供其他服务复用）

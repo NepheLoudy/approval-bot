@@ -95,6 +95,11 @@ module.exports = {
   // 审批者配置（逗号分隔 open_id，用于提醒回落等场景）
   approvers: parseArrayConfig(process.env.APPROVERS),
 
+  // 资金指令操作人白名单（逗号分隔 open_id，2026-09-27 对抗审查 P1）：配置后
+  // lock/submit/paid/reject 仅限名单内操作人（以 hub 透传 senderId 为准，自报名不可信）；
+  // 留空 = 不限（回执仍显示操作人校验状态）。建议配置财务 open_id
+  fundOperatorIds: parseArrayConfig(process.env.APPROVAL_FUND_OPERATOR_IDS),
+
   // 每周播报（默认环境变量为每周一 18:00）
   cron: {
     schedule: process.env.CRON_SCHEDULE || '0 0 18 * * 1',

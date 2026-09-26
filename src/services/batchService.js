@@ -60,10 +60,18 @@ function collectToItem(r, byApplyNo) {
   const f = r.fields;
   const applyNo = String(f['关联申请编号'] || '');
   const af = byApplyNo.get(applyNo) || {};
+  // 金额解析：parseFloat 前先去千分位逗号（复查 P2：'1,234.56' 直接 parseFloat 会截断成 1）；
+  // 解析后非数或 <=0 标 amountInvalid（计入 warningCount + 投递底单金额格标黄——复查 P2，
+  // 此前静默归零无任何警示，财务容易按 0 元漏录）
+  const rawAmount = f['价税合计'];
+  const totalAmount = typeof rawAmount === 'number'
+    ? rawAmount
+    : (parseFloat(String(rawAmount ?? '').replace(/,/g, '')) || 0);
   return {
     record_id: r.record_id,
     invoiceNo: String(f['发票号码'] || ''),
-    totalAmount: typeof f['价税合计'] === 'number' ? f['价税合计'] : (parseFloat(f['价税合计']) || 0),
+    totalAmount,
+    amountInvalid: !(totalAmount > 0),
     collectedAt: Number(f['采集时间']) || 0,
     applyNo,
     material: af['购买物资名称'] || '',
@@ -105,7 +113,7 @@ async function previewBatch() {
       count: items.length,
       amount: Math.round(items.reduce((s, i) => s + i.totalAmount, 0) * 100) / 100,
       range: items.length ? `尾号 ${items[0].invoiceNo.slice(-6)}~${items[items.length - 1].invoiceNo.slice(-6)}` : '',
-      warningCount: items.filter(i => i.verifyStatus && i.verifyStatus !== '通过').length,
+      warningCount: items.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
     }))
     .sort((a, b) => b.count - a.count);
   return { poolSize: pool.length, suggestions };
@@ -123,8 +131,11 @@ async function lockBatch(batchNo, project, options = {}) {
   if (!batchNo || !batchNo.trim()) throw new Error('批次号不能为空（如 27备赛20步兵5）');
   batchNo = batchNo.trim();
 
-  // 全程按批次号加锁（防并发双锁同一池票——复查 P1-6）；锁内二次查重
-  return withLock(`batch_${batchNo}`, async () => {
+  // 全程按批次号加锁（防并发双锁同一池票——复查 P1-6）；锁内二次查重。
+  // batch_ 锁内全程再包 pool 锁（复查 P1：batch_ 锁只互斥同批次号，不同批次号并发 lock
+  // 会在互不排斥的情况下各自快照同一票池，同一张票进两批 → 双金额双张数；
+  // 嵌套锁顺序恒为 batch_ → pool → proj_，无反向嵌套，安全）
+  return withLock(`batch_${batchNo}`, () => withLock('pool', async () => {
     const existing = await collectStore.findBatchByName(batchNo);
     if (existing) throw new Error(`批次号已存在：${batchNo}（报销批次表）`);
 
@@ -204,8 +215,10 @@ async function lockBatch(batchNo, project, options = {}) {
       }
     }
 
-    // 4. 生成四件附件（失败不阻断锁定，可 /approval-batch regen 重生成——复查 P2-5）
-    const meta = { summary, purpose, ordinal, feeItem, purchaseType };
+    // 4. 生成四件附件（失败不阻断锁定，可 /approval-batch regen 重生成——复查 P2-5）。
+    //    meta 带 payee/payeeAccount（复查 P1：收款方覆盖要进投递底单，否则底单恒写 .env
+    //    CQ_* 默认卡，账实分离——批次记录/台账是 A 卡、钱打到 .env 默认 B 卡）
+    const meta = { summary, purpose, ordinal, feeItem, purchaseType, payee, payeeAccount };
     let pdfToken = null, bomToken = null, mlToken = null, dsToken = null;
     try { pdfToken = await uploadBatchPdf(batchNo, pool); } catch (err) { console.error('[批次] 打印 PDF 生成失败:', err.message); }
     try { bomToken = await uploadBatchBom(batchNo, pool); } catch (err) { console.error('[批次] BOM 生成失败:', err.message); }
@@ -234,11 +247,11 @@ async function lockBatch(batchNo, project, options = {}) {
       batchNo, count: pool.length, amount, projects, approvalWritten,
       pdfToken, bomToken, mlToken, dsToken,
       summary, purpose, ordinal, markFailed,
-      warningCount: pool.filter(i => i.verifyStatus && i.verifyStatus !== '通过').length,
+      warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       missingContent: pool.filter(i => !i.invoiceContent).length,
       recordId: batchRecord.record_id, items: pool,
     };
-  });
+  }));
 }
 
 // ---------- 交付包元数据（摘要/笔序/归档名） ----------
@@ -246,7 +259,11 @@ async function lockBatch(batchNo, project, options = {}) {
 /** 同主项目的既有批次数 + 1 → 「第N笔」序号 */
 async function nextProjectOrdinal(primaryProject) {
   const batches = await collectStore.listBatches();
-  const count = batches.filter(b => String(b.fields['项目'] || '').split('/').includes(primaryProject)).length;
+  // 项目名自身含 '/' 时 split('/') 会把它劈成两段、includes 永不命中（笔序恒 1 →
+  // 摘要重复 → 台账按摘要匹配丢账）——复查 P2：此时改用「项目」字段精确等值计数
+  const count = String(primaryProject).includes('/')
+    ? batches.filter(b => String(b.fields['项目'] || '') === primaryProject).length
+    : batches.filter(b => String(b.fields['项目'] || '').split('/').includes(primaryProject)).length;
   return count + 1;
 }
 
@@ -305,7 +322,19 @@ async function regenerateBatchFiles(batchNo) {
     summary, purpose, ordinal,
     feeItem: String(bf['费用项'] || ''),
     purchaseType: String(bf['采购类型'] || ''),
+    // 收款方从批次记录读回（复查 P1：regen 也要让锁定时的 收款方=/收款账号= 覆盖进投递底单，
+    // 不能回落 .env CQ_* 默认卡造成账实分离）
+    payee: String(bf['收款方'] || ''),
+    payeeAccount: String(bf['收款账号'] || ''),
   };
+
+  // 金额漂移核对（复查 P1）：regen 用采集表现值重造四件附件，若与批次锁定时记录的
+  // 「金额合计」对不上（票被挪动/金额被改），如实暴露给回执与批次备注，财务核对台账
+  const regenTotal = Math.round(items.reduce((s, i) => s + i.totalAmount, 0) * 100) / 100;
+  const recordedTotal = typeof bf['金额合计'] === 'number' ? bf['金额合计'] : (parseFloat(bf['金额合计']) || 0);
+  const amountDrift = Math.abs(regenTotal - recordedTotal) > 0.005
+    ? { recorded: recordedTotal, current: regenTotal }
+    : null;
 
   let pdfToken = null, bomToken = null, mlToken = null, dsToken = null;
   try { pdfToken = await uploadBatchPdf(batchNo, items); } catch (err) { console.error('[批次] 打印 PDF 重生成失败:', err.message); }
@@ -318,7 +347,17 @@ async function regenerateBatchFiles(batchNo) {
   if (mlToken) attach['物料清单'] = [{ file_token: mlToken }];
   if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
   if (Object.keys(attach).length) await collectStore.updateBatch(batch.record_id, attach);
-  return { batchNo, count: items.length, pdfToken, bomToken, mlToken, dsToken };
+  if (amountDrift) {
+    try {
+      const prevNote = String(bf['备注'] || '');
+      await collectStore.updateBatch(batch.record_id, {
+        '备注': `${prevNote ? `${prevNote}；` : ''}⚠️ regen 后金额与锁定值不一致（记录 ¥${recordedTotal.toFixed(2)} / 实际 ¥${regenTotal.toFixed(2)}），请核对台账`,
+      });
+    } catch (err) {
+      console.error('[批次] 金额漂移备注回写失败:', err.message);
+    }
+  }
+  return { batchNo, count: items.length, pdfToken, bomToken, mlToken, dsToken, amountDrift };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
@@ -416,7 +455,10 @@ function addPlaceholderPage(out, index, item, reason) {
 
 async function uploadBatchBom(batchNo, items) {
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet(`BOM-${batchNo}`);
+  // 工作表名对批次号消毒（复查 P2：Excel 工作表名禁用 :\/?*[] 等字符，
+  // 批次号照财务命名可能带 /，直接用会在 addWorksheet 抛错）
+  const safeSheetName = `BOM-${String(batchNo).replace(/[\\/:*?"<>|[\]]/g, '')}`;
+  const ws = wb.addWorksheet(safeSheetName);
   ws.columns = [
     { header: '序号', key: 'idx', width: 6 },
     { header: '申请编号', key: 'applyNo', width: 16 },
@@ -441,7 +483,9 @@ async function uploadBatchBom(batchNo, items) {
       applyAmount: '',
       invoiceNo: item.invoiceNo,
       invoiceAmount: item.totalAmount,
-      verifyStatus: item.verifyStatus || '通过',
+      // 空校验状态显示「未校验」而非「通过」（复查 P2：纯 QR 通道票票面无校验结果，
+      // 写「通过」会让财务误以为已核验；「未校验」与 warningCount 口径一致）
+      verifyStatus: item.verifyStatus || '未校验',
     });
   });
   const total = items.reduce((s, i) => s + i.totalAmount, 0);
@@ -588,8 +632,12 @@ async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
   put('财务核准报销金额', '', { note: '财务填写' });
   put('支付方式', '转卡');
   put('收款人工号', b.reporterStuId, { yellow: !b.reporterStuId });
-  put('收款人姓名', b.reporterName, { yellow: !b.reporterName });
-  put('卡号', b.bankCardNo, { yellow: !b.bankCardNo });
+  // 收款人姓名/卡号：批次锁定时 收款方=/收款账号= 覆盖优先（meta 带入），回落 .env 默认卡
+  // （复查 P1：此前恒写默认卡，lock 的收款方覆盖只进批次记录与台账 → 账实分离）
+  const dsPayee = String(meta.payee || '').trim() || b.reporterName;
+  const dsPayeeAccount = String(meta.payeeAccount || '').trim() || b.bankCardNo;
+  put('收款人姓名', dsPayee, { yellow: !dsPayee });
+  put('卡号', dsPayeeAccount, { yellow: !dsPayeeAccount });
   put('开户行', b.bankName, { yellow: !b.bankName });
   put('金额', total);
 
@@ -612,6 +660,8 @@ async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
       c.font = { ...SONG, size: 10 };
       c.alignment = { vertical: 'middle' };
       if (col === 4 && !item.invoiceContent) c.fill = YELLOW_FILL;
+      // 金额格：解析失败/<=0 的票标黄（复查 P2：collectToItem 静默归零的票在底单上要有警示）
+      if (col === 5 && item.amountInvalid) c.fill = YELLOW_FILL;
     });
   }
 
@@ -667,7 +717,8 @@ async function claimBatch(batchNo, claimer = '') {
 // ---------- 批次状态流转（已提交/已到账/已退回） ----------
 
 // 合法流转表（复查 P1-3）：已锁定→已提交/已退回、已提交→已到账/已退回；
-// 已到账/已退回为终态，拒绝任何再流转（防「已到账」批次再退回票入池造成重复报销）
+// 已到账/已退回为终态，拒绝任何再流转（防「已到账」批次再退回票入池造成重复报销）。
+// 唯一例外：「已退回→已退回」幂等重入（见 markBatch 内 special-case，仅用于继续回票）
 const BATCH_TRANSITIONS = {
   [collectStore.BATCH_STATUS.LOCKED]: [collectStore.BATCH_STATUS.SUBMITTED, collectStore.BATCH_STATUS.REJECTED],
   [collectStore.BATCH_STATUS.SUBMITTED]: [collectStore.BATCH_STATUS.PAID, collectStore.BATCH_STATUS.REJECTED],
@@ -676,55 +727,106 @@ const BATCH_TRANSITIONS = {
 };
 
 async function markBatch(batchNo, status, operator = '') {
-  const batch = await collectStore.findBatchByName(batchNo);
-  if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  // 状态机校验：非法流转直接拒绝（错误信息带当前状态与合法去向）
-  const curStatus = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
-  const allowed = BATCH_TRANSITIONS[curStatus];
-  if (!allowed || !allowed.length || !allowed.includes(status)) {
-    const to = (!allowed || !allowed.length) ? '无（终态，不可再流转）' : allowed.join('/');
-    throw new Error(`批次 ${batchNo} 状态流转非法：当前【${curStatus}】，合法去向【${to}】，收到【${status}】`);
-  }
-  const now = Date.now();
-  const fields = { '状态': status };
-  if (status === collectStore.BATCH_STATUS.SUBMITTED) fields['提交时间'] = now;
-  if (status === collectStore.BATCH_STATUS.PAID) fields['到账时间'] = now;
-  // 操作留痕（2026-09-25 安全审查 #2：资金状态变更必须可追责；operator 经 open_id 反查实名）
-  if (operator) {
-    fields['最后操作人'] = operator;
-    fields['最后操作时间'] = now;
-  }
-  await collectStore.updateBatch(batch.record_id, fields);
-
-  // 已退回 → 该批次票清空「批次」标记自动回票池（与 /approval-batch 帮助文案一致——复查 P2-4）
-  let returnedToPool = 0;
-  if (status === collectStore.BATCH_STATUS.REJECTED) {
-    const collects = (await collectStore.listCollect()).filter(r => String(r.fields['批次'] || '') === batchNo);
-    for (const r of collects) {
-      await collectStore.updateCollect(r.record_id, { '批次': '' });
-      returnedToPool++;
+  // 全程按批次号加锁（复查 P1：校验 findBatchByName 与写入 updateBatch 之间有 await，
+  // 并发 paid+reject 会各自通过状态机校验双成功；与 lockBatch 同 key 族互斥，
+  // markBatch 内不再嵌套其他锁，无死锁环）
+  return withLock(`batch_${batchNo}`, async () => {
+    const batch = await collectStore.findBatchByName(batchNo);
+    if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    // 状态机校验：非法流转直接拒绝（错误信息带当前状态与合法去向）
+    const curStatus = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
+    // 「已退回→已退回」幂等重入（复查 P1-3）：仅用于继续回票——前次 reject 中途失败
+    // （终态已写、部分票仍挂批次）时，可重发 reject 续回剩余票；已无本批次票则视为完成
+    const reentry = curStatus === collectStore.BATCH_STATUS.REJECTED && status === collectStore.BATCH_STATUS.REJECTED;
+    if (!reentry) {
+      const allowed = BATCH_TRANSITIONS[curStatus];
+      if (!allowed || !allowed.length || !allowed.includes(status)) {
+        const to = (!allowed || !allowed.length) ? '无（终态，不可再流转）' : allowed.join('/');
+        throw new Error(`批次 ${batchNo} 状态流转非法：当前【${curStatus}】，合法去向【${to}】，收到【${status}】`);
+      }
     }
-  }
+    const now = Date.now();
+    const fields = { '状态': status };
+    if (status === collectStore.BATCH_STATUS.SUBMITTED) fields['提交时间'] = now;
+    if (status === collectStore.BATCH_STATUS.PAID) fields['到账时间'] = now;
+    // 操作留痕（2026-09-25 安全审查 #2：资金状态变更必须可追责；operator 经 open_id 反查实名）
+    if (operator) {
+      fields['最后操作人'] = operator;
+      fields['最后操作时间'] = now;
+    }
+    await collectStore.updateBatch(batch.record_id, fields);
 
-  const f = batch.fields;
-  const paidAt = fields['到账时间'] || f['到账时间'];
-  return {
-    batchNo,
-    status,
-    count: f['张数'],
-    amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
-    returnedToPool,
-    // 已到账 → 归档文件夹名建议（照财务实样 20260920-对抗赛-飞镖-第二十四笔-237.04）
-    archiveFolder: status === collectStore.BATCH_STATUS.PAID
-      ? buildArchiveFolderName({
-          dateMs: Number(paidAt) || Date.now(),
-          project: String(f['项目'] || ''),
-          purpose: String(f['用途'] || '') || undefined,
-          ordinal: Number(f['笔序']) || 0,
-          amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
-        })
-      : '',
-  };
+    // 已退回 → 该批次票清空「批次」标记自动回票池（与 /approval-batch 帮助文案一致——复查 P2-4）。
+    // 逐票 try/catch 收集失败清单（复查 P1-3：此前循环无 catch，单票失败会永久卡死该批——
+    // 失败票下次 reject 幂等重入续回）；审批表「报销单」栏一并清（失败不阻断回票）
+    let returnedToPool = 0;
+    const returnFailed = [];
+    if (status === collectStore.BATCH_STATUS.REJECTED) {
+      const collects = (await collectStore.listCollect()).filter(r => String(r.fields['批次'] || '') === batchNo);
+      for (const r of collects) {
+        try {
+          await collectStore.updateCollect(r.record_id, { '批次': '' });
+          returnedToPool++;
+        } catch (err) {
+          console.error(`[批次] 退回清批次标记失败（${r.fields['发票号码'] || r.record_id}）:`, err.message);
+          returnFailed.push(String(r.fields['发票号码'] || r.record_id));
+        }
+      }
+      const withApplyNo = collects.filter(r => String(r.fields['关联申请编号'] || ''));
+      if (withApplyNo.length) {
+        const approvals = await bitableApi.listAllRecords(config.bitable.approvalTableId);
+        const recordByApplyNo = new Map();
+        for (const rr of approvals) {
+          const ff = rr.fields || {};
+          const no = ff['申请编号'] ? (ff['申请编号'].text || String(ff['申请编号'])) : '';
+          if (no) recordByApplyNo.set(no, rr);
+        }
+        for (const r of withApplyNo) {
+          const applyNo = String(r.fields['关联申请编号'] || '');
+          const hit = recordByApplyNo.get(applyNo);
+          if (!hit) continue;
+          try {
+            await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': '' });
+          } catch (err) {
+            console.error(`[批次] 退回清审批表报销单栏失败（${applyNo}）:`, err.message);
+            returnFailed.push(applyNo);
+          }
+        }
+      }
+      // 失败暴露进批次备注（复查 P1-3），幂等重入续回后自然收敛
+      if (returnFailed.length) {
+        try {
+          const prevNote = String(batch.fields['备注'] || '');
+          await collectStore.updateBatch(batch.record_id, {
+            '备注': `${prevNote ? `${prevNote}；` : ''}${returnFailed.length} 张回票失败（${returnFailed.slice(0, 5).join('、')}${returnFailed.length > 5 ? '…' : ''}），可重发 reject 续回`,
+          });
+        } catch (err) {
+          console.error('[批次] 回票失败备注回写失败:', err.message);
+        }
+      }
+    }
+
+    const f = batch.fields;
+    const paidAt = fields['到账时间'] || f['到账时间'];
+    return {
+      batchNo,
+      status,
+      count: f['张数'],
+      amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
+      returnedToPool,
+      returnFailed,
+      // 已到账 → 归档文件夹名建议（照财务实样 20260920-对抗赛-飞镖-第二十四笔-237.04）
+      archiveFolder: status === collectStore.BATCH_STATUS.PAID
+        ? buildArchiveFolderName({
+            dateMs: Number(paidAt) || Date.now(),
+            project: String(f['项目'] || ''),
+            purpose: String(f['用途'] || '') || undefined,
+            ordinal: Number(f['笔序']) || 0,
+            amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
+          })
+        : '',
+    };
+  });
 }
 
 /** 批次总览（/approval-batch status 用）：按状态机先后分组（未知的排最后），组内金额降序 */

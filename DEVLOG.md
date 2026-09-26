@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v53**（2026-09-26，`1379f0c`，全量审查修复批；09-26 下午随部署批上线）。上一版 v52（财务协作指南梳理，`a1fe3ba`）。上一版 v51（安全审查修复，`3507af0`）。上一版 v50（台账同步，`d0331bd`）。上一版 v49（报销交付包，`f8ac36a`）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
+当前最新：**v54**（2026-09-27，随本提交落地；部署待实验室网段恢复）。上一版 v53（全量审查修复批，`1379f0c`）。上一版 v52（财务协作指南梳理，`a1fe3ba`）。上一版 v51（安全审查修复，`3507af0`）。上一版 v50（台账同步，`d0331bd`）。上一版 v49（报销交付包，`f8ac36a`）。上一版 v48（batchOverview 排序修复+文档批，`24617de`）。上一版 v47（财务协作指南，`7ab3dad`）。上一版 v46（全量复查修复批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -417,3 +417,13 @@
 - **P2**：lock 操作留痕（resolveOperator→最后操作人/时间，回执带锁定人）、claimBatch 全局互斥、lock 打标失败清单暴露（回执+批次备注）、催办私聊成功处补写 user.name、backfill 时间缺失改跳过转人工、urgeStateStore 原子写（tmp+rename）、bitable listAllRecords 死参删除、/approval-help 参数补齐+去重、.env.example 旧 NAS 路径改 /c/qianli 风格、交付卡链接补租户子域（FEISHU_TENANT_BASE_URL）、readGrid 行数动态化。
 - 测试：npm test 五套全绿；stub-test-delivery 新增 regen 顺序/非法流转/锁定人/打标失败/并发接取断言。
 - 部署状态：与 v49-v52 同批待上线。
+
+## v54 · 2026-09-27 · 随本提交落地 · fix
+
+**第二轮全量对抗审查修复批（资金路径深审，对抗实验全部复现后修复）**
+
+- 提交说明：fix: 第二轮对抗审查——票池全局锁/markBatch 互斥/reject 幂等回票/交付包收款方贯通/台账 ambiguous 等
+- **P1×5**：①票池并发双批——batch_ 锁只互斥同批次号，不同批次号并发 lock 共享池各自快照双金额双张数（实验复现），lockBatch 全程加 withLock('pool')；②markBatch TOCTOU——并发 paid+reject 双成功击穿防重复报销（实验复现），全程 batch_ 锁互斥；③reject 中断卡票——逐票 catch 收集失败 + 「已退回→已退回」幂等重入继续回票 + 同循环清审批表「报销单」栏；④收款方覆盖不进投递底单（lock 收款方=/收款账号= 只进批次与台账，底单恒写默认卡=账实分离），meta 贯通 lock/regen 两路；⑤regen 金额漂移静默——重算总额与锁定值差 >0.005 时回执 ⚠️ + 批次备注（防「底单=现值、台账=快照」两套金额，财务照被改金额打款的结构洞）。
+- **P2×10**：资金指令操作人白名单机制（APPROVAL_FUND_OPERATOR_IDS，留空=不限）、BOM 空校验状态改「未校验」且计入 warningCount、ledger 子指令加 submit|paid|reject 模式（补齐台账 L/M 列无指令可补救缺口）、LEDGER_SHEET_ID 分支动态行数、'/' 项目名笔序精确匹配、backfill 补锁与三元组近似闸、numToCnOrdinal >999 空串兜底、工作表名批次号消毒、金额 NaN/≤0 计入 warningCount+底单标黄、台账摘要多行 ambiguous 转人工（绝不猜行）、交付卡 stripCardInjection 消毒、千分位逗号解析、接取回执 verified 标注。
+- 测试：五套全绿；stub-test-delivery/ledger 新增约 20 组断言（并发 lock 不双计/并发 paid+reject 单成功/漂移告警/ambiguous/白名单闸等）。
+- 部署：与后续批一并上线；`APPROVAL_FUND_OPERATOR_IDS` 建议配置（桌面存疑清单二.2）。

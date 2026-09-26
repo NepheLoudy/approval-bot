@@ -29,10 +29,12 @@ function sectionCn(num) {
   return out;
 }
 
-/** n → 中文序号：1 → 一，10 → 十，11 → 十一，24 → 二十四，105 → 一百零五，111 → 一百一十一 */
+/** n → 中文序号：1 → 一，10 → 十，11 → 十一，24 → 二十四，105 → 一百零五，111 → 一百一十一。
+ *  n>999 返回空串（999 以上 CN_LO 溢位会拼出「第undefined百」垃圾值——复查 P2；
+ *  调用方空串时回落「第N笔」数字兜底） */
 function numToCnOrdinal(n) {
   n = Math.floor(Number(n));
-  if (!(n >= 1) || n > 9999) return '';
+  if (!(n >= 1) || n > 999) return '';
   const rest = n % 100;
   const hundreds = Math.floor(n / 100);
   let s = '';

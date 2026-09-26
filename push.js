@@ -157,9 +157,13 @@ async function deployCode() {
       '--exclude=node_modules',
       '--exclude=.git',
       '--exclude=.env',
+      // 本地私有环境覆盖（.env 上传单独走 SFTP，2026-09-27 补洞）
+      '--exclude=.env.local',
+      '--exclude=.env.*.local',
       '--exclude=logs',
       '--exclude=*.log',
       '--exclude=.ocr-fields.local.json',
+      '--exclude=.drill/', // 本地演练残留（drill-online.js 产物）不进部署包
       '--exclude=' + TAR_NAME,
       '-C', __dirname,
       '.',

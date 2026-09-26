@@ -8,6 +8,7 @@
  *  - paid / reject → 按批次「摘要」精确匹配找到该行，回填 入账日期+状态=已到账 / 状态=已退回；
  *  - 行匹配只用摘要精确等值（机器人拼装的摘要含「第N笔」全局唯一）；财务手填的历史行
  *    摘要对不上 → 如实报 not_found，绝不改别人的行；摘要已存在 → 跳过不重复追加（幂等）；
+ *    摘要命中多行（台账被人工复制过）→ 如实报 ambiguous 转人工，绝不猜行；
  *  - 日期写 'YYYY/M/D' 字符串（与实表人工填写风格一致）；
  *  - 台账写失败不影响批次状态流转（调用方 catch 后在回执里如实提示）。
  */
@@ -33,14 +34,21 @@ function ledgerEnabled() {
   return Boolean(config.ledger.spreadsheetToken);
 }
 
-/** 首个工作表 id + 网格行数（LEDGER_SHEET_ID 可指定） */
+/** 首个工作表 id + 网格行数（LEDGER_SHEET_ID 可指定，指定时也查元信息取真实行数） */
 async function resolveSheet() {
   const token = config.ledger.spreadsheetToken;
-  if (config.ledger.sheetId) return { sheetId: config.ledger.sheetId, rowCount: 500 };
   const q = await client.requestAPI('GET', `/sheets/v3/spreadsheets/${token}/sheets/query`);
   if (q.code !== 0) throw new Error(`台账元信息读取失败: ${q.msg} (code: ${q.code})`);
   const sheets = (q.data && q.data.sheets) || [];
   if (!sheets.length) throw new Error('台账电子表格没有工作表');
+  if (config.ledger.sheetId) {
+    // 显式配置 LEDGER_SHEET_ID：同样按 sheet_id 过滤取真实 grid_properties.row_count
+    // （复查 P2：此前该分支硬编码 rowCount 500，表扩容到 500 行外后新行读不到 →
+    //   幂等判断失效重复追加）
+    const hit = sheets.find(s => s.sheet_id === config.ledger.sheetId);
+    if (!hit) throw new Error(`LEDGER_SHEET_ID=${config.ledger.sheetId} 不在该电子表格的工作表清单中`);
+    return { sheetId: hit.sheet_id, rowCount: hit.grid_properties?.row_count || 500 };
+  }
   return { sheetId: sheets[0].sheet_id, rowCount: sheets[0].grid_properties?.row_count || 200 };
 }
 
@@ -57,13 +65,23 @@ async function readGrid(sheetId, rowCount = 500) {
   return (r.data && r.data.valueRange && r.data.valueRange.values) || [];
 }
 
-/** 摘要精确匹配行号（1 基；0=未找到） */
-function findRowBySummary(grid, summary) {
+/**
+ * 摘要精确匹配的全部行号（1 基数组）。正常应至多命中 1 行；多行=台账里被人工复制过，
+ * 调用方必须按 ambiguous 转人工（复查 P2：此前取首行静默回填，可能改错行）。
+ */
+function findRowsBySummary(grid, summary) {
   const target = String(summary || '').trim();
+  if (!target) return [];
+  const rows = [];
   for (let i = 0; i < grid.length; i++) {
-    if (String(grid[i][SUMMARY_COL_INDEX] ?? '').trim() === target && target) return i + 1;
+    if (String(grid[i][SUMMARY_COL_INDEX] ?? '').trim() === target) rows.push(i + 1);
   }
-  return 0;
+  return rows;
+}
+
+/** 摘要精确匹配首行行号（1 基；0=未找到）——兼容旧调用 */
+function findRowBySummary(grid, summary) {
+  return findRowsBySummary(grid, summary)[0] || 0;
 }
 
 /** 最后一个非空数据行的行号（1 基） */
@@ -106,7 +124,9 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
 
     const { sheetId, rowCount } = await resolveSheet();
     const grid = await readGrid(sheetId, rowCount);
-    const existRow = findRowBySummary(grid, summary);
+    const hitRows = findRowsBySummary(grid, summary);
+    if (hitRows.length > 1) return { action: 'ambiguous', rows: hitRows.length }; // 多行同摘要转人工
+    const existRow = hitRows[0] || 0;
     if (existRow) {
       // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动
       const existing = grid[existRow - 1] || [];
@@ -158,7 +178,9 @@ async function syncOnStatus(batchNo, mode = {}) {
 
     const { sheetId, rowCount } = await resolveSheet();
     const grid = await readGrid(sheetId, rowCount);
-    const row = findRowBySummary(grid, summary);
+    const hitRows = findRowsBySummary(grid, summary);
+    if (hitRows.length > 1) return { action: 'ambiguous' }; // 多行同摘要转人工
+    const row = hitRows[0] || 0;
     if (!row) return { action: 'not_found' };
 
     if (mode.paid) {
@@ -176,6 +198,7 @@ module.exports = {
   resolveSheet,
   readGrid,
   findRowBySummary,
+  findRowsBySummary,
   lastNonEmptyRow,
   syncOnSubmit,
   syncOnStatus,

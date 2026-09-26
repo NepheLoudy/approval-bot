@@ -18,6 +18,8 @@ const approvalService = require('./approvalService');
 const collectStore = require('./collectStore');
 const ocrService = require('./ocrService');
 const invoiceParser = require('./invoiceParser');
+// 复用实时采集的按发票号串行锁（复查 P2：backfill 与 hub 实时采集并发时两边都要过同一把锁）
+const { withRecordLock } = require('./invoiceCollectService');
 
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -161,9 +163,6 @@ async function backfillCollect(options = {}) {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 识别不完整（${parsed.reason || '未知'}）`);
         continue;
       }
-      const dup = await collectStore.findByInvoiceNo(parsed.fields.invoiceNo);
-      if (dup.length) { matchedAny = true; continue; }
-
       const fields = parsed.fields;
       const hit = window.find((r) => {
         const amt = typeof r.fields['总金额'] === 'number' ? r.fields['总金额'] : parseFloat(r.fields['总金额']);
@@ -174,35 +173,50 @@ async function backfillCollect(options = {}) {
         continue;
       }
 
+      // 查重双闸 + 落表整体按发票号加锁（复查 P2：与实时采集同双闸——backfill 与 hub
+      // 实时采集并发时，各自通过查重后再各自落一条重复票；三元组近似闸同 invoiceCollectService）
       const hf = hit.fields || {};
       const applyNo = hf['申请编号'] ? (hf['申请编号'].text || String(hf['申请编号'])) : hit.record_id;
       const applyAmount = typeof hf['总金额'] === 'number' ? hf['总金额'] : (parseFloat(hf['总金额']) || null);
-      const historyBatch = hf['报销单'] ? String(hf['报销单']) : '';
-      const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.pdf`).catch(() => null);
       const amountDiff = applyAmount !== null ? Math.round((fields.totalAmount - applyAmount) * 100) / 100 : null;
-      await collectStore.createCollect({
-        '发票号码': fields.invoiceNo,
-        ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),
-        '票种': parsed.invoiceType || 'unknown',
-        ...(fields.issueDate ? { '开票日期': Math.floor(new Date(fields.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
-        '价税合计': fields.totalAmount,
-        ...(fields.buyerName ? { '购买方名称': fields.buyerName } : {}),
-        ...(fields.buyerTaxNo ? { '购买方税号': fields.buyerTaxNo } : {}),
-        ...(fields.sellerName ? { '销售方名称': fields.sellerName } : {}),
-        ...(fields.sellerTaxNo ? { '销售方税号': fields.sellerTaxNo } : {}),
-        ...(fields.checkCode ? { '校验码后6位': fields.checkCode } : {}),
-        '提交人': (Array.isArray(hf['发起人']) && hf['发起人'][0]?.id) || userId || 'backfill',
-        ...(Array.isArray(hf['发起人']) && hf['发起人'][0]?.name ? { '提交人姓名': hf['发起人'][0].name } : {}),
-        '关联申请编号': applyNo,
-        ...(applyAmount !== null ? { '申请金额': applyAmount } : {}),
-        ...(amountDiff !== null ? { '金额差': amountDiff } : {}),
-        '识别通道': parsed.source === 'qrcode+ocr' ? 'qrcode+ocr' : parsed.source,
-        '校验状态': verifyStatusFor(fields.totalAmount, applyAmount),
-        ...(historyBatch ? { '批次': historyBatch } : {}),
-        ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
-        '采集时间': Date.now(),
-        '备注': '存量回溯',
+      const historyBatch = hf['报销单'] ? String(hf['报销单']) : '';
+      const outcome = await withRecordLock(`inv_${fields.invoiceNo}`, async () => {
+        const dupExact = await collectStore.findByInvoiceNo(fields.invoiceNo);
+        if (dupExact.length) return { kind: 'dup_exact' };
+        const dupSimilar = await collectStore.findBySimilarity({ issueDate: fields.issueDate, totalAmount: fields.totalAmount, sellerTaxNo: fields.sellerTaxNo });
+        if (dupSimilar.length) return { kind: 'dup_similar' };
+        const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.pdf`).catch(() => null);
+        await collectStore.createCollect({
+          '发票号码': fields.invoiceNo,
+          ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),
+          '票种': parsed.invoiceType || 'unknown',
+          ...(fields.issueDate ? { '开票日期': Math.floor(new Date(fields.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
+          '价税合计': fields.totalAmount,
+          ...(fields.buyerName ? { '购买方名称': fields.buyerName } : {}),
+          ...(fields.buyerTaxNo ? { '购买方税号': fields.buyerTaxNo } : {}),
+          ...(fields.sellerName ? { '销售方名称': fields.sellerName } : {}),
+          ...(fields.sellerTaxNo ? { '销售方税号': fields.sellerTaxNo } : {}),
+          ...(fields.checkCode ? { '校验码后6位': fields.checkCode } : {}),
+          '提交人': (Array.isArray(hf['发起人']) && hf['发起人'][0]?.id) || userId || 'backfill',
+          ...(Array.isArray(hf['发起人']) && hf['发起人'][0]?.name ? { '提交人姓名': hf['发起人'][0].name } : {}),
+          '关联申请编号': applyNo,
+          ...(applyAmount !== null ? { '申请金额': applyAmount } : {}),
+          ...(amountDiff !== null ? { '金额差': amountDiff } : {}),
+          '识别通道': parsed.source === 'qrcode+ocr' ? 'qrcode+ocr' : parsed.source,
+          '校验状态': verifyStatusFor(fields.totalAmount, applyAmount),
+          ...(historyBatch ? { '批次': historyBatch } : {}),
+          ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
+          '采集时间': Date.now(),
+          '备注': '存量回溯',
+        });
+        return { kind: 'created' };
       });
+      if (outcome.kind === 'dup_exact') { matchedAny = true; continue; }
+      if (outcome.kind === 'dup_similar') {
+        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票尾号 ${String(fields.invoiceNo).slice(-6)} 三元组近似命中已收发票（疑似重复/发票号错位），转人工`);
+        matchedAny = true;
+        continue;
+      }
       result.collected++;
       matchedAny = true;
       // 从候选中移除已回填记录（防同一记录被多个实例重复回填）

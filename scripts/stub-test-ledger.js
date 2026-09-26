@@ -70,6 +70,15 @@ async function main() {
   assert.equal(ledgerSheetService.findRowBySummary(grid, '不存在的摘要'), 0);
   assert.equal(ledgerSheetService.lastNonEmptyRow(grid), 4, '最后非空数据行');
   assert.deepEqual(await ledgerSheetService.resolveSheet(), { sheetId: 'shTest', rowCount: 100 }, '首工作表解析');
+  assert.deepEqual(ledgerSheetService.findRowsBySummary(grid, '机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔'), [4], 'findRowsBySummary 单命中');
+  assert.deepEqual(ledgerSheetService.findRowsBySummary(grid, '不存在的摘要'), []);
+
+  // ---------- resolveSheet：显式 LEDGER_SHEET_ID 也查元信息取真实行数（复查 P2：不再硬编码 500） ----------
+  config.ledger.sheetId = 'shTest';
+  assert.deepEqual(await ledgerSheetService.resolveSheet(), { sheetId: 'shTest', rowCount: 100 }, '显式 LEDGER_SHEET_ID 分支取 grid_properties.row_count');
+  config.ledger.sheetId = 'shMissing';
+  await assert.rejects(() => ledgerSheetService.resolveSheet(), /不在该电子表格的工作表清单中/, '配置了不存在的 sheet_id 如实报错');
+  config.ledger.sheetId = '';
 
   // ---------- submit：追加行（收款方/收款账号回退默认、经办人=接取人、状态沿用财务词表） ----------
   writes = [];
@@ -174,6 +183,51 @@ async function main() {
 
   // ---------- 不存在的批次 ----------
   await assert.rejects(() => ledgerSheetService.syncOnSubmit('不存在的批次'), /批次不存在/);
+
+  // ==================== 2026-09-27 对抗审查批新增断言 ====================
+
+  // ---------- ambiguous：摘要命中多行转人工，绝不猜行（复查 P2） ----------
+  const dupSummary = '机甲大师实验室-27赛季-对抗赛-无人机-材料费-第二十六笔';
+  batches['27对抗赛无人机26'].fields['摘要'] = dupSummary;
+  grid.push([9, null, dupSummary, 50, '02520011130031', '转卡', '贺韵洁', '6228480477161786579', '贺韵洁', '2026/9/26', null, null, '已提交至中心']);
+  writes = [];
+  const ambSubmit = await ledgerSheetService.syncOnSubmit('27对抗赛无人机26');
+  assert.equal(ambSubmit.action, 'ambiguous', 'submit 摘要多行 → ambiguous');
+  assert.equal(ambSubmit.rows, 2, 'ambiguous 带命中行数');
+  assert.equal(writes.length, 0, 'ambiguous 不产生写入');
+  const ambStatus = await ledgerSheetService.syncOnStatus('27对抗赛无人机26', { paid: true });
+  assert.equal(ambStatus.action, 'ambiguous', 'status 摘要多行 → ambiguous');
+  assert.equal(writes.length, 0, 'ambiguous 状态回填也不写表');
+  const ambReject = await ledgerSheetService.syncOnStatus('27对抗赛无人机26', { rejected: true });
+  assert.equal(ambReject.action, 'ambiguous');
+  grid.pop(); // 移除重复行，恢复单命中
+
+  // ---------- ledger 子指令模式（chatService 层）：paid/reject 补回填 L/M 列（复查 P2 缺口） ----------
+  delete require.cache[require.resolve('../src/services/chatService')];
+  const chatService = require('../src/services/chatService');
+  // 摘要恢复到 grid 第 6 行实值（此前 not_found 用例改成了人工摘要）
+  batches['27对抗赛步兵25'].fields['摘要'] = '机甲大师实验室-27赛季-对抗赛-步兵-材料费-第二十六笔';
+  writes = [];
+  const ledPaid = await chatService.executeCommand('/approval-batch', ['ledger', 'paid', '27对抗赛步兵25']);
+  assert.match(ledPaid, /台账已回填：入账日期 \+ 已到账/, 'ledger paid 模式回执');
+  assert.equal(writes[0].range, 'shTest!L6:M6', 'ledger paid 模式回填 L/M 列');
+  assert.equal(writes[0].values[0][1], '已到账');
+  writes = [];
+  const ledReject = await chatService.executeCommand('/approval-batch', ['ledger', 'reject', '27对抗赛步兵25']);
+  assert.match(ledReject, /台账已标记：已退回/, 'ledger reject 模式回执');
+  assert.equal(writes[0].range, 'shTest!M6:M6', 'ledger reject 模式只标记 M 列');
+  const ledDefault = await chatService.executeCommand('/approval-batch', ['ledger', '27对抗赛步兵25']);
+  assert.match(ledDefault, /台账已有该批次行/, 'ledger 首参非模式 → 默认 submit（幂等 exists）');
+  // paid 模式 not_found：批次真实存在但台账无该摘要行
+  batches['27无台账批次'] = { record_id: 'batNL', fields: { '批次号': '27无台账批次', '摘要': '机甲大师实验室-27赛季-对抗赛-步兵-材料费-第九百九十九笔', '金额合计': 1 } };
+  const ledNotFound = await chatService.executeCommand('/approval-batch', ['ledger', 'paid', '27无台账批次']);
+  assert.match(ledNotFound, /台账未找到该批次行/, 'paid 模式 not_found 如实上报');
+
+  // ---------- ambiguous 的 chatService 回执 ----------
+  grid.push([9, null, dupSummary, 50, '02520011130031', '转卡', '贺韵洁', '6228480477161786579', '贺韵洁', '2026/9/26', null, null, '已提交至中心']);
+  const ambReply = await chatService.executeCommand('/approval-batch', ['ledger', 'paid', '27对抗赛无人机26']);
+  assert.match(ambReply, /台账存在多行同摘要，请人工处理/, 'ambiguous 回执提示人工处理');
+  grid.pop();
 }
 
 (async () => {

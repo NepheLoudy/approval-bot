@@ -82,8 +82,8 @@ async function handleHelpCommand() {
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
     '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
-    '                    submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger <批次号>',
-    '                    （submit/paid/reject 自动同步《报销台账》电子表格）',
+    '                    submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
+    '                    （submit/paid/reject 自动同步《报销台账》电子表格；ledger paid/reject 用于同步失败后人工补救）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
@@ -233,6 +233,20 @@ const commandHandlers = {
 };
 
 /**
+ * 资金指令白名单闸（2026-09-27 对抗审查 P1）：APPROVAL_FUND_OPERATOR_IDS 配置后，
+ * lock/submit/paid/reject 仅限名单内 open_id（以 hub 透传的 senderId 为准，
+ * 自报 senderName 不可信）；未配置 = 维持现状不限（回执仍显示操作人校验状态）。
+ * 放行返回空串；拦截返回错误文案（executeCommand 直接回群，不抛错）。
+ */
+function fundOperatorDenied(ctx = {}) {
+  const allowed = config.fundOperatorIds || [];
+  if (!allowed.length) return '';
+  const senderId = ctx.senderId || '';
+  if (senderId && allowed.includes(senderId)) return '';
+  return '❌ 未获资金指令权限：lock/submit/paid/reject 已启用操作人白名单（APPROVAL_FUND_OPERATOR_IDS），请联系管理员把你的 open_id 加入名单';
+}
+
+/**
  * 报销批次三件套指令（财务三件套自动化）：
  *   /approval-batch                      → 拟批建议（票池按项目分组）
  *   /approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]
@@ -273,6 +287,8 @@ async function handleBatchCommand(args = [], ctx = {}) {
     }
     const [batchNo, project] = positional;
     if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx 收款账号=xx]';
+    const denied = fundOperatorDenied(ctx);
+    if (denied) return denied;
     // 锁定人留痕（复查 P2-4）：与 submit/paid/reject 同款实名反查，落批次表「最后操作人/时间」
     const { operator, verified } = await resolveOperator(ctx);
     const r = await batchService.lockBatch(batchNo, project || '', {
@@ -328,6 +344,8 @@ async function handleBatchCommand(args = [], ctx = {}) {
   };
   if (statusMap[sub]) {
     if (!args[1]) return `❌ 用法：/approval-batch ${sub} <批次号>${sub === 'submit' ? ' [投递单号]' : ''}`;
+    const denied = fundOperatorDenied(ctx);
+    if (denied) return denied;
     const deliveryNo = sub === 'submit' ? (args[2] || '') : '';
     const { operator, verified } = await resolveOperator(ctx);
     const r = await batchService.markBatch(args[1], statusMap[sub].status, operator);
@@ -337,33 +355,65 @@ async function handleBatchCommand(args = [], ctx = {}) {
     lines.push(await syncLedgerQuietly(sub, r.batchNo, deliveryNo));
     if (r.archiveFolder) lines.push(`· 🗂️ 归档文件夹名建议：${r.archiveFolder}`);
     if (r.returnedToPool) lines.push(`· ${r.returnedToPool} 张退回票已回票池，可重新拟批`);
+    // 回票失败透出（复查 P1-3）：失败票仍挂批次，重发 reject 幂等续回
+    if (r.returnFailed && r.returnFailed.length) {
+      lines.push(`· ⚠️ ${r.returnFailed.length} 张回票失败（${r.returnFailed.slice(0, 5).join('、')}${r.returnFailed.length > 5 ? '…' : ''}），已记批次备注，可重发 reject 续回`);
+    }
     return lines.filter(Boolean).join('\n');
   }
 
   if (sub === 'ledger') {
-    if (!args[1]) return '❌ 用法：/approval-batch ledger <批次号> [投递单号]（把批次同步进台账表；已存在则只补投递单号）';
+    // ledger [submit|paid|reject] <批次号> [投递单号]（首参是模式之一则作为模式，默认 submit
+    // ——复查 P2：此前只有 submit 入口，台账同步失败后无法补救 paid/reject 的 L/M 列回填）
+    const MODES = ['submit', 'paid', 'reject'];
+    const rest = args.slice(1);
+    let mode = 'submit';
+    if (rest.length && MODES.includes(rest[0])) mode = rest.shift();
+    const [ledgerBatchNo, deliveryNo] = rest;
+    if (!ledgerBatchNo) {
+      return '❌ 用法：/approval-batch ledger [submit|paid|reject] <批次号> [投递单号]（默认 submit；paid/reject 用于补回填台账入账日期/退回标记）';
+    }
     const ledger = require('./ledgerSheetService');
-    const ls = await ledger.syncOnSubmit(args[1], args[2] || '');
-    if (ls.action === 'appended') return `📗 台账已同步：${args[1]} → 第 ${ls.rowIndex} 行`;
+    if (mode !== 'submit') {
+      const ls = await ledger.syncOnStatus(ledgerBatchNo, mode === 'paid' ? { paid: true } : { rejected: true });
+      if (ls.action === 'updated') {
+        return mode === 'paid'
+          ? `📗 台账已回填：入账日期 + 已到账（第 ${ls.rowIndex} 行）`
+          : `📗 台账已标记：已退回（第 ${ls.rowIndex} 行）`;
+      }
+      if (ls.action === 'no_summary') return '⚠️ 该批次无摘要（旧批次），没有台账口径，请人工登记';
+      if (ls.action === 'not_found') return '⚠️ 台账未找到该批次行（按摘要匹配），请人工核对补记';
+      if (ls.action === 'disabled') return '⚠️ 未配置台账表（LEDGER_SPREADSHEET_TOKEN），同步关闭';
+      if (ls.action === 'ambiguous') return '⚠️ 台账存在多行同摘要，请人工处理';
+      return '❌ 台账同步失败（见日志）';
+    }
+    const ls = await ledger.syncOnSubmit(ledgerBatchNo, deliveryNo || '');
+    if (ls.action === 'appended') return `📗 台账已同步：${ledgerBatchNo} → 第 ${ls.rowIndex} 行`;
     if (ls.action === 'exists') return `📗 台账已有该批次行（第 ${ls.rowIndex} 行）${ls.updated === 'deliveryNo' ? '，已补填投递单号' : '，未重复添加'}`;
     if (ls.action === 'no_summary') return '⚠️ 该批次无摘要（旧批次），没有台账口径，请人工登记';
     if (ls.action === 'disabled') return '⚠️ 未配置台账表（LEDGER_SPREADSHEET_TOKEN），同步关闭';
+    if (ls.action === 'ambiguous') return '⚠️ 台账存在多行同摘要，请人工处理';
     return '❌ 台账同步失败（见日志）';
   }
 
   if (sub === 'regen') {
     if (!args[1]) return '❌ 用法：/approval-batch regen <批次号>（重新生成 打印PDF/BOM/物料清单/投递底单）';
     const r = await batchService.regenerateBatchFiles(args[1]);
-    return [
+    const lines = [
       `🔄 批次 ${r.batchNo} 附件已重新生成（${r.count} 张）：`,
       r.pdfToken ? '· 🖨️ 打印件 PDF ✅' : '· ⚠️ 打印件 PDF 生成失败（见日志）',
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（见日志）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（见日志）',
       r.dsToken ? '· 📮 投递底单 ✅' : '· ⚠️ 投递底单生成失败（见日志）',
-    ].join('\n');
+    ];
+    // 金额漂移警示（复查 P1）：regen 用采集表现值重造附件，与锁定值对不上要财务核对台账
+    if (r.amountDrift) {
+      lines.push(`· ⚠️ regen 后金额合计 ¥${r.amountDrift.current.toFixed(2)} 与批次锁定值 ¥${r.amountDrift.recorded.toFixed(2)} 不一致，请核对台账与采集表`);
+    }
+    return lines.join('\n');
   }
 
-  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger <批次号> [投递单号]';
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]';
 }
 
 /**
@@ -379,6 +429,7 @@ async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
       if (ls.action === 'appended') return `· 📗 台账已同步：第 ${ls.rowIndex} 行（投递单号${deliveryNo ? '已填' : '留空，可在表内补'}）`;
       if (ls.action === 'exists') return `· 📗 台账已有该批次行（第 ${ls.rowIndex} 行），未重复添加${ls.updated === 'deliveryNo' ? '，已补填投递单号' : ''}`;
       if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次），请人工登记';
+      if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未追加、未改动）';
       return '';
     }
     if (sub === 'paid') {
@@ -386,6 +437,7 @@ async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
       if (ls.action === 'updated') return `· 📗 台账已回填：入账日期 + 已到账（第 ${ls.rowIndex} 行）`;
       if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次）';
       if (ls.action === 'not_found') return '· ⚠️ 台账未找到该批次行（按摘要匹配），请人工核对补记';
+      if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未回填）';
       return '';
     }
     if (sub === 'reject') {
@@ -393,6 +445,7 @@ async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
       if (ls.action === 'updated') return `· 📗 台账已标记：已退回（第 ${ls.rowIndex} 行）`;
       if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次）';
       if (ls.action === 'not_found') return ''; // 尚未 submit 过的批次本就没进台账，静默
+      if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未标记）';
       return '';
     }
     return '';
@@ -427,10 +480,11 @@ async function resolveOperator(ctx = {}) {
  */
 async function handleTakeCommand(args = [], ctx = {}) {
   const batchService = require('./batchService');
-  const { operator } = await resolveOperator(ctx);
+  const { operator, verified } = await resolveOperator(ctx);
   const r = await batchService.claimBatch(args[0] || '', operator);
   return [
-    `✅ 批次 ${r.batchNo} 已接取（${r.taker}）${r.reClaim ? '· 重复接取，登记不变' : ''}`,
+    // 未经通讯录校验时如实标注（复查 P2：接取人登记可被自报名冒用，回执要让财务可见）
+    `✅ 批次 ${r.batchNo} 已接取（${r.taker}${verified ? '' : '，未经通讯录校验'}）${r.reClaim ? '· 重复接取，登记不变' : ''}`,
     `· ${r.count} 张 ¥${Number(r.amount).toFixed(2)}（${r.project}）`,
     r.summary ? `· 摘要：${r.summary}` : '',
     `· 按打印件顺序扫小翼Plus 录入，开票内容缺失的现场补；完成后：/approval-batch submit ${r.batchNo}`,

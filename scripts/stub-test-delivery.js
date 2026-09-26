@@ -343,6 +343,245 @@ async function main() {
   ]);
   assert.notEqual(claimA.batchNo, claimB.batchNo, '并发接取必须落在不同批次（互斥）');
   assert.deepEqual([claimA.batchNo, claimB.batchNo].sort(), ['27并发批次1', '27并发批次2'], '两个待接取批次都被领走');
+
+  // ==================== 2026-09-27 对抗审查批新增断言 ====================
+
+  // ---------- 中文序号 n>999：返回空串走数字兜底（复查 P2，消灭「第undefined百」） ----------
+  assert.equal(numToCnOrdinal(999), '九百九十九', '999 仍在中文序号区间');
+  assert.equal(numToCnOrdinal(1000), '', 'n>999 返回空串（composeSummary 回落「第N笔」数字兜底）');
+  assert.equal(batchService.composeSummary({ project: '对抗赛', purpose: '飞镖机器人', ordinal: 1000 }).endsWith('第1000笔'), true, '序号越界摘要走数字兜底');
+
+  // ---------- BOM：校验状态空值渲染「未校验」+ 工作表名对批次号消毒（复查 P2） ----------
+  uploaded.length = 0;
+  await batchService.uploadBatchBom('27批次A/B:C', [
+    { invoiceNo: 'BOM1', totalAmount: 10, verifyStatus: '' },
+    { invoiceNo: 'BOM2', totalAmount: 20, verifyStatus: '通过' },
+  ]);
+  const wbBom = new ExcelJS.Workbook();
+  await wbBom.xlsx.load(uploaded[0].buffer);
+  const wsBom = wbBom.getWorksheet('BOM-27批次ABC');
+  assert.ok(wsBom, 'BOM 工作表名已消毒（剥批次号中的 / : 等非法字符）');
+  // 表头经 ws.columns 定义占第 1 行，数据行自第 2 行起
+  assert.equal(wsBom.getRow(2).getCell(10).value, '未校验', '校验状态空值渲染「未校验」而非「通过」');
+  assert.equal(wsBom.getRow(3).getCell(10).value, '通过', '已有校验状态原样渲染');
+
+  // ---------- 采集行解析：千分位逗号金额 + 金额异常计入 warningCount（复查 P2） ----------
+  const prevListCollect = collectStore.listCollect;
+  collectStore.listCollect = async () => [
+    { record_id: 'amt1', fields: { '发票号码': 'AMT1', '价税合计': '1,234.56', '采集时间': 1 } },
+    { record_id: 'amt2', fields: { '发票号码': 'AMT2', '价税合计': 'abc', '采集时间': 2 } },
+  ];
+  const pv = await batchService.previewBatch();
+  assert.equal(pv.poolSize, 2);
+  const pvGroup = pv.suggestions[0];
+  assert.equal(pvGroup.amount, 1234.56, '千分位逗号金额正确解析（parseFloat 前去逗号）');
+  assert.equal(pvGroup.warningCount, 2, '「未校验」空值 + 金额异常均计入 warningCount');
+  collectStore.listCollect = prevListCollect;
+
+  // ---------- 投递底单金额格标黄（金额解析失败/<=0 的票，复查 P2） ----------
+  uploaded.length = 0;
+  await batchService.uploadBatchDeliverySheet('27金额异常批次', [
+    { invoiceNo: 'AMT2', totalAmount: 0, amountInvalid: true, sellerName: 'x', issueDateMs: 0, invoiceContent: '有内容' },
+  ], {});
+  const wbAmt = new ExcelJS.Workbook();
+  await wbAmt.xlsx.load(uploaded[0].buffer);
+  const wsAmt = wbAmt.getWorksheet('投递底单');
+  let amtYellow = false;
+  for (let r = 1; r <= wsAmt.rowCount; r++) {
+    if (wsAmt.getRow(r).getCell(2).value === 'AMT2') {
+      const c = wsAmt.getRow(r).getCell(6);
+      amtYellow = Boolean(c.fill && c.fill.fgColor && c.fill.fgColor.argb === 'FFFFFF00');
+    }
+  }
+  assert.ok(amtYellow, '投递底单金额异常票的金额格标黄');
+
+  // ---------- 投递底单收款方走 meta（复查 P1：lock 收款方= 覆盖要进底单，账实不分离） ----------
+  uploaded.length = 0;
+  await batchService.uploadBatchDeliverySheet('27对抗赛飞镖24', items, { purpose: '飞镖机器人', ordinal: 24, summary, payee: '陈杨明', payeeAccount: '6216613200015262463' });
+  const wbPayee = new ExcelJS.Workbook();
+  await wbPayee.xlsx.load(uploaded[0].buffer);
+  const wsPayee = wbPayee.getWorksheet('投递底单');
+  const payeeForm = {};
+  for (let r = 1; r <= wsPayee.rowCount; r++) {
+    const label = wsPayee.getRow(r).getCell(1).value;
+    if (label && label !== '发票代码') payeeForm[label] = wsPayee.getRow(r).getCell(2).value;
+  }
+  assert.equal(payeeForm['收款人姓名'], '陈杨明', '收款人姓名=meta.payee（lock 收款方= 覆盖）');
+  assert.equal(payeeForm['卡号'], '6216613200015262463', '卡号=meta.payeeAccount（lock 收款账号= 覆盖）');
+
+  // ---------- regen：收款方从批次记录读回进底单 + 金额漂移暴露（复查 P1） ----------
+  bitableApi.listAllRecords = async () => []; // 审批表空 → 项目回落「未归类」
+  const driftRows = [
+    { record_id: 'd1', fields: { '发票号码': 'D1', '价税合计': 52.93, '采集时间': 10, '批次': '27漂移批次1' } },
+    { record_id: 'd2', fields: { '发票号码': 'D2', '价税合计': 60, '采集时间': 20, '批次': '27漂移批次1' } },
+  ];
+  collectStore.listCollect = async () => driftRows;
+  batchRows.push({
+    record_id: 'bat_drift',
+    fields: { '批次号': '27漂移批次1', '项目': '未归类', '状态': '已锁定', '笔序': 1, '金额合计': 999, '收款方': '陈杨明', '收款账号': '6216613200015262463' },
+  });
+  uploaded.length = 0;
+  const driftRes = await batchService.regenerateBatchFiles('27漂移批次1');
+  assert.deepEqual(
+    driftRes.amountDrift && { recorded: driftRes.amountDrift.recorded, current: Math.round(driftRes.amountDrift.current * 100) / 100 },
+    { recorded: 999, current: 112.93 },
+    'regen 金额与锁定值不一致时返回 amountDrift{recorded,current}'
+  );
+  const driftSheet = uploaded.find(u => u.fileName === '报销单_27漂移批次1_投递底单.xlsx');
+  assert.ok(driftSheet, 'regen 生成投递底单');
+  const wbDrift = new ExcelJS.Workbook();
+  await wbDrift.xlsx.load(driftSheet.buffer);
+  const wsDrift = wbDrift.getWorksheet('投递底单');
+  const driftForm = {};
+  for (let r = 1; r <= wsDrift.rowCount; r++) {
+    const label = wsDrift.getRow(r).getCell(1).value;
+    if (label && label !== '发票代码') driftForm[label] = wsDrift.getRow(r).getCell(2).value;
+  }
+  assert.equal(driftForm['收款人姓名'], '陈杨明', 'regen 底单收款方从批次记录读回（非 .env 默认）');
+  assert.equal(driftForm['卡号'], '6216613200015262463', 'regen 底单卡号从批次记录读回');
+
+  // ---------- 不同批次号并发 lock 共享票池：pool 锁互斥，不双计（复查 P1） ----------
+  // （无项目过滤=锁整池：修复前两把锁各自快照同一池，两张票同时进两个批次记录
+  //   → 双金额双张数；修复后 pool 锁串行，先到者锁走整池，后到者看到空池如实报错）
+  const sharedPool = [
+    { record_id: 'sh1', fields: { '发票号码': 'SH1', '价税合计': 10, '采集时间': 100 } },
+    { record_id: 'sh2', fields: { '发票号码': 'SH2', '价税合计': 20, '采集时间': 200 } },
+  ];
+  collectStore.listCollect = async () => sharedPool;
+  collectStore.updateCollect = async (recordId, fields) => {
+    const row = sharedPool.find(r => r.record_id === recordId);
+    if (row) row.fields = { ...row.fields, ...fields };
+    return { record_id: recordId };
+  };
+  const [lockARes, lockBRes] = await Promise.allSettled([
+    batchService.lockBatch('27并发锁批次1', '', {}),
+    batchService.lockBatch('27并发锁批次2', '', {}),
+  ]);
+  const won = lockARes.status === 'fulfilled' ? lockARes : lockBRes;
+  const lost = lockARes.status === 'fulfilled' ? lockBRes : lockARes;
+  assert.equal(lost.status, 'rejected', '并发双锁共享池：后到者必须失败');
+  assert.match(lost.reason && lost.reason.message, /票池中没有可锁定的发票/, '失败原因=池已被锁空（非静默双计）');
+  assert.equal(won.value.count, 2, '赢家整池锁定（2 张只记 1 批，不双计）');
+  assert.ok(
+    sharedPool.every(r => String(r.fields['批次'] || '') === won.value.batchNo),
+    '每张票只进赢家批次（批次标记归一）'
+  );
+  const wonRow = batchRows.find(b => b.fields['批次号'] === won.value.batchNo);
+  assert.equal(wonRow.fields['张数'], 2, '赢家批次记录张数=2');
+  assert.equal(wonRow.fields['金额合计'], 30, '赢家批次记录金额合计=30（无重复累加）');
+
+  // ---------- 并发 paid+reject 仅一成功（markBatch 全程批次锁，复查 P1 TOCTOU） ----------
+  batchRows.push({ record_id: 'bat_cc', fields: { '批次号': '27并发状态批次', '项目': '未归类', '状态': '已提交', '张数': 1, '金额合计': 5 } });
+  const [paidRes, rejRes] = await Promise.allSettled([
+    batchService.markBatch('27并发状态批次', '已到账', ''),
+    batchService.markBatch('27并发状态批次', '已退回', ''),
+  ]);
+  const fulfilled = [paidRes, rejRes].filter(x => x.status === 'fulfilled');
+  assert.equal(fulfilled.length, 1, '并发 paid+reject 仅一成功');
+  const ccRow = batchRows.find(b => b.record_id === 'bat_cc');
+  assert.equal(ccRow.fields['状态'], fulfilled[0].value.status, '落表状态=成功方（无一成功两写）');
+  await assert.rejects(
+    () => batchService.markBatch('27并发状态批次', ccRow.fields['状态'] === '已到账' ? '已退回' : '已到账', ''),
+    /终态，不可再流转/,
+    '赢家确立后另一方按状态机拒绝'
+  );
+
+  // ---------- reject 幂等重入 + 回票失败暴露（复查 P1-3：中断不再永久卡死） ----------
+  const rejRow = { record_id: 'bat_rej', fields: { '批次号': '27中断退回批次', '项目': '未归类', '状态': '已退回', '张数': 1, '金额合计': 5 } };
+  batchRows.push(rejRow);
+  // 场景 1：上次 reject 中断，仍有票挂着批次 → 重入继续回票
+  collectStore.listCollect = async () => [{ record_id: 'c_rej', fields: { '发票号码': 'R1', '价税合计': 5, '批次': '27中断退回批次', '采集时间': 9 } }];
+  collectStore.updateCollect = async (recordId, fields) => {
+    return { record_id: recordId, fields };
+  };
+  const re1 = await batchService.markBatch('27中断退回批次', '已退回', '');
+  assert.equal(re1.returnedToPool, 1, '已退回→已退回幂等重入继续回票');
+  // 场景 2：已无挂批票 → 重入视为完成 no-op
+  collectStore.listCollect = async () => [];
+  const re2 = await batchService.markBatch('27中断退回批次', '已退回', '');
+  assert.equal(re2.returnedToPool, 0, '无挂批票后重入为 no-op');
+  // 场景 3：单票回写失败 → 收集进 returnFailed + 批次备注，不再整批卡死
+  collectStore.listCollect = async () => [{ record_id: 'c_fail', fields: { '发票号码': 'F1', '价税合计': 5, '批次': '27中断退回批次', '采集时间': 9 } }];
+  collectStore.updateCollect = async (recordId) => {
+    if (recordId === 'c_fail') throw new Error('模拟回写失败');
+    return { record_id: recordId };
+  };
+  const re3 = await batchService.markBatch('27中断退回批次', '已退回', '');
+  assert.equal(re3.returnFailed.length, 1, '回票失败进 returnFailed 清单');
+  assert.ok(String(rejRow.fields['备注'] || '').includes('回票失败'), '回票失败记入批次备注');
+  // 已退回仍不可跳到已到账（幂等重入仅限「已退回→已退回」）
+  await assert.rejects(() => batchService.markBatch('27中断退回批次', '已到账', ''), /终态，不可再流转/);
+
+  // ---------- 项目名含 '/'：笔序按「项目」字段精确匹配（复查 P2，防摘要重复） ----------
+  const slashProject = '对抗赛/飞镖';
+  bitableApi.listAllRecords = async () => [
+    { record_id: 'ap1', fields: { '申请编号': { text: 'AP1' }, '项目': { name: slashProject } } },
+  ];
+  // 审批表「报销单」栏回写打桩（真实 updateRecord 会带本地 .env 凭据打真接口，严禁）
+  const approvalWrites = [];
+  bitableApi.updateRecord = async (tableId, recordId, fields) => {
+    approvalWrites.push({ tableId, recordId, fields });
+    return { record_id: recordId };
+  };
+  const slashCollects = [
+    { record_id: 'sp1', fields: { '发票号码': 'SP1', '价税合计': 30, '采集时间': 300, '关联申请编号': 'AP1' } },
+    { record_id: 'sp2', fields: { '发票号码': 'SP2', '价税合计': 40, '采集时间': 400, '关联申请编号': 'AP1' } },
+  ];
+  collectStore.updateCollect = async (recordId, fields) => {
+    const row = slashCollects.find(x => x.record_id === recordId);
+    if (row) row.fields = { ...row.fields, ...fields };
+    return { record_id: recordId };
+  };
+  // 每把锁单独给一张票（无项目过滤=锁整池，两票同项目则第二把锁会看到空池）
+  collectStore.listCollect = async () => [slashCollects[0]];
+  const slashA = await batchService.lockBatch('27斜杠批次1', '', {});
+  assert.equal(slashA.ordinal, 1, '斜杠项目首批笔序 1');
+  assert.equal(slashA.projects.join('/'), slashProject);
+  assert.equal(slashA.approvalWritten, 1, '带申请编号的票回写审批表报销单栏');
+  assert.deepEqual(approvalWrites[0] && approvalWrites[0].fields, { '报销单': '27斜杠批次1' }, '报销单栏写入批次号');
+  collectStore.listCollect = async () => [slashCollects[1]];
+  const slashB = await batchService.lockBatch('27斜杠批次2', '', {});
+  assert.equal(slashB.ordinal, 2, '斜杠项目第二批笔序 2（旧 split 逻辑恒 1 → 摘要重复）');
+  assert.notEqual(slashA.summary, slashB.summary, '两批摘要不重复（台账匹配安全）');
+
+  // ---------- regen 回执带金额漂移警示（chatService 层，复查 P1） ----------
+  collectStore.listCollect = async () => driftRows; // 斜杠项目测试覆盖过 listCollect，指回漂移批次采集行
+  const driftReply = await chatServiceFresh.executeCommand('/approval-batch', ['regen', '27漂移批次1']);
+  assert.match(driftReply, /⚠️ regen 后金额合计 ¥112\.93 与批次锁定值 ¥999\.00 不一致/, 'regen 回执带金额漂移警示');
+  assert.ok(
+    String(batchRows.find(b => b.record_id === 'bat_drift').fields['备注'] || '').includes('regen 后金额与锁定值不一致'),
+    '金额漂移记入批次备注'
+  );
+
+  // ---------- 资金指令白名单（复查 P1：APPROVAL_FUND_OPERATOR_IDS 配置后名单外拒绝） ----------
+  config.fundOperatorIds = ['ou_hh'];
+  const denyLock = await chatServiceFresh.executeCommand('/approval-batch', ['lock', '27白名单批次'], { senderId: 'ou_other', senderName: '外人' });
+  assert.match(denyLock, /未获资金指令权限/, '白名单外 lock 被拒');
+  const denyPaid = await chatServiceFresh.executeCommand('/approval-batch', ['paid', '27并发状态批次'], { senderId: 'ou_other' });
+  assert.match(denyPaid, /未获资金指令权限/, '白名单外 paid 被拒');
+  // 放行路径：名单内 open_id 正常锁定（给票池补一张可锁的票）
+  collectStore.listCollect = async () => [{ record_id: 'wl1', fields: { '发票号码': 'WL1', '价税合计': 5, '采集时间': 600 } }];
+  const allowLock = await chatServiceFresh.executeCommand('/approval-batch', ['lock', '27白名单内批次'], { senderId: 'ou_hh', senderName: '贺韵洁' });
+  assert.match(allowLock, /✅ 批次已锁定：27白名单内批次/, '白名单内放行');
+  config.fundOperatorIds = []; // 还原：未配置=不限
+
+  // ---------- 接取回执透传 verified（复查 P2：未经通讯录校验要标注） ----------
+  batchRows.push({ record_id: 'bat_take', fields: { '批次号': '27接取批次1', '项目': '未归类', '状态': '已锁定', '锁定时间': 500, '张数': 1, '金额合计': 1 } });
+  const takeReply = await chatServiceFresh.executeCommand('接取', ['27接取批次1'], { senderId: 'ou_ghost', senderName: '自报人' });
+  assert.match(takeReply, /未经通讯录校验/, '接取回执标注未经通讯录校验');
+  assert.match(takeReply, /自报人/, '回执仍显示自报名（fail-open 口径不变）');
+
+  // ---------- 交付卡注入消毒（复查 P2：剥 <at> 与链接语法） ----------
+  const evilCard = bot.buildDeliveryCard({
+    batchNo: '27消毒批次1',
+    project: '<at id="ou_evil">evil</at>A/B',
+    summary: '前缀[点我领奖](https://evil.example)后缀',
+    count: 1, amount: 1, generated: {},
+  });
+  const evilStr = JSON.stringify(evilCard);
+  assert.ok(!evilStr.includes('<at'), '交付卡剥 <at> 标记');
+  assert.ok(!evilStr.includes('https://evil.example'), '交付卡剥链接 URL');
+  assert.ok(evilStr.includes('点我领奖'), '链接文本保留');
 }
 
 (async () => {
