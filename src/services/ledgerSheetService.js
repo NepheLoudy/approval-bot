@@ -44,9 +44,14 @@ async function resolveSheet() {
   return { sheetId: sheets[0].sheet_id, rowCount: sheets[0].grid_properties?.row_count || 200 };
 }
 
-/** 读整个数据区（含标题两行） */
-async function readGrid(sheetId) {
-  const range = encodeURIComponent(`${sheetId}!A1:M500`);
+/**
+ * 读整个数据区（含标题两行）。范围按 resolveSheet 返回的行数动态取
+ * （复查 P2-14：此前硬编码 A1:M500，表扩到 500 行外后新行读不到 → 幂等判断失效重复追加）；
+ * clamp 上限 5000 行防误传把读取量拉爆。
+ */
+async function readGrid(sheetId, rowCount = 500) {
+  const rows = Math.min(Math.max(parseInt(rowCount, 10) || 500, 1), 5000);
+  const range = encodeURIComponent(`${sheetId}!A1:M${rows}`);
   const r = await client.requestAPI('GET', `/sheets/v2/spreadsheets/${config.ledger.spreadsheetToken}/values/${range}?valueRenderOption=ToString&dateTimeRenderOption=FormattedString`);
   if (r.code !== 0) throw new Error(`台账读取失败: ${r.msg} (code: ${r.code})`);
   return (r.data && r.data.valueRange && r.data.valueRange.values) || [];
@@ -100,7 +105,7 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
     if (!summary) return { action: 'no_summary' }; // 老批次无摘要，不进台账（如实上报调用方）
 
     const { sheetId, rowCount } = await resolveSheet();
-    const grid = await readGrid(sheetId);
+    const grid = await readGrid(sheetId, rowCount);
     const existRow = findRowBySummary(grid, summary);
     if (existRow) {
       // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动
@@ -151,8 +156,8 @@ async function syncOnStatus(batchNo, mode = {}) {
     const summary = String(batch.fields['摘要'] || '').trim();
     if (!summary) return { action: 'no_summary' };
 
-    const { sheetId } = await resolveSheet();
-    const grid = await readGrid(sheetId);
+    const { sheetId, rowCount } = await resolveSheet();
+    const grid = await readGrid(sheetId, rowCount);
     const row = findRowBySummary(grid, summary);
     if (!row) return { action: 'not_found' };
 

@@ -125,13 +125,22 @@ async function backfillCollect(options = {}) {
     const attachments = extractAttachmentRefs(forms);
     if (!attachments.length) continue;
 
-    // 匹配表格记录：同一发起人 + 发起时间 ±3 天窗内（实例 start_time vs 表格「发起时间」）
+    // 匹配表格记录：同一发起人 + 发起时间 ±3 天窗内（实例 start_time vs 表格「发起时间」）。
+    // 时间缺失不再放宽为「同人全量」（复查 P2-11：宽匹配会把票错配到同人其他申请）——
+    // 任一侧时间缺失即跳过该实例转人工，绝不盲配
+    if (!createTimeMs) {
+      console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 实例缺发起时间，跳过转人工`);
+      continue;
+    }
     const window = candidates.filter((r) => {
       const f = r.fields || {};
       const uid = Array.isArray(f['发起人']) ? f['发起人'][0]?.id : '';
       if (userId && uid && uid !== userId) return false;
       const launch = typeof f['发起时间'] === 'number' ? f['发起时间'] : parseInt(f['发起时间'], 10);
-      if (!launch || !createTimeMs) return true; // 时间缺失时放宽为同人全量
+      if (!launch) {
+        console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 候选记录 ${r.record_id} 缺「发起时间」，不参与匹配（转人工）`);
+        return false;
+      }
       return Math.abs(launch - createTimeMs) <= 3 * DAY_MS;
     });
     if (!window.length) continue;

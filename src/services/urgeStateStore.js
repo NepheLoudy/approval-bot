@@ -50,7 +50,11 @@ function load() {
 function save() {
   try {
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    // 原子写（复查 P2-9）：先写临时文件再 rename 替换，防写入中途崩溃/断电留下半个 JSON
+    //（rename 同目录内原子，Windows 上 renameSync 覆盖既有文件也安全）
+    const tmpFile = `${stateFile}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2));
+    fs.renameSync(tmpFile, stateFile);
   } catch (err) {
     console.error(`[催发票状态] 写入失败: ${err.message}`);
   }

@@ -40,9 +40,8 @@ async function withLock(key, fn) {
 
 // ---------- 票池与拟批 ----------
 
-/** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序） */
-async function getPoolWithRecords() {
-  const collects = await collectStore.listCollect();
+/** 审批表记录 → 申请编号字段索引（票池与 regen 共用，防两处口径漂移） */
+async function approvalFieldsByApplyNo() {
   const approvals = await bitableApi.listAllRecords(config.bitable.approvalTableId);
   const byApplyNo = new Map();
   for (const r of approvals) {
@@ -50,32 +49,45 @@ async function getPoolWithRecords() {
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     if (applyNo) byApplyNo.set(applyNo, f);
   }
+  return byApplyNo;
+}
+
+/**
+ * 采集记录 → 票池 item（getPoolWithRecords 与 regenerateBatchFiles 共用的唯一映射——
+ * 复查 P1-8：此前 regen 侧复制了一份映射且漏带 collectedAt，排序恒 0 打印件顺序漂移）。
+ */
+function collectToItem(r, byApplyNo) {
+  const f = r.fields;
+  const applyNo = String(f['关联申请编号'] || '');
+  const af = byApplyNo.get(applyNo) || {};
+  return {
+    record_id: r.record_id,
+    invoiceNo: String(f['发票号码'] || ''),
+    totalAmount: typeof f['价税合计'] === 'number' ? f['价税合计'] : (parseFloat(f['价税合计']) || 0),
+    collectedAt: Number(f['采集时间']) || 0,
+    applyNo,
+    material: af['购买物资名称'] || '',
+    model: af['型号规格参数'] || '',
+    project: af['项目'] ? (af['项目'].name || String(af['项目'])) : '未归类',
+    applicant: Array.isArray(af['发起人']) ? af['发起人'].map(u => u.name).join(',') : '',
+    fileTokens: Array.isArray(f['发票图片']) ? f['发票图片'].map(a => a.file_token).filter(Boolean) : [],
+    verifyStatus: f['校验状态'] || '',
+    invoiceCode: String(f['发票代码'] || ''),
+    invoiceType: String(f['票种'] || ''),
+    sellerName: String(f['销售方名称'] || ''),
+    issueDateMs: Number(f['开票日期']) || 0,
+    invoiceContent: String(f['开票内容'] || ''),
+  };
+}
+
+/** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序） */
+async function getPoolWithRecords() {
+  const collects = await collectStore.listCollect();
+  const byApplyNo = await approvalFieldsByApplyNo();
 
   return collects
     .filter(r => !r.fields['批次'])
-    .map((r) => {
-      const f = r.fields;
-      const applyNo = String(f['关联申请编号'] || '');
-      const af = byApplyNo.get(applyNo) || {};
-      return {
-        record_id: r.record_id,
-        invoiceNo: String(f['发票号码'] || ''),
-        totalAmount: typeof f['价税合计'] === 'number' ? f['价税合计'] : (parseFloat(f['价税合计']) || 0),
-        collectedAt: Number(f['采集时间']) || 0,
-        applyNo,
-        material: af['购买物资名称'] || '',
-        model: af['型号规格参数'] || '',
-        project: af['项目'] ? (af['项目'].name || String(af['项目'])) : '未归类',
-        applicant: Array.isArray(af['发起人']) ? af['发起人'].map(u => u.name).join(',') : '',
-        fileTokens: Array.isArray(f['发票图片']) ? f['发票图片'].map(a => a.file_token).filter(Boolean) : [],
-        verifyStatus: f['校验状态'] || '',
-        invoiceCode: String(f['发票代码'] || ''),
-        invoiceType: String(f['票种'] || ''),
-        sellerName: String(f['销售方名称'] || ''),
-        issueDateMs: Number(f['开票日期']) || 0,
-        invoiceContent: String(f['开票内容'] || ''),
-      };
-    })
+    .map((r) => collectToItem(r, byApplyNo))
     .sort((a, b) => a.collectedAt - b.collectedAt);
 }
 
@@ -105,7 +117,7 @@ async function previewBatch() {
  * 锁定批次：pool 内票（可选按项目过滤）→ 回写采集表「批次」+ 审批表「报销单」栏 →
  * 建批次记录（已锁定，含摘要/用途/笔序）→ 生成 打印 PDF + BOM + 物料清单 + 投递底单 落附件。
  * 锁定后顺序不可变；迟到票进下一批。
- * @param {object} options {purpose 用途（默认=主项目）, note 备注}
+ * @param {object} options {purpose 用途（默认=主项目）, note 备注, operator 操作人（锁定留痕）}
  */
 async function lockBatch(batchNo, project, options = {}) {
   if (!batchNo || !batchNo.trim()) throw new Error('批次号不能为空（如 27备赛20步兵5）');
@@ -128,52 +140,66 @@ async function lockBatch(batchNo, project, options = {}) {
     const purchaseType = String(options.purchaseType || '').trim() || config.batch.purchaseType;
     const payee = String(options.payee || '').trim() || config.batch.reporterName;
     const payeeAccount = String(options.payeeAccount || '').trim() || config.batch.bankCardNo;
-    const ordinal = await nextProjectOrdinal(primaryProject);
-    const summary = composeSummary({ project: primaryProject, purpose, ordinal });
-
-    // 1. 先建批次记录（已锁定）——锁定主记录先行，后续步骤失败可经 regen/status 自愈，
-    //    不会出现「票已出池、批次表无记录」的死局（复查 P1-5）
-    const batchRecord = await collectStore.createBatch({
-      '批次号': batchNo,
-      '项目': projects.join('/'),
-      '张数': pool.length,
-      '金额合计': amount,
-      '状态': collectStore.BATCH_STATUS.LOCKED,
-      '锁定时间': Date.now(),
-      '摘要': summary,
-      '用途': purpose,
-      '笔序': ordinal,
-      '费用项': feeItem,
-      '采购类型': purchaseType,
-      '收款方': payee,
-      '收款账号': payeeAccount,
-      ...(options.note ? { '备注': options.note } : {}),
+    // 笔序计算与建批包进主项目锁（复查 P1-9）：同项目两笔不同批次号并发锁定时，外层
+    // batch_ 锁互不排斥，「数既有批次+1」会撞出同一笔序 → 摘要重复 → 台账按摘要匹配丢账。
+    // 嵌套锁顺序恒为 batch_ → proj_（无反向嵌套），安全
+    const { ordinal, summary, batchRecord } = await withLock(`proj_${primaryProject}`, async () => {
+      const ord = await nextProjectOrdinal(primaryProject);
+      const sum = composeSummary({ project: primaryProject, purpose, ordinal: ord });
+      // 1. 先建批次记录（已锁定）——锁定主记录先行，后续步骤失败可经 regen/status 自愈，
+      //    不会出现「票已出池、批次表无记录」的死局（复查 P1-5）
+      const rec = await collectStore.createBatch({
+        '批次号': batchNo,
+        '项目': projects.join('/'),
+        '张数': pool.length,
+        '金额合计': amount,
+        '状态': collectStore.BATCH_STATUS.LOCKED,
+        '锁定时间': Date.now(),
+        '摘要': sum,
+        '用途': purpose,
+        '笔序': ord,
+        '费用项': feeItem,
+        '采购类型': purchaseType,
+        '收款方': payee,
+        '收款账号': payeeAccount,
+        ...(options.note ? { '备注': options.note } : {}),
+        // 操作留痕（复查 P2-4：锁定无操作留痕；有 operator 才写）
+        ...(options.operator ? { '最后操作人': options.operator, '最后操作时间': Date.now() } : {}),
+      });
+      return { ordinal: ord, summary: sum, batchRecord: rec };
     });
 
-    // 2. 采集表回写批次
+    // 2. 采集表回写批次（逐张 catch 收集失败清单——复查 P2-6：中途失败要在回执/备注暴露）
+    const markFailed = [];
     for (const p of pool) {
-      await collectStore.updateCollect(p.record_id, { '批次': batchNo });
+      try {
+        await collectStore.updateCollect(p.record_id, { '批次': batchNo });
+      } catch (err) {
+        console.error(`[批次] 回写采集表批次失败（${p.invoiceNo}）:`, err.message);
+        markFailed.push(p.invoiceNo);
+      }
     }
 
     // 3. 审批表「报销单」栏回写（单选，值不存在飞书自动建选项；有申请编号的才回写）
     let approvalWritten = 0;
     if (pool.some(p => p.applyNo)) {
       const approvals = await bitableApi.listAllRecords(config.bitable.approvalTableId);
-      const byApplyNo = new Map();
+      const recordByApplyNo = new Map();
       for (const r of approvals) {
         const f = r.fields || {};
         const no = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-        if (no) byApplyNo.set(no, r);
+        if (no) recordByApplyNo.set(no, r);
       }
       for (const p of pool) {
         if (!p.applyNo) continue;
-        const hit = byApplyNo.get(p.applyNo);
+        const hit = recordByApplyNo.get(p.applyNo);
         if (!hit) continue;
         try {
           await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': batchNo });
           approvalWritten++;
         } catch (err) {
           console.error(`[批次] 回写审批表报销单栏失败（${p.applyNo}）:`, err.message);
+          markFailed.push(p.applyNo);
         }
       }
     }
@@ -192,10 +218,22 @@ async function lockBatch(batchNo, project, options = {}) {
     if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
     if (Object.keys(attach).length) await collectStore.updateBatch(batchRecord.record_id, attach);
 
+    // 5. 打标失败暴露（复查 P2-6）：批次备注追加 + 返回给回执，财务可对漏标票人工补
+    if (markFailed.length) {
+      const markNote = `${markFailed.length} 张打标失败（${markFailed.slice(0, 5).join('、')}${markFailed.length > 5 ? '…' : ''}）`;
+      try {
+        await collectStore.updateBatch(batchRecord.record_id, {
+          '备注': [options.note, markNote].filter(Boolean).join('；'),
+        });
+      } catch (err) {
+        console.error('[批次] 打标失败备注回写失败:', err.message);
+      }
+    }
+
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
       pdfToken, bomToken, mlToken, dsToken,
-      summary, purpose, ordinal,
+      summary, purpose, ordinal, markFailed,
       warningCount: pool.filter(i => i.verifyStatus && i.verifyStatus !== '通过').length,
       missingContent: pool.filter(i => !i.invoiceContent).length,
       recordId: batchRecord.record_id, items: pool,
@@ -251,34 +289,11 @@ async function regenerateBatchFiles(batchNo) {
   const collects = (await collectStore.listCollect()).filter(r => String(r.fields['批次'] || '') === batchNo);
   if (!collects.length) throw new Error(`批次 ${batchNo} 下没有采集记录`);
 
-  const approvals = await bitableApi.listAllRecords(config.bitable.approvalTableId);
-  const byApplyNo = new Map();
-  for (const r of approvals) {
-    const f = r.fields || {};
-    const no = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    if (no) byApplyNo.set(no, f);
-  }
-  const items = collects.map((r) => {
-    const f = r.fields;
-    const af = byApplyNo.get(String(f['关联申请编号'] || '')) || {};
-    return {
-      record_id: r.record_id,
-      invoiceNo: String(f['发票号码'] || ''),
-      totalAmount: typeof f['价税合计'] === 'number' ? f['价税合计'] : (parseFloat(f['价税合计']) || 0),
-      applyNo: String(f['关联申请编号'] || ''),
-      material: af['购买物资名称'] || '',
-      model: af['型号规格参数'] || '',
-      project: af['项目'] ? (af['项目'].name || String(af['项目'])) : '未归类',
-      applicant: Array.isArray(af['发起人']) ? af['发起人'].map(u => u.name).join(',') : '',
-      fileTokens: Array.isArray(f['发票图片']) ? f['发票图片'].map(a => a.file_token).filter(Boolean) : [],
-      verifyStatus: f['校验状态'] || '',
-      invoiceCode: String(f['发票代码'] || ''),
-      invoiceType: String(f['票种'] || ''),
-      sellerName: String(f['销售方名称'] || ''),
-      issueDateMs: Number(f['开票日期']) || 0,
-      invoiceContent: String(f['开票内容'] || ''),
-    };
-  }).sort((a, b) => a.collectedAt - b.collectedAt || 0);
+  const byApplyNo = await approvalFieldsByApplyNo();
+  // 采集记录 → item 映射与票池共用一份（含 collectedAt，打印件顺序=采集时间序——复查 P1-8）
+  const items = collects
+    .map((r) => collectToItem(r, byApplyNo))
+    .sort((a, b) => a.collectedAt - b.collectedAt);
 
   // 元数据（旧批次可能没有摘要/用途/笔序列 → 回落重算，不炸）
   const bf = batch.fields;
@@ -609,47 +624,67 @@ async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
 /**
  * 接取批次：登记「接取人/接取时间」。不带批次号 = 接取最近锁定的未接取批次。
  * 仅【已锁定】可接取；已被他人接取报错（重复接取幂等返回）。
+ * 全程全局锁（复查 P2-5）：查候选→写接取人之间有 await 点，两人并发「接取」
+ * 会抢到同一批次；接取低频，全局串行化即可。
  */
 async function claimBatch(batchNo, claimer = '') {
-  let batch;
-  if (batchNo) {
-    batch = await collectStore.findBatchByName(batchNo);
-    if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  } else {
-    const candidates = (await collectStore.listBatches())
-      .filter(b => (b.fields['状态'] || collectStore.BATCH_STATUS.LOCKED) === collectStore.BATCH_STATUS.LOCKED && !b.fields['接取人'])
-      .sort((a, b) => (Number(b.fields['锁定时间']) || 0) - (Number(a.fields['锁定时间']) || 0));
-    if (!candidates.length) throw new Error('当前没有待接取的已锁定批次（锁定后群里回复「接取」即可领取）');
-    batch = candidates[0];
-  }
+  return withLock('batch_claim', async () => {
+    let batch;
+    if (batchNo) {
+      batch = await collectStore.findBatchByName(batchNo);
+      if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    } else {
+      const candidates = (await collectStore.listBatches())
+        .filter(b => (b.fields['状态'] || collectStore.BATCH_STATUS.LOCKED) === collectStore.BATCH_STATUS.LOCKED && !b.fields['接取人'])
+        .sort((a, b) => (Number(b.fields['锁定时间']) || 0) - (Number(a.fields['锁定时间']) || 0));
+      if (!candidates.length) throw new Error('当前没有待接取的已锁定批次（锁定后群里回复「接取」即可领取）');
+      batch = candidates[0];
+    }
 
-  const f = batch.fields;
-  const bNo = String(f['批次号'] || '');
-  const status = f['状态'] || collectStore.BATCH_STATUS.LOCKED;
-  if (status !== collectStore.BATCH_STATUS.LOCKED) throw new Error(`批次 ${bNo} 状态为【${status}】，仅【已锁定】批次可接取`);
-  const reClaim = Boolean(f['接取人']);
-  if (reClaim && claimer && String(f['接取人']) !== claimer) {
-    throw new Error(`批次 ${bNo} 已由 ${f['接取人']} 接取（如需改派请管理员在报销批次表修改）`);
-  }
-  if (!reClaim) {
-    await collectStore.updateBatch(batch.record_id, { '接取人': claimer || '财务', '接取时间': Date.now() });
-  }
-  return {
-    batchNo: bNo,
-    project: f['项目'] || '',
-    count: f['张数'] || 0,
-    amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
-    summary: String(f['摘要'] || ''),
-    taker: String(f['接取人'] || claimer || '财务'),
-    reClaim,
-  };
+    const f = batch.fields;
+    const bNo = String(f['批次号'] || '');
+    const status = f['状态'] || collectStore.BATCH_STATUS.LOCKED;
+    if (status !== collectStore.BATCH_STATUS.LOCKED) throw new Error(`批次 ${bNo} 状态为【${status}】，仅【已锁定】批次可接取`);
+    const reClaim = Boolean(f['接取人']);
+    if (reClaim && claimer && String(f['接取人']) !== claimer) {
+      throw new Error(`批次 ${bNo} 已由 ${f['接取人']} 接取（如需改派请管理员在报销批次表修改）`);
+    }
+    if (!reClaim) {
+      await collectStore.updateBatch(batch.record_id, { '接取人': claimer || '财务', '接取时间': Date.now() });
+    }
+    return {
+      batchNo: bNo,
+      project: f['项目'] || '',
+      count: f['张数'] || 0,
+      amount: typeof f['金额合计'] === 'number' ? f['金额合计'] : (parseFloat(f['金额合计']) || 0),
+      summary: String(f['摘要'] || ''),
+      taker: String(f['接取人'] || claimer || '财务'),
+      reClaim,
+    };
+  });
 }
 
 // ---------- 批次状态流转（已提交/已到账/已退回） ----------
 
+// 合法流转表（复查 P1-3）：已锁定→已提交/已退回、已提交→已到账/已退回；
+// 已到账/已退回为终态，拒绝任何再流转（防「已到账」批次再退回票入池造成重复报销）
+const BATCH_TRANSITIONS = {
+  [collectStore.BATCH_STATUS.LOCKED]: [collectStore.BATCH_STATUS.SUBMITTED, collectStore.BATCH_STATUS.REJECTED],
+  [collectStore.BATCH_STATUS.SUBMITTED]: [collectStore.BATCH_STATUS.PAID, collectStore.BATCH_STATUS.REJECTED],
+  [collectStore.BATCH_STATUS.PAID]: [],
+  [collectStore.BATCH_STATUS.REJECTED]: [],
+};
+
 async function markBatch(batchNo, status, operator = '') {
   const batch = await collectStore.findBatchByName(batchNo);
   if (!batch) throw new Error(`批次不存在：${batchNo}`);
+  // 状态机校验：非法流转直接拒绝（错误信息带当前状态与合法去向）
+  const curStatus = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
+  const allowed = BATCH_TRANSITIONS[curStatus];
+  if (!allowed || !allowed.length || !allowed.includes(status)) {
+    const to = (!allowed || !allowed.length) ? '无（终态，不可再流转）' : allowed.join('/');
+    throw new Error(`批次 ${batchNo} 状态流转非法：当前【${curStatus}】，合法去向【${to}】，收到【${status}】`);
+  }
   const now = Date.now();
   const fields = { '状态': status };
   if (status === collectStore.BATCH_STATUS.SUBMITTED) fields['提交时间'] = now;

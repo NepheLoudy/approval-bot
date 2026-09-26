@@ -432,6 +432,7 @@ async function runInvoiceUrgeInner(options = {}) {
         chatId: res?.chat_id || prevUser.chatId || '',
         lastUrgeRecordIds: recordIds,
         lastReadTime: Math.max(Number(res?.create_time) || 0, prevUser.lastReadTime || 0),
+        name, // 提交人姓名（复查 P2-7：此前从未写入，台账/回票链路的提交人姓名恒空）
       });
 
       // 计数与升级

@@ -481,8 +481,10 @@ function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = []
  * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 四列）。
  */
 function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, generated = {} } = {}) {
-  const base = config.bitable.appToken;
-  const tableUrl = base ? `https://feishu.cn/base/${base}?table=${config.bitable.batchTableId}` : '';
+  // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
+  const tableUrl = config.bitable.appToken
+    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
+    : '';
   const mark = (ok, label, desc) => `- ${ok ? '✅' : '⚠️'} **${label}** — ${desc}${ok ? '' : '（生成失败，可 /approval-batch regen 重试）'}`;
 
   const lines = [

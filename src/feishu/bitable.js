@@ -4,10 +4,9 @@ const { requestAPI } = require('./client');
 /**
  * 拉取多维表格指定表的全部记录（自动翻页）
  * @param {string} tableId 表 ID
- * @param {string} [filter] 过滤公式，如 CurrentValue.[申请状态] = "待审批"
  * @returns {Promise<Array<{record_id: string, fields: object}>>}
  */
-async function listAllRecords(tableId, filter) {
+async function listAllRecords(tableId) {
   const appToken = config.bitable.appToken;
   if (!appToken || !tableId) {
     throw new Error('未配置多维表格 appToken 或 tableId');
@@ -19,7 +18,6 @@ async function listAllRecords(tableId, filter) {
 
   do {
     const query = new URLSearchParams({ page_size: String(pageSize) });
-    if (filter) query.set('filter', filter);
     if (pageToken) query.set('page_token', pageToken);
 
     const res = await requestAPI(

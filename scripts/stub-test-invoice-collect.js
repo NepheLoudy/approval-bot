@@ -330,7 +330,8 @@ async function main() {
   // 重复批次号拒绝
   await assert.rejects(() => batchService.lockBatch('27备赛99步兵9', ''), /已存在/);
 
-  // 状态流转
+  // 状态流转（复查 P1-3：状态机校验后，合法流转 已锁定→已提交 必须仍畅通）
+  assert.equal(batchRows[0].fields['状态'], '已锁定', '锁定后批次状态=已锁定');
   const marked = await batchService.markBatch('27备赛99步兵9', '已提交');
   assert.equal(marked.status, '已提交');
   assert.equal(batchRows[0].fields['状态'], '已提交');

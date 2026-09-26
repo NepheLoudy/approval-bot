@@ -21,6 +21,8 @@ module.exports = {
   feishu: {
     appId: process.env.APP_ID || '',
     appSecret: process.env.APP_SECRET || '',
+    // 租户子域（卡片里的表链接等拼前缀用；feishu.cn 裸域在部分租户/网络下打不开）
+    tenantBaseUrl: process.env.FEISHU_TENANT_BASE_URL || 'https://cquqianli.feishu.cn',
   },
 
   bitable: {

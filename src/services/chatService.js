@@ -81,7 +81,7 @@ async function handleHelpCommand() {
     '  /approval-pending 查看审批中列表',
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
-    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [收款方=xx] | status |',
+    '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
     '                    submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger <批次号>',
     '                    （submit/paid/reject 自动同步《报销台账》电子表格）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
@@ -244,7 +244,6 @@ const commandHandlers = {
  *   /approval-batch reject <批次号>      → 标记已退回（台账标记已退回；退回票自动回票池）
  *   /approval-batch regen <批次号>       → 四件附件重新生成
  *   /approval-batch ledger <批次号> [投递单号] → 手动把批次同步进台账电子表格
- *   /approval-batch regen <批次号>       → 四件附件重新生成
  *   接取 [批次号]                        → 审批群回复「接取」领取交付包（登记接取人）
  */
 async function handleBatchCommand(args = [], ctx = {}) {
@@ -274,22 +273,27 @@ async function handleBatchCommand(args = [], ctx = {}) {
     }
     const [batchNo, project] = positional;
     if (!batchNo) return '❌ 用法：/approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx 收款账号=xx]';
+    // 锁定人留痕（复查 P2-4）：与 submit/paid/reject 同款实名反查，落批次表「最后操作人/时间」
+    const { operator, verified } = await resolveOperator(ctx);
     const r = await batchService.lockBatch(batchNo, project || '', {
       purpose: kv['用途'] || '',
       feeItem: kv['费用项'] || '',
       purchaseType: kv['采购类型'] || '',
       payee: kv['收款方'] || '',
       payeeAccount: kv['收款账号'] || '',
+      operator,
     });
     const lines = [
       `✅ 批次已锁定：${r.batchNo}（${r.projects.join('/')}）`,
       `· ${r.count} 张发票 ¥${r.amount.toFixed(2)}，已回写审批表「报销单」栏 ${r.approvalWritten} 条`,
       r.summary ? `· 摘要：${r.summary}` : '',
+      operator ? `· 👤 锁定人：${operator}${verified ? '' : '（自报，未经通讯录校验）'}` : '',
       r.pdfToken ? '· 🖨️ 打印件 PDF ✅（按录入顺序，一页两票）' : '· ⚠️ 打印件 PDF 生成失败（可 /approval-batch regen 重试）',
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（可 regen）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（可 regen）',
       r.dsToken ? '· 📮 投递底单 ✅（照单录入小翼Plus）' : '· ⚠️ 投递底单生成失败（可 regen）',
     ].filter(Boolean);
+    if (r.markFailed && r.markFailed.length) lines.push(`· ⚠️ ${r.markFailed.length} 张打标失败（${r.markFailed.slice(0, 5).join('、')}${r.markFailed.length > 5 ? '…' : ''}，已记入批次备注），请对漏标票人工补「批次/报销单」栏`);
     if (r.warningCount) lines.push(`· ⚠️ 含 ${r.warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
     if (r.missingContent) lines.push(`· ⚠️ ${r.missingContent} 张缺「开票内容」（底单已标黄），录入时现场补填`);
     // 交付卡（人工锁定触发的直接回路，即时发群；失败不阻断锁定）

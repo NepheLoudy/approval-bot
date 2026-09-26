@@ -5,8 +5,11 @@
 const assert = require('assert/strict');
 
 const config = require('../src/config');
+config.bitable.appToken = 'appTokenTest';
 config.bitable.collectTableId = 'tblCollectTest';
 config.bitable.batchTableId = 'tblBatchTest';
+// 交付卡表链接断言需要确定性的租户子域（真实 .env 可能已配 FEISHU_TENANT_BASE_URL）
+config.feishu.tenantBaseUrl = 'https://test-tenant.feishu.cn';
 // 摘要拼装口径照实样（机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔）
 config.batch.season = '27赛季';
 // 标黄断言需要确定的「未配置」基线（真实 .env 可能已填 CQ_* 实值，测试内固定清空）
@@ -30,6 +33,31 @@ client.uploadMediaToBitable = async (buf, fileName) => {
   uploaded.push({ fileName, buffer: buf });
   return `fileToken_${uploaded.length}`;
 };
+
+// ---- 打印件占位文本提取（pdf-lib 内容流 Flate 压缩 + 文本 hex 编码；
+//      解压后按流在文件中的先后 = 页序，用于断言打印件顺序） ----
+function pdfSlotLines(buf) {
+  const zlib = require('zlib');
+  const lines = [];
+  let idx = 0;
+  while (true) {
+    const start = buf.indexOf('stream', idx);
+    if (start < 0) break;
+    let s0 = start + 6;
+    while (s0 < buf.length && (buf[s0] === 13 || buf[s0] === 10)) s0++; // 跳过 EOL
+    const end = buf.indexOf('endstream', s0);
+    if (end < 0) break;
+    try {
+      const content = zlib.inflateSync(buf.slice(s0, end)).toString('latin1');
+      for (const m of content.matchAll(/<([0-9A-Fa-f]+)>/g)) {
+        const text = Buffer.from(m[1], 'hex').toString('latin1');
+        if (text.startsWith('Slot ')) lines.push(text);
+      }
+    } catch (e) { /* 对象流/交叉引用流非页面内容，跳过 */ }
+    idx = end + 9;
+  }
+  return lines;
+}
 
 async function main() {
   const { numToCnyUpper, numToCnOrdinal } = require('../src/utils/cny');
@@ -230,6 +258,91 @@ async function main() {
   const overview = await batchService.batchOverview();
   const opRow = overview.find(b => b.batchNo === '27备赛20步兵5');
   assert.equal(opRow.operator, '陈嘉豪', '总览含最后操作人');
+
+  // ---------- 状态机（复查 P1-3）：非法流转拒绝，终态不可再流转 ----------
+  await assert.rejects(
+    () => batchService.markBatch('27备赛20步兵5', '已退回', ''),
+    /当前【已到账】，合法去向【无（终态，不可再流转）】/,
+    '已到账再 reject 必须拒绝（防重复报销）'
+  );
+  assert.equal(mbRow.fields['状态'], '已到账', '非法流转不落表');
+  await assert.rejects(
+    () => batchService.markBatch('27对抗赛飞镖24', '已到账', ''),
+    /当前【已锁定】，合法去向【已提交\/已退回】/,
+    '已锁定不得直跳已到账（漏了已提交）'
+  );
+  assert.equal(batchRows.find(b => b.record_id === 'bat2').fields['状态'], '已锁定', '非法流转不落表');
+
+  // ---------- 乱序入库两票（复查 P1-8）：regen 后打印件顺序=采集时间序 ----------
+  const bitableApi = require('../src/feishu/bitable');
+  bitableApi.listAllRecords = async () => []; // 审批表空 → 项目回落「未归类」
+  // 采集表里后扫的票先入库（乱序），打印件必须按采集时间排回录入序
+  const regenRows = [
+    { record_id: 'col_late', fields: { '发票号码': '999999', '价税合计': 60, '采集时间': 200, '批次': '27乱序批次1' } },
+    { record_id: 'col_early', fields: { '发票号码': '111111', '价税合计': 52.93, '采集时间': 100, '批次': '27乱序批次1' } },
+  ];
+  collectStore.listCollect = async () => regenRows;
+  batchRows.push({ record_id: 'bat_regen', fields: { '批次号': '27乱序批次1', '项目': '未归类', '状态': '已锁定', '笔序': 1, '摘要': '' } });
+  uploaded.length = 0;
+  await batchService.regenerateBatchFiles('27乱序批次1');
+  const regenPdf = uploaded.find(u => u.fileName === '报销单_27乱序批次1_打印件.pdf');
+  assert.ok(regenPdf, 'regen 生成打印件 PDF');
+  const slots = pdfSlotLines(regenPdf.buffer);
+  assert.equal(slots.length, 2, '两票各占一个票位');
+  assert.ok(slots[0].includes('no.111111'), `先采集的票排在前（实际 ${slots[0]}）`);
+  assert.ok(slots[1].includes('no.999999'), `后采集的票排在后（实际 ${slots[1]}）`);
+
+  // ---------- lock 回执含锁定人 + 批次记录留痕（复查 P2-4）；打标失败暴露（复查 P2-6） ----------
+  const bot = require('../src/feishu/bot');
+  const sentCards = [];
+  bot.sendMessage = async (msg) => { sentCards.push(msg); return {}; };
+  // chatService 顶层解构了 bot 的函数引用，须清缓存重载才能吃到发送桩
+  delete require.cache[require.resolve('../src/services/chatService')];
+  const chatServiceFresh = require('../src/services/chatService');
+  contacts.listActiveUsers = async () => new Map([['ou_hh', '贺韵洁']]);
+  const poolRows = [
+    { record_id: 'col_p1', fields: { '发票号码': '555555', '价税合计': 11, '采集时间': 300 } },
+    { record_id: 'col_p2', fields: { '发票号码': '666666', '价税合计': 22, '采集时间': 400 } },
+  ];
+  collectStore.listCollect = async () => poolRows;
+  collectStore.createBatch = async (fields) => {
+    const row = { record_id: `bat_new${batchRows.length + 1}`, fields };
+    batchRows.push(row);
+    return row;
+  };
+  // col_p1 故意回写失败 → 验证打标失败在回执与批次备注都暴露（复查 P2-6）
+  collectStore.updateCollect = async (recordId, fields) => {
+    if (recordId === 'col_p1') throw new Error('模拟回写失败');
+    const row = poolRows.find(r => r.record_id === recordId);
+    if (row) row.fields = { ...row.fields, ...fields };
+    return { record_id: recordId };
+  };
+  const lockReply = await chatServiceFresh.executeCommand('/approval-batch', ['lock', '27回执批次9'], { senderId: 'ou_hh', senderName: '冒名者' });
+  assert.match(lockReply, /✅ 批次已锁定：27回执批次9/);
+  assert.ok(lockReply.includes('· 👤 锁定人：贺韵洁'), `锁定回执含实名锁定人（实际：${lockReply}）`);
+  const lockRow = batchRows.find(b => b.fields['批次号'] === '27回执批次9');
+  assert.equal(lockRow.fields['最后操作人'], '贺韵洁', '批次记录含最后操作人（open_id 实名反查，非自报「冒名者」）');
+  assert.ok(lockRow.fields['最后操作时间'] > 0, '批次记录含最后操作时间');
+  assert.ok(lockReply.includes('1 张打标失败'), '打标失败在回执暴露');
+  assert.ok(String(lockRow.fields['备注'] || '').includes('1 张打标失败'), '打标失败记入批次备注');
+  assert.equal(sentCards.length, 1, '交付卡已发送');
+  assert.ok(
+    JSON.stringify(sentCards[0]).includes('https://test-tenant.feishu.cn/base/appTokenTest'),
+    '交付卡表链接带租户子域（复查 P2-13）'
+  );
+
+  // ---------- 并发「接取」互斥（复查 P2-5）：同时抢只能各自落到不同批次 ----------
+  lockRow.fields['状态'] = '已提交'; // 27回执批次9 挪出待接取池，让并发测试只抢下面两批
+  batchRows.push(
+    { record_id: 'bat_c1', fields: { '批次号': '27并发批次1', '项目': '未归类', '状态': '已锁定', '锁定时间': 300, '张数': 1, '金额合计': 1 } },
+    { record_id: 'bat_c2', fields: { '批次号': '27并发批次2', '项目': '未归类', '状态': '已锁定', '锁定时间': 400, '张数': 1, '金额合计': 2 } },
+  );
+  const [claimA, claimB] = await Promise.all([
+    batchService.claimBatch('', '张三'),
+    batchService.claimBatch('', '李四'),
+  ]);
+  assert.notEqual(claimA.batchNo, claimB.batchNo, '并发接取必须落在不同批次（互斥）');
+  assert.deepEqual([claimA.batchNo, claimB.batchNo].sort(), ['27并发批次1', '27并发批次2'], '两个待接取批次都被领走');
 }
 
 (async () => {
