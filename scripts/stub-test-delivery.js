@@ -191,6 +191,63 @@ async function main() {
   const d2 = ws2.getRow(detailHeadRow + 2).getCell(5);
   assert.equal(d2.fill && d2.fill.fgColor && d2.fill.fgColor.argb, 'FFFFFF00', '明细缺开票内容 → 标黄');
 
+  // ---------- 交付包⑥：打印件 docx + 特殊事项附页（2026-09-27 曼波反馈） ----------
+  const { execSync } = require('child_process');
+  const fsMod = require('fs');
+  const osMod = require('os');
+  const pathMod = require('path');
+
+  assert.equal(batchService.isSpecialItem({ totalAmount: 500.01, payRecord: null, evidencePhoto: null }), true, '≥阈值触发特殊事项');
+  assert.equal(batchService.isSpecialItem({ totalAmount: 499, payRecord: null, evidencePhoto: null }), false, '小额无佐证不触发');
+  assert.equal(batchService.isSpecialItem({ totalAmount: 15, payRecord: { link: 'x', text: '1 张图片' }, evidencePhoto: null }), true, '有支付记录即触发（金额无关）');
+
+  uploaded.length = 0;
+  const specialItems = [
+    { invoiceNo: '24312000000123456789', totalAmount: 620, invoiceContent: '*电子元件*主控板', invoiceType: '全电发票', invoiceCode: '', sellerName: 's1', issueDateMs: 1, applyNo: 'A1', material: '主控板', payRecord: { link: 'https://www.feishu.cn/approval/admin/previewAttachment?key=PAY1', text: '1 张图片' }, evidencePhoto: null },
+    { invoiceNo: '24312000000123458888', totalAmount: 15, invoiceContent: '', invoiceType: '全电发票', invoiceCode: '', sellerName: 's2', issueDateMs: 2, applyNo: 'A2', material: '自封袋', payRecord: null, evidencePhoto: { link: 'https://www.feishu.cn/approval/admin/previewAttachment?key=EVI1', text: '1 张图片' } },
+  ];
+  await batchService.uploadBatchSpecialSheetDocx('BSP', specialItems);
+  await batchService.uploadBatchSpecialSheetPdf('BSP', specialItems);
+  assert.equal(uploaded.length, 2);
+  assert.equal(uploaded[0].fileName, '报销单_BSP_特殊事项附页.docx');
+  assert.equal(uploaded[1].fileName, '报销单_BSP_特殊事项附页.pdf');
+  // docx 解包：中文与两条预览链接都在（Word 原生超链接）
+  const docxPath = pathMod.join(osMod.tmpdir(), `stub-special-${process.pid}.docx`);
+  fsMod.writeFileSync(docxPath, uploaded[0].buffer);
+  const docXml = execSync(`unzip -p "${docxPath}" word/document.xml`, { encoding: 'utf-8' });
+  assert.ok(docXml.includes('特殊事项说明'), 'docx 含特殊事项标题');
+  assert.ok(docXml.includes('previewAttachment?key=PAY1') && docXml.includes('previewAttachment?key=EVI1'), 'docx 含两条审批附件链接');
+  fsMod.unlinkSync(docxPath);
+  // pdf 文本层：ASCII 链接可检索（中文走嵌入字体）
+  const pdfPath = pathMod.join(osMod.tmpdir(), `stub-special-${process.pid}.pdf`);
+  fsMod.writeFileSync(pdfPath, uploaded[1].buffer);
+  const { PDFParse } = require('pdf-parse');
+  const pdfText = (await (new PDFParse({ data: new Uint8Array(fsMod.readFileSync(pdfPath)) })).getText()).text;
+  assert.ok(pdfText.includes('previewAttachment?key=PAY1'), 'pdf 附支付记录链接');
+  assert.ok(pdfText.includes('previewAttachment?key=EVI1'), 'pdf 附实物佐证链接');
+  fsMod.unlinkSync(pdfPath);
+
+  // 打印件 docx：图片排入 + PDF 原件票标注
+  uploaded.length = 0;
+  const realBotMod = null; // downloadMedia 走 client 桩
+  const png1x1 = await require('sharp')({ create: { width: 40, height: 30, channels: 3, background: '#ffffff' } }).png().toBuffer();
+  const pdfInvoice = Buffer.from('%PDF-1.4 fake');
+  client.downloadMedia = async (token) => (token === 'tk_pdf' ? pdfInvoice : png1x1);
+  await batchService.uploadBatchDocx('BDX', [
+    { invoiceNo: 'a1', totalAmount: 60, material: '电机', fileTokens: ['tk_img'] },
+    { invoiceNo: 'a2', totalAmount: 70, material: '舵机', fileTokens: ['tk_pdf'] },
+  ]);
+  assert.equal(uploaded[0].fileName, '报销单_BDX_打印件.docx');
+  const docx2Path = pathMod.join(osMod.tmpdir(), `stub-print-${process.pid}.docx`);
+  fsMod.writeFileSync(docx2Path, uploaded[0].buffer);
+  const doc2Xml = execSync(`unzip -p "${docx2Path}" word/document.xml`, { encoding: 'utf-8' });
+  assert.ok(doc2Xml.includes('按录入顺序'), 'docx 打印件标题');
+  assert.ok(doc2Xml.includes('PDF 原件'), 'PDF 原件票有指引标注');
+  assert.ok(doc2Xml.includes('电机') && doc2Xml.includes('舵机'), '逐票标题行');
+  const mediaList = execSync(`unzip -l "${docx2Path}"`, { encoding: 'utf-8' });
+  assert.ok(/word\/media/.test(mediaList), '图片已嵌入 docx media');
+  fsMod.unlinkSync(docx2Path);
+
   // ---------- 链路：批次接取（claimBatch 状态机） ----------
   const batchRows = [
     { record_id: 'bat1', fields: { '批次号': '27对抗赛飞镖23', '项目': '对抗赛', '状态': '已提交', '张数': 3, '金额合计': 100 } },

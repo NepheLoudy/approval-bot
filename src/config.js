@@ -140,6 +140,8 @@ module.exports = {
     purchaseType: process.env.BATCH_PURCHASE_TYPE || '机器人零件',
     // 物料清单「制单人」（留空回落报销人姓名）
     preparer: process.env.BATCH_PREPARER_NAME || '',
+    // 特殊事项附页触发金额阈值（≥此额 或 支付记录/实物佐证字段非空 → 单独排纸；2026-09-27 曼波反馈）
+    specialAmount: parseFloat(process.env.BATCH_SPECIAL_AMOUNT) || 500,
     // 报销人（投递单抬头；工号/电话缺失底单标黄）
     reporterStuId: process.env.CQ_REPORTER_STU_ID || '',
     reporterName: process.env.CQ_REPORTER_NAME || '',

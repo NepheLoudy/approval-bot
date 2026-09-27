@@ -60,6 +60,7 @@ const BATCH_FIELDS = [
   { field_name: '最后操作时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '物料清单', type: 17 }, // 附件：校格式物料清单 xlsx（交付包④）
   { field_name: '投递底单', type: 17 }, // 附件：学校系统填报预填稿 xlsx（交付包⑤）
+  { field_name: '特殊事项附页', type: 17 }, // 附件：大额/公私属性不分明票的付款记录+实物佐证单独排纸（pdf+docx，2026-09-27）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
 ];
 

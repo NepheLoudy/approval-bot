@@ -308,6 +308,8 @@ async function handleBatchCommand(args = [], ctx = {}) {
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（可 regen）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（可 regen）',
       r.dsToken ? '· 📮 投递底单 ✅（照单录入小翼Plus）' : '· ⚠️ 投递底单生成失败（可 regen）',
+      r.docxToken ? '· 📄 打印件 docx（可编辑版）✅' : '· ⚠️ 打印件 docx 生成失败（可 regen）',
+      ...(r.specialCount ? [`· 🚩 特殊事项附页 ✅（${r.specialCount} 张：大额/公私属性不分明/有支付记录，单独成页）`] : []),
     ].filter(Boolean);
     if (r.markFailed && r.markFailed.length) lines.push(`· ⚠️ ${r.markFailed.length} 张打标失败（${r.markFailed.slice(0, 5).join('、')}${r.markFailed.length > 5 ? '…' : ''}，已记入批次备注），请对漏标票人工补「批次/报销单」栏`);
     if (r.warningCount) lines.push(`· ⚠️ 含 ${r.warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
@@ -317,7 +319,8 @@ async function handleBatchCommand(args = [], ctx = {}) {
       await sendMessage(buildDeliveryCard({
         batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
         summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
-        generated: { pdf: !!r.pdfToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken },
+        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken) },
+        specialCount: r.specialCount,
       }));
     } catch (err) {
       console.error('[对话服务] 交付卡发送失败:', err.message);
@@ -405,6 +408,8 @@ async function handleBatchCommand(args = [], ctx = {}) {
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（见日志）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（见日志）',
       r.dsToken ? '· 📮 投递底单 ✅' : '· ⚠️ 投递底单生成失败（见日志）',
+      r.docxToken ? '· 📄 打印件 docx（可编辑版）✅' : '· ⚠️ 打印件 docx 生成失败（见日志）',
+      ...(r.specialCount ? [`· 🚩 特殊事项附页 ✅（${r.specialCount} 张）`] : []),
     ];
     // 金额漂移警示（复查 P1）：regen 用采集表现值重造附件，与锁定值对不上要财务核对台账
     if (r.amountDrift) {

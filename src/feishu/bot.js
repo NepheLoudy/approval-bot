@@ -492,7 +492,7 @@ function stripCardInjection(s) {
  * 报销交付卡（锁定批次后审批群播报）：四件附件清单 + 摘要草稿 + 接取指引。
  * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 四列）。
  */
-function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, generated = {} } = {}) {
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, generated = {} } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
@@ -513,6 +513,8 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
     mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途/采购类型），交学校'),
     mark(generated.deliverySheet, '投递底单', '学校系统填报预填稿，照单录入小翼Plus'),
+    mark(generated.printDocx, '打印件 docx', '可编辑版（Word 里可调可删后打印）'),
+    mark(generated.specialSheet, '特殊事项附页', `${specialCount} 张（大额/公私属性不分明/有支付记录），单独成页`),
   ];
   if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);

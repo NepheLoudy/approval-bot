@@ -18,8 +18,12 @@
  * 状态机（曼波拍板）：拟批 → 已锁定 → 已提交 → 已到账 / 已退回。
  * 锁定后顺序不可变（打印件顺序=录入顺序=扫码顺序）；迟到票只能进下一批。
  */
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, StandardFonts } = require('pdf-lib');
+const fontkit = require('@pdf-lib/fontkit');
+const fs = require('fs');
+const sharp = require('sharp');
 const ExcelJS = require('exceljs');
+const { Document, Packer, Paragraph, TextRun, ImageRun, ExternalHyperlink } = require('docx');
 const config = require('../config');
 const client = require('../feishu/client');
 const bitableApi = require('../feishu/bitable');
@@ -85,6 +89,10 @@ function collectToItem(r, byApplyNo) {
     sellerName: String(f['销售方名称'] || ''),
     issueDateMs: Number(f['开票日期']) || 0,
     invoiceContent: String(f['开票内容'] || ''),
+    // 特殊事项触发源（2026-09-27 曼波反馈：公私属性不分明/大额票要单独排纸——
+    // 表单字段名自带触发规则，非空即命中；值为审批管理员预览链接 {link,text}）
+    payRecord: af['支付记录（大于800元或宣传材料需要）'] || null,
+    evidencePhoto: af['实物佐证照片（公私属性不分明或宣传材料需要）-副本'] || null,
   };
 }
 
@@ -219,13 +227,27 @@ async function lockBatch(batchNo, project, options = {}) {
     //    meta 带 payee/payeeAccount（复查 P1：收款方覆盖要进投递底单，否则底单恒写 .env
     //    CQ_* 默认卡，账实分离——批次记录/台账是 A 卡、钱打到 .env 默认 B 卡）
     const meta = { summary, purpose, ordinal, feeItem, purchaseType, payee, payeeAccount };
-    let pdfToken = null, bomToken = null, mlToken = null, dsToken = null;
+    let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, dsToken = null, specialPdfToken = null, specialDocxToken = null;
     try { pdfToken = await uploadBatchPdf(batchNo, pool); } catch (err) { console.error('[批次] 打印 PDF 生成失败:', err.message); }
+    try { docxToken = await uploadBatchDocx(batchNo, pool); } catch (err) { console.error('[批次] 打印件 docx 生成失败:', err.message); }
     try { bomToken = await uploadBatchBom(batchNo, pool); } catch (err) { console.error('[批次] BOM 生成失败:', err.message); }
     try { mlToken = await uploadBatchMaterialList(batchNo, pool, meta); } catch (err) { console.error('[批次] 物料清单生成失败:', err.message); }
     try { dsToken = await uploadBatchDeliverySheet(batchNo, pool, meta); } catch (err) { console.error('[批次] 投递底单生成失败:', err.message); }
+    const specials = pool.filter(isSpecialItem);
+    if (specials.length) {
+      try { specialPdfToken = await uploadBatchSpecialSheetPdf(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 PDF 生成失败:', err.message); }
+      try { specialDocxToken = await uploadBatchSpecialSheetDocx(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 docx 生成失败:', err.message); }
+    }
     const attach = {};
-    if (pdfToken) attach['打印文件'] = [{ file_token: pdfToken }];
+    if (pdfToken || docxToken) {
+      attach['打印文件'] = [
+        ...(pdfToken ? [{ file_token: pdfToken }] : []),
+        ...(docxToken ? [{ file_token: docxToken }] : []),
+      ];
+    }
+    if (specialPdfToken || specialDocxToken) {
+      attach['特殊事项附页'] = [specialPdfToken, specialDocxToken].filter(Boolean).map((t) => ({ file_token: t }));
+    }
     if (bomToken) attach['BOM表'] = [{ file_token: bomToken }];
     if (mlToken) attach['物料清单'] = [{ file_token: mlToken }];
     if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
@@ -245,7 +267,8 @@ async function lockBatch(batchNo, project, options = {}) {
 
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
-      pdfToken, bomToken, mlToken, dsToken,
+      pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken,
+      specialCount: specials.length,
       summary, purpose, ordinal, markFailed,
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       missingContent: pool.filter(i => !i.invoiceContent).length,
@@ -336,13 +359,27 @@ async function regenerateBatchFiles(batchNo) {
     ? { recorded: recordedTotal, current: regenTotal }
     : null;
 
-  let pdfToken = null, bomToken = null, mlToken = null, dsToken = null;
+  let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, dsToken = null, specialPdfToken = null, specialDocxToken = null;
   try { pdfToken = await uploadBatchPdf(batchNo, items); } catch (err) { console.error('[批次] 打印 PDF 重生成失败:', err.message); }
+  try { docxToken = await uploadBatchDocx(batchNo, items); } catch (err) { console.error('[批次] 打印件 docx 重生成失败:', err.message); }
   try { bomToken = await uploadBatchBom(batchNo, items); } catch (err) { console.error('[批次] BOM 重生成失败:', err.message); }
   try { mlToken = await uploadBatchMaterialList(batchNo, items, meta); } catch (err) { console.error('[批次] 物料清单重生成失败:', err.message); }
   try { dsToken = await uploadBatchDeliverySheet(batchNo, items, meta); } catch (err) { console.error('[批次] 投递底单重生成失败:', err.message); }
+  const specials = items.filter(isSpecialItem);
+  if (specials.length) {
+    try { specialPdfToken = await uploadBatchSpecialSheetPdf(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 PDF 重生成失败:', err.message); }
+    try { specialDocxToken = await uploadBatchSpecialSheetDocx(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 docx 重生成失败:', err.message); }
+  }
   const attach = {};
-  if (pdfToken) attach['打印文件'] = [{ file_token: pdfToken }];
+  if (pdfToken || docxToken) {
+    attach['打印文件'] = [
+      ...(pdfToken ? [{ file_token: pdfToken }] : []),
+      ...(docxToken ? [{ file_token: docxToken }] : []),
+    ];
+  }
+  if (specialPdfToken || specialDocxToken) {
+    attach['特殊事项附页'] = [specialPdfToken, specialDocxToken].filter(Boolean).map((t) => ({ file_token: t }));
+  }
   if (bomToken) attach['BOM表'] = [{ file_token: bomToken }];
   if (mlToken) attach['物料清单'] = [{ file_token: mlToken }];
   if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
@@ -357,7 +394,7 @@ async function regenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  return { batchNo, count: items.length, pdfToken, bomToken, mlToken, dsToken, amountDrift };
+  return { batchNo, count: items.length, pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken, specialCount: specials.length, amountDrift };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
@@ -669,6 +706,143 @@ async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
   return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_投递底单.xlsx`);
 }
 
+// ---------- 交付包⑥：打印件 docx 可编辑版 + 特殊事项附页（2026-09-27 曼波反馈） ----------
+
+const DOCX_CONTENT_WIDTH = 700; // px @96dpi（A4 宽 − 1in 页边距）
+
+/** 特殊事项触发：大额（≥¥BATCH_SPECIAL_AMOUNT，默认 500）/ 有支付记录 / 有实物佐证照片（公私属性不分明） */
+function isSpecialItem(item) {
+  return item.totalAmount >= config.batch.specialAmount
+    || Boolean(item.payRecord)
+    || Boolean(item.evidencePhoto);
+}
+
+function specialReasons(item) {
+  const reasons = [];
+  if (item.totalAmount >= config.batch.specialAmount) reasons.push(`大额（≥¥${config.batch.specialAmount}）`);
+  if (item.payRecord) reasons.push('有支付记录');
+  if (item.evidencePhoto) reasons.push('公私属性不分明/宣传材料（有实物佐证）');
+  return reasons;
+}
+
+/** 运行时加载系统中文字体（目标机=Windows，simhei/msyh 在位；读不到回退 ASCII 渲染） */
+async function loadCjkFont(pdfDoc) {
+  const candidates = ['C:/Windows/Fonts/simhei.ttf', 'C:/Windows/Fonts/msyh.ttf'];
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      pdfDoc.registerFontkit(fontkit);
+      return await pdfDoc.embedFont(fs.readFileSync(p), { subset: true });
+    } catch (err) {
+      console.warn(`[批次] 中文字体加载失败（${p}）: ${err.message}`);
+    }
+  }
+  return null;
+}
+
+/**
+ * 特殊事项附页 PDF：每张特殊票一页 A4（触发原因 + 票面要素 + 付款记录/实物佐证链接）。
+ * 原件是审批管理员预览链接，机器人抓不到图片本体——链接版：财务有管理员权限，
+ * 浏览器点开即原件；APPROVAL_CODE 配置后可升级为实例附件下载直嵌图片。
+ */
+async function uploadBatchSpecialSheetPdf(batchNo, specials) {
+  const out = await PDFDocument.create();
+  const cjk = await loadCjkFont(out);
+  const ascii = await out.embedFont(StandardFonts.Helvetica);
+  const draw = (page, text, y, { size = 11 } = {}) => {
+    const hasCJK = /[\u4e00-\u9fff]/.test(text);
+    const font = hasCJK ? (cjk || ascii) : ascii;
+    page.drawText(hasCJK && !cjk ? text.replace(/[\u4e00-\u9fff]/g, '?') : text, { x: 50, y, size, font });
+  };
+  specials.forEach((item, i) => {
+    const page = out.addPage([A4.width, A4.height]);
+    let y = A4.height - 60;
+    draw(page, `特殊事项说明（${i + 1}/${specials.length}）· 批次 ${batchNo}`, y, { size: 16 });
+    y -= 30;
+    draw(page, `物资：${item.material || '—'}`, y); y -= 20;
+    draw(page, `申请编号：${item.applyNo || '—'}    金额：¥${item.totalAmount.toFixed(2)}    发票尾号：${item.invoiceNo.slice(-6)}`, y); y -= 20;
+    draw(page, `触发原因：${specialReasons(item).join('；') || '—'}`, y); y -= 26;
+    if (item.payRecord) {
+      draw(page, `支付记录：${item.payRecord.text || '附件'}（浏览器打开链接查看原件）`, y); y -= 16;
+      draw(page, item.payRecord.link || '', y, { size: 8 }); y -= 24;
+    }
+    if (item.evidencePhoto) {
+      draw(page, `实物佐证照片：${item.evidencePhoto.text || '附件'}（浏览器打开链接查看原件）`, y); y -= 16;
+      draw(page, item.evidencePhoto.link || '', y, { size: 8 }); y -= 24;
+    }
+    draw(page, 'Note: links require approval-admin permission in browser.', y, { size: 8 });
+  });
+  const bytes = await out.save();
+  return client.uploadMediaToBitable(Buffer.from(bytes), `报销单_${batchNo}_特殊事项附页.pdf`);
+}
+
+/** 特殊事项附页 docx（Word 原生：中文/超链接全支持，财务可编辑） */
+function specialSheetDocxChildren(batchNo, specials) {
+  const children = [new Paragraph({ children: [new TextRun({ text: `特殊事项说明 · 批次 ${batchNo}（${specials.length} 张）`, bold: true, size: 28 })] })];
+  specials.forEach((item, i) => {
+    children.push(new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: `第 ${i + 1} 张 · ${item.material || item.applyNo || item.invoiceNo}`, bold: true, size: 24 })] }));
+    const line = (text) => children.push(new Paragraph({ children: [new TextRun({ text, size: 20 })] }));
+    line(`物资：${item.material || '—'}`);
+    line(`申请编号：${item.applyNo || '—'}    金额：¥${item.totalAmount.toFixed(2)}    发票尾号：${item.invoiceNo.slice(-6)}`);
+    line(`触发原因：${specialReasons(item).join('；') || '—'}`);
+    if (item.payRecord) {
+      children.push(new Paragraph({ children: [new TextRun({ text: '支付记录：', size: 20 }), new ExternalHyperlink({ children: [new TextRun({ text: item.payRecord.text || '打开原件', style: 'Hyperlink', size: 20 })], link: item.payRecord.link })] }));
+      children.push(new Paragraph({ children: [new ExternalHyperlink({ children: [new TextRun({ text: item.payRecord.link, style: 'Hyperlink', size: 14 })], link: item.payRecord.link })] }));
+    }
+    if (item.evidencePhoto) {
+      children.push(new Paragraph({ children: [new TextRun({ text: '实物佐证照片：', size: 20 }), new ExternalHyperlink({ children: [new TextRun({ text: item.evidencePhoto.text || '打开原件', style: 'Hyperlink', size: 20 })], link: item.evidencePhoto.link })] }));
+      children.push(new Paragraph({ children: [new ExternalHyperlink({ children: [new TextRun({ text: item.evidencePhoto.link, style: 'Hyperlink', size: 14 })], link: item.evidencePhoto.link })] }));
+    }
+    children.push(new Paragraph({ children: [new TextRun({ text: '注：链接需审批管理员权限，浏览器打开查看原件图片。', size: 16, color: '888888' })] }));
+  });
+  return children;
+}
+
+async function uploadBatchSpecialSheetDocx(batchNo, specials) {
+  const doc = new Document({
+    sections: [{ properties: { page: { size: { width: 11906, height: 16838 } } }, children: specialSheetDocxChildren(batchNo, specials) }],
+  });
+  const buffer = await Packer.toBuffer(doc);
+  return client.uploadMediaToBitable(Buffer.from(buffer), `报销单_${batchNo}_特殊事项附页.docx`);
+}
+
+/** 打印件 docx 可编辑版：发票图片按录入序纵向排入 Word（财务可调可删后直接打印；PDF 原件票标注见 PDF 版） */
+async function uploadBatchDocx(batchNo, items) {
+  const children = [new Paragraph({ children: [new TextRun({ text: `报销打印件 · 批次 ${batchNo}（${items.length} 张，按录入顺序）`, bold: true, size: 26 })] })];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    children.push(new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: `${i + 1}. ${item.material || item.applyNo || '未标注'} ｜ ¥${item.totalAmount.toFixed(2)} ｜ 发票尾号 ${item.invoiceNo.slice(-6)}`, bold: true })] }));
+    if (!item.fileTokens.length) {
+      children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件缺失（采集时未成功转存），请财务手工补印', color: 'FF0000' })] }));
+      continue;
+    }
+    for (const token of item.fileTokens) {
+      const buf = await downloadMediaSafe(token);
+      if (!buf) {
+        children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件下载失败，请财务手工补', color: 'FF0000' })] }));
+        continue;
+      }
+      if (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF') {
+        children.push(new Paragraph({ children: [new TextRun({ text: '（该票为 PDF 原件，版面见打印件 PDF 版）', color: '888888' })] }));
+        continue;
+      }
+      let width = 1000, height = 700;
+      try {
+        const meta = await sharp(buf).metadata();
+        if (meta.width && meta.height) { width = meta.width; height = meta.height; }
+      } catch (err) { /* 尺寸读不到按默认比例 */ }
+      const w = DOCX_CONTENT_WIDTH;
+      const h = Math.max(1, Math.round(w * height / width));
+      children.push(new Paragraph({ children: [new ImageRun({ data: buf, transformation: { width: w, height: h } })] }));
+    }
+  }
+  const doc = new Document({
+    sections: [{ properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 720, bottom: 720, left: 720, right: 720 } } }, children }],
+  });
+  const buffer = await Packer.toBuffer(doc);
+  return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_打印件.docx`);
+}
+
 // ---------- 批次接取（审批群回复「接取」领取） ----------
 
 /**
@@ -857,10 +1031,14 @@ module.exports = {
   getPoolWithRecords,
   previewBatch,
   lockBatch,
+  isSpecialItem,
   markBatch,
   regenerateBatchFiles,
   batchOverview,
   uploadBatchPdf,
+  uploadBatchDocx,
+  uploadBatchSpecialSheetPdf,
+  uploadBatchSpecialSheetDocx,
   uploadBatchBom,
   uploadBatchMaterialList,
   uploadBatchDeliverySheet,
