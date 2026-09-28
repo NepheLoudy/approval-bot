@@ -159,6 +159,9 @@ module.exports = {
     specialAmount: parseFloat(process.env.BATCH_SPECIAL_AMOUNT) || 500,
     // 批次推进超期线（周报「批次推进超期」段）：已锁定/已提交状态超此天数未到账 → 周报提醒（2026-09-29）
     staleDays: parseInt(process.env.BATCH_STALE_DAYS, 10) || 7,
+    // 交付确认后询问打印情况的延时（默认 12h）与扫描节奏（每小时扫，发送过晚间静默闸）
+    printAskDelayHours: parseInt(process.env.BATCH_PRINT_ASK_DELAY_HOURS, 10) || 12,
+    printAskSchedule: process.env.BATCH_PRINT_ASK_SCHEDULE || '0 15 * * * *',
     // 报销人（投递单抬头；工号/电话缺失底单标黄）
     reporterStuId: process.env.CQ_REPORTER_STU_ID || '',
     reporterName: process.env.CQ_REPORTER_NAME || '',

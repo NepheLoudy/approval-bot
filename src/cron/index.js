@@ -5,6 +5,8 @@ const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
 const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeService');
 const formAlertService = require('../services/formAlertService');
+const batchService = require('../services/batchService');
+const bot = require('../feishu/bot');
 
 // ============================================================
 // 定时任务（共四个）：
@@ -18,9 +20,13 @@ const formAlertService = require('../services/formAlertService');
 //      私聊后群播「今日已催」卡（今日明细 + 需财务关注 + 未私聊汇总，与周报分开），
 //      当天无私聊催交且无当日状态变化则不发卡)
 //   4. 制单金额线兜底    FORM_ALERT_SCHEDULE               (0 35 10 * * *, 每天10:35,
-//      项目「已开发票且未制单」金额满 FORM_ALERT_AMOUNT（默认500）→ 群播报提醒锁定批次；
+//      项目「已开发票且未制单」金额满 FORM_ALERT_AMOUNT（默认500）→ 自动锁定批次发详情卡
+//      （两阶段：confirm 后才生成交付件+二维码卡）；
 //      主触发是发票采集落库后的即时检查（formAlertService.triggerAfterCollect），
-//      本任务兜底防存量满额后无新票、永不触发的漏网；同一项目 24h 冷却不重播）
+//      本任务兜底防存量满额后无新票、永不触发的漏网；同一项目 24h 冷却不重触发）
+//   5. 打印情况询问      BATCH_PRINT_ASK_SCHEDULE          (0 15 * * * *, 每小时15分,
+//      交付确认超 BATCH_PRINT_ASK_DELAY_HOURS（默认12h）未回复打印完成的批次 → 群发询问卡
+//      引导 /approval-batch printed <批次号>；每批只自动问一次；发送过晚间静默闸顺延）
 //
 // 注：DAILY_INVOICE_REMINDER_SCHEDULE / INVOICE_URGE_SCHEDULE 代码默认留空 = 不启用，
 //     上文括号内时刻为现网 .env 配置值（非代码默认）；周播报代码默认周一 18:00
@@ -106,12 +112,49 @@ const quietTaskRunners = {
   daily_reminder: () => withRetry('daily_reminder', () => runReminder()),
   invoice_urge: () => withRetry('invoice_urge', () => runInvoiceUrge()).then((r) => announceTodayUrged(r)),
   form_alert: () => withRetry('form_alert', () => formAlertService.runDailyCheck()),
+  print_ask: () => withRetry('print_ask', () => askPendingPrintConfirm()),
 };
+
+/**
+ * 打印情况询问（2026-09-29 曼波定两阶段流程收尾）：确认交付超 12h 未回复打印完成的
+ * 批次，群发询问卡引导 /approval-batch printed <批次号>；每批只自动问一次（markPrintAsked
+ * 防重）；整体过晚间静默闸（凌晨确认的批次顺延到静默结束后询问）。
+ */
+async function askPendingPrintConfirm() {
+  const targets = await batchService.getPrintAskTargets();
+  if (!targets.length) return { asked: 0 };
+  let asked = 0;
+  for (const t of targets) {
+    try {
+      await bot.sendMessage({
+        config: { wide_screen_mode: true },
+        header: { template: 'yellow', title: { tag: 'plain_text', content: `🖨️ 打印情况确认 · ${t.batchNo}` } },
+        elements: [{
+          tag: 'markdown',
+          content: [
+            `批次 **${t.batchNo}**（${t.project}：${t.count} 张 ¥${Number(t.amount).toFixed(2)}）已确认交付并过了 ${config.batch.printAskDelayHours} 小时，打印完成了吗？`,
+            ``,
+            `✅ 已打印 → 回复 **/approval-batch printed ${t.batchNo}**（更新打印标记）`,
+            `⏳ 还没打 → 忽略本卡尽快处理；交付件在报销批次表附件（扫码清单按序扫码录入）`,
+          ].join('\n'),
+        }],
+      });
+      await batchService.markPrintAsked(t.recordId);
+      asked++;
+      console.log(`[打印询问] 已询问批次 ${t.batchNo}（接取人: ${t.taker || '未接取'}）`);
+    } catch (err) {
+      // 单批询问失败不写防重标（下轮重问），也不阻断其余批次
+      console.error(`[打印询问] 批次 ${t.batchNo} 询问失败（下轮重试）:`, err.message);
+    }
+  }
+  return { asked, total: targets.length };
+}
 
 let weeklyTask = null;
 let reminderTask = null;
 let invoiceUrgeTask = null;
 let formAlertTask = null;
+let printAskTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -173,13 +216,21 @@ function startCronJobs() {
     console.log('[定时任务] 未配置 FORM_ALERT_SCHEDULE，制单金额线每日兜底未启用（采集落库后的即时检查仍生效）');
   }
 
+  // 5. 打印情况询问（确认交付 12h 未回复 → 群发询问卡，每批一次，过静默闸）
+  printAskTask = cron.schedule(config.batch.printAskSchedule, () => {
+    quietHours.gateTask('print_ask', quietHours.shanghaiStamp(), quietTaskRunners.print_ask, '打印情况询问').catch(err => {
+      console.error('[定时任务] 打印情况询问失败:', err.message);
+    });
+  }, { timezone: 'Asia/Shanghai' });
+  console.log(`[定时任务] 打印情况询问已启动: ${config.batch.printAskSchedule} (Asia/Shanghai, 确认后 ${config.batch.printAskDelayHours}h 未打印则询问) -> 下次 ${getNextExecutionTime(config.batch.printAskSchedule)}`);
+
   // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
   for (const [name, fn] of Object.entries(quietTaskRunners)) {
     quietHours.registerTask(name, fn);
   }
   quietHours.initQuietHoursFlush();
 
-  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask };
+  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask, printAskTask };
 }
 
 function stopCronJobs() {
@@ -187,6 +238,7 @@ function stopCronJobs() {
   if (reminderTask) { reminderTask.stop(); reminderTask = null; }
   if (invoiceUrgeTask) { invoiceUrgeTask.stop(); invoiceUrgeTask = null; }
   if (formAlertTask) { formAlertTask.stop(); formAlertTask = null; }
+  if (printAskTask) { printAskTask.stop(); printAskTask = null; }
 }
 
 /**
@@ -232,18 +284,21 @@ function getCronStatus() {
       dailyReminder: !!reminderTask,
       invoiceUrge: !!invoiceUrgeTask,
       formAlert: !!formAlertTask,
+      printAsk: !!printAskTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
       dailyReminder: config.reminder.schedule || '(未启用)',
       invoiceUrge: config.invoiceUrge.schedule || '(未启用)',
       formAlert: config.formAlert.schedule || '(未启用，采集后即时检查仍生效)',
+      printAsk: config.batch.printAskSchedule,
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
       dailyReminder: reminderTask ? getNextExecutionTime(config.reminder.schedule) : null,
       invoiceUrge: invoiceUrgeTask ? getNextExecutionTime(config.invoiceUrge.schedule) : null,
       formAlert: formAlertTask ? getNextExecutionTime(config.formAlert.schedule) : null,
+      printAsk: printAskTask ? getNextExecutionTime(config.batch.printAskSchedule) : null,
     },
     quietHours: quietHours.getStatus(),
   };

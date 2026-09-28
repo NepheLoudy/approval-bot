@@ -82,8 +82,8 @@ async function handleHelpCommand() {
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
     '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
-    '                    submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
-    '                    （submit/paid/reject 自动同步《报销台账》电子表格；ledger paid/reject 用于同步失败后人工补救）',
+    '                    submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
+    '                    （confirm=确认自动批次明细后才生成交付件与二维码；printed=标记打印完成；submit/paid/reject 自动同步《报销台账》）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
@@ -420,7 +420,36 @@ async function handleBatchCommand(args = [], ctx = {}) {
     return lines.join('\n');
   }
 
-  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]';
+  if (sub === 'confirm') {
+    // 交付确认（2026-09-29 两阶段流程）：确认自动批次详情 → 生成交付件 + 群发二维码卡
+    if (!args[1]) return '❌ 用法：/approval-batch confirm <批次号>（确认报销单明细后才开始生成交付件与二维码）';
+    const { operator } = await resolveOperator(ctx);
+    const r = await batchService.confirmDelivery(args[1], operator);
+    if (!r.generated) return `ℹ️ 批次 ${r.batchNo} 的交付件此前已生成，无需重复确认（直接从报销批次表附件取用即可）`;
+    const g = r.regen;
+    try {
+      await sendDeliveryCard({
+        batchNo: r.batchNo, project: g.project || '', count: g.count, amount: g.amount || 0,
+        summary: g.summary || '', warningCount: 0, missingContent: 0,
+        generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, deliverySheet: !!g.dsToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
+        specialCount: g.specialCount, scanItems: g.scanItems || [],
+      });
+    } catch (err) {
+      console.error('[对话服务] 确认后交付卡发送失败:', err.message);
+      return `✅ 批次 ${r.batchNo} 已确认，交付件已生成并落「报销批次」表附件（${g.count} 张）；⚠️ 交付卡发送失败（${err.message.slice(0, 40)}），请直接从表格附件取用`;
+    }
+    return `✅ 批次 ${r.batchNo} 已确认并开始工作：交付件（发票排版/物料清单/扫码清单）已生成，二维码卡已发群。录入完成后：/approval-batch submit ${r.batchNo}；打印完成后：/approval-batch printed ${r.batchNo}`;
+  }
+
+  if (sub === 'printed') {
+    // 打印完成标记（2026-09-29 两阶段流程收尾）：12h 询问后财务回复确认
+    if (!args[1]) return '❌ 用法：/approval-batch printed <批次号>（标记该批发票已打印完成）';
+    const { operator } = await resolveOperator(ctx);
+    await batchService.markPrinted(args[1], operator);
+    return `🖨️ 批次 ${args[1]} 已标记打印完成（${operator || '财务确认'}）。接下来照常 submit/paid 走资金流转。`;
+  }
+
+  return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]';
 }
 
 /**

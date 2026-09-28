@@ -1,11 +1,13 @@
 /**
- * 制单金额线自动锁定（2026-09-29 曼波定）。
+ * 制单金额线自动锁定（2026-09-29 曼波定，两阶段流程）。
  *
  * 模式（曼波拍板）：财务同学不再主动干活，听机器人发布报销单——
  * 项目维度「已开发票且未制单」（=票池，已剔除「是否打印=是」的人工线票）金额合计
- * 满 config.formAlert.amount（默认 500）→ **自动锁定批次**：生成三件套+扫码清单、
- * 回写审批表「报销单」栏与「是否打印=是」标记、审批群发交付卡（卡内按序内嵌全部
- * 有效发票二维码，财务对屏幕按序扫码录入即可）。财务只接取配合，不再自己拟批。
+ * 满 config.formAlert.amount（默认 500）→ **自动锁定批次**：生成报销单号（自动-<项目>-<MMDD>）、
+ * 回写审批表「报销单」栏与「是否打印=是」标记、群里发**详情卡等待确认**（第一阶段，本服务）；
+ * 财务回复 /approval-batch confirm 后才生成交付件（发票排版文件/物料清单/扫码清单）并下发
+ * 二维码卡开始工作（第二阶段，chatService.confirmDelivery）；确认后再过 12h（避开夜间）
+ * 机器人询问打印情况，财务回复 printed 完成打印标记更新（cron printAsk 流程）。
  *
  * 触发点：
  *   - 事件驱动：发票采集落库成功后即时检查（invoiceCollectService 钩子，setImmediate 不阻塞回执）；
@@ -118,24 +120,22 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
     }
     try {
       const batchNo = await nextAutoBatchNo(s.project);
-      const r = await batchService.lockBatch(batchNo, s.project, { operator: '机器人自动锁定' });
-      // 交付卡（卡内按序内嵌全部有效二维码——2026-09-29 曼波定：通知财务时直接带码）。
-      // 发送失败不回滚锁定（批次已建、票已出池），只记日志，财务可从批次表取交付包
+      // 两阶段流程（2026-09-29 曼波定）：锁定只生成报销单号+打标+发详情卡（deferDelivery
+      // 不生成交付件），财务群里 confirm 后才由 chatService.confirmDelivery 生成交付件+发二维码卡
+      const r = await batchService.lockBatch(batchNo, s.project, { operator: '机器人自动锁定', deferDelivery: true });
+      // 详情卡（无二维码，带 confirm/reject 指引）。发送失败不回滚锁定（批次已建、票已出池），
+      // 财务仍可从报销批次表看到该批并用 confirm 指令继续
       try {
-        await bot.sendDeliveryCard({
+        await bot.sendMessage(bot.buildAutoLockNoticeCard({
           batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
           summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
-          auto: true,
-          generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
-          specialCount: r.specialCount,
-          scanItems: r.scanItems || [],
-        });
+        }));
       } catch (err) {
-        console.error(`[制单金额线] 自动批次 ${r.batchNo} 交付卡发送失败（批次已锁定，不影响使用）:`, err.message);
+        console.error(`[制单金额线] 自动批次 ${r.batchNo} 详情卡发送失败（批次已锁定，可 confirm 继续）:`, err.message);
       }
       state.projects[s.project] = { batchNo: r.batchNo, amount: s.amount, count: s.count, ts: now };
       result.locked.push({ project: s.project, batchNo: r.batchNo, count: r.count, amount: r.amount });
-      console.log(`[制单金额线] 自动锁定（${trigger}）：${s.project} 满额 ¥${s.amount.toFixed(2)} → 批次 ${r.batchNo}（${r.count} 张）；冷却内跳过 ${result.skipped} 项`);
+      console.log(`[制单金额线] 自动锁定（${trigger}）：${s.project} 满额 ¥${s.amount.toFixed(2)} → 批次 ${r.batchNo}（${r.count} 张，待确认）；冷却内跳过 ${result.skipped} 项`);
     } catch (err) {
       console.error(`[制单金额线] 自动锁定失败（${s.project}，冷却后自动重试）:`, err.message);
       result.failed.push({ project: s.project, error: err.message });

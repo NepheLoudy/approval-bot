@@ -569,6 +569,42 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
 }
 
 /**
+ * 自动锁定详情卡（两阶段流程第一阶段，2026-09-29 曼波定）：金额线满额自动锁定后
+ * 先只发批次详情等财务确认——确认（/approval-batch confirm）后才生成交付件并发二维码卡。
+ * 无二维码、无附件清单（都还没生成）；要退有 reject 出口。
+ */
+function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0 } = {}) {
+  const safeProject = stripCardInjection(project);
+  const safeSummary = stripCardInjection(summary);
+  const tableUrl = config.bitable.appToken
+    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
+    : '';
+  const lines = [
+    `**项目** ${safeProject || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
+    '',
+    `**摘要**（录入学校系统时直接复制）：`,
+    `${safeSummary || '（未生成）'}`,
+    '',
+    `📋 该项目「已开发票且未制单」金额已达红线，报销单号已生成、发票已自动归批打标。`,
+    `**请核对以上明细**：`,
+    `✅ 无误 → 回复 **/approval-batch confirm ${batchNo}**（确认后立即生成 发票排版文件/物料清单/扫码清单，并下发二维码开始录入）`,
+    `❌ 有误 → **/approval-batch reject ${batchNo}**（整批退回票池，重新核对后触发下一批）`,
+    tableUrl ? `📄 批次明细：[报销批次表](${tableUrl})` : '',
+  ].filter(Boolean);
+  if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票（采集表「校验状态」非通过），确认前建议先核对`);
+  if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」，录入时需现场补填`);
+
+  return {
+    config: { wide_screen_mode: true },
+    elements: [{ tag: 'markdown', content: lines.join('\n') }],
+    header: {
+      template: 'orange',
+      title: { content: `🖨️ 报销单已生成，待确认 · ${batchNo}`, tag: 'plain_text' },
+    },
+  };
+}
+
+/**
  * 交付卡发送（人工 lock 与金额线自动锁定共用，2026-09-29）：
  * scanItems 里的有效票二维码逐张上传 IM 换 image_key 后内嵌卡片（严格按录入序）。
  * 单码上传失败降级（卡内不放、扫码清单附件兜底）；整体失败向上抛（调用方决定降级文案）。
@@ -664,6 +700,7 @@ module.exports = {
   buildTodayUrgedCard,
   buildDeliveryCard,
   sendDeliveryCard,
+  buildAutoLockNoticeCard,
   stripCardInjection, // 交付卡注入消毒（桩测试断言用）
   buildInvoiceUrgePost,
   previewInvoiceUrgePost,
