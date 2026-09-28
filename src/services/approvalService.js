@@ -187,6 +187,7 @@ async function getOverdueInvoices() {
 
 /**
  * 财务催办三分支（仅针对「已通过」的活跃流程记录）：
+ *   0. 是否打印=是 → 财务已自行制单打印（或已进机器人批次），整条跳过不催
  *   1. 未交发票：发票/补交发票均为空   → 催发票
  *   2. 未制单：  已有发票但报销单为空   → 做报销单
  *               （报销单=无需报销 视为已制单/无需处理）
@@ -209,6 +210,9 @@ async function getFinanceFollowUp() {
 
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     const hasInvoice = hasInvoiceSubmitted(f) || (applyNo && collectedNos.has(applyNo));
+    // 是否打印=是（2026-09-29 曼波定）：财务已自行制单打印（或已进机器人批次）——
+    // 该记录整条跳过（不催制单也不催转账），机器人不与财务手工线重合
+    if (fieldText(f['是否打印']) === '是') continue;
     // 报销单为单选：null=未制单；「无需报销」=无需制单，视为已完成该环节
     const form = f['报销单'];
     const hasForm = form !== null && form !== undefined && form !== '';

@@ -127,6 +127,20 @@ module.exports = {
     amountToleranceFixed: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_FIXED) || 10,
   },
 
+  // 制单金额线播报（2026-09-29 曼波定：财务同学也在自行制报销单，与机器人制单去重——
+  // 审批表「是否打印=是」的票视为已进打印/制单流程，不进票池、不催制单、不计入本统计）。
+  // 项目维度「已开发票且未制单」金额合计满阈值 → 审批群播报提醒锁定批次；
+  // 触发点：发票采集落库后即时检查 + schedule 每日兜底（防存量满额无人触发）；
+  // 同一项目冷却时间内不重复播报（发票催办同款防刷屏口径）
+  formAlert: {
+    // 留空 = 不启用每日兜底（采集落库后的即时检查不受此开关影响）
+    schedule: process.env.FORM_ALERT_SCHEDULE || '0 35 10 * * *',
+    amount: parseFloat(process.env.FORM_ALERT_AMOUNT) || 500,
+    cooldownHours: parseInt(process.env.FORM_ALERT_COOLDOWN_HOURS, 10) || 24,
+    // 状态文件：部署目标的 SFTP 部署会清空项目目录，生产应配到项目目录之外
+    stateFile: process.env.FORM_ALERT_STATE_FILE || '',
+  },
+
   // 报销交付包（锁定批次后自动生成：校格式物料清单 + 投递底单，照学校「智能财务服务大厅
   // 投递单」与财务《物料清单》模板口径；敏感信息（卡号）只存 .env，不进 git）
   batch: {

@@ -29,6 +29,7 @@ const client = require('../feishu/client');
 const bitableApi = require('../feishu/bitable');
 const collectStore = require('./collectStore');
 const { numToCnyUpper, numToCnOrdinal } = require('../utils/cny');
+const { fieldText } = require('../utils/fields');
 
 const A4 = { width: 595.28, height: 841.89 };
 const SLOT = { width: A4.width - 40, height: (A4.height - 60) / 2 }; // 半页票位（上下两票，边距 20/30）
@@ -93,10 +94,14 @@ function collectToItem(r, byApplyNo) {
     // 表单字段名自带触发规则，非空即命中；值为审批管理员预览链接 {link,text}）
     payRecord: af['支付记录（大于800元或宣传材料需要）'] || null,
     evidencePhoto: af['实物佐证照片（公私属性不分明或宣传材料需要）-副本'] || null,
+    // 人机制单去重标记（2026-09-29 曼波定）：审批表「是否打印=是」= 财务自行制单打印，
+    // 该票不进票池/不参与机器人制单；regen 侧不受此过滤（已归批票照常重生成附件）
+    printed: fieldText(af['是否打印']) === '是',
   };
 }
 
-/** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序） */
+/** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序）。
+ *  「是否打印=是」的票不进池（财务已自行制单，与机器人制单能力去重） */
 async function getPoolWithRecords() {
   const collects = await collectStore.listCollect();
   const byApplyNo = await approvalFieldsByApplyNo();
@@ -104,6 +109,7 @@ async function getPoolWithRecords() {
   return collects
     .filter(r => !r.fields['批次'])
     .map((r) => collectToItem(r, byApplyNo))
+    .filter(p => !p.printed)
     .sort((a, b) => a.collectedAt - b.collectedAt);
 }
 
@@ -199,7 +205,9 @@ async function lockBatch(batchNo, project, options = {}) {
       }
     }
 
-    // 3. 审批表「报销单」栏回写（单选，值不存在飞书自动建选项；有申请编号的才回写）
+    // 3. 审批表「报销单」栏 + 「是否打印」回写（单选，值不存在飞书自动建选项；有申请编号的才回写）。
+    //    是否打印=是（2026-09-29 曼波定）：锁定即视为已进打印流程（票已归批不会再进池，附件
+    //    生成失败可 regen 自愈，先标无重复制单风险），同时让财务在表格里看到这批已由机器人处理
     let approvalWritten = 0;
     if (pool.some(p => p.applyNo)) {
       const approvals = await bitableApi.listAllRecords(config.bitable.approvalTableId);
@@ -214,7 +222,7 @@ async function lockBatch(batchNo, project, options = {}) {
         const hit = recordByApplyNo.get(p.applyNo);
         if (!hit) continue;
         try {
-          await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': batchNo });
+          await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': batchNo, '是否打印': '是' });
           approvalWritten++;
         } catch (err) {
           console.error(`[批次] 回写审批表报销单栏失败（${p.applyNo}）:`, err.message);

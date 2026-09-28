@@ -4,9 +4,10 @@ const quietHours = require('../utils/quietHours');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
 const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeService');
+const formAlertService = require('../services/formAlertService');
 
 // ============================================================
-// 定时任务（共三个，播报只走定时，无事件即时播报）：
+// 定时任务（共四个）：
 //   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 //   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,
@@ -16,6 +17,10 @@ const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeS
 //      同一笔满 maxTimes 次，默认 5 →升级周报），
 //      私聊后群播「今日已催」卡（今日明细 + 需财务关注 + 未私聊汇总，与周报分开），
 //      当天无私聊催交且无当日状态变化则不发卡)
+//   4. 制单金额线兜底    FORM_ALERT_SCHEDULE               (0 35 10 * * *, 每天10:35,
+//      项目「已开发票且未制单」金额满 FORM_ALERT_AMOUNT（默认500）→ 群播报提醒锁定批次；
+//      主触发是发票采集落库后的即时检查（formAlertService.triggerAfterCollect），
+//      本任务兜底防存量满额后无新票、永不触发的漏网；同一项目 24h 冷却不重播）
 //
 // 注：DAILY_INVOICE_REMINDER_SCHEDULE / INVOICE_URGE_SCHEDULE 代码默认留空 = 不启用，
 //     上文括号内时刻为现网 .env 配置值（非代码默认）；周播报代码默认周一 18:00
@@ -100,11 +105,13 @@ const quietTaskRunners = {
   weekly_broadcast: () => withRetry('weekly_broadcast', () => runWeeklyBroadcast()),
   daily_reminder: () => withRetry('daily_reminder', () => runReminder()),
   invoice_urge: () => withRetry('invoice_urge', () => runInvoiceUrge()).then((r) => announceTodayUrged(r)),
+  form_alert: () => withRetry('form_alert', () => formAlertService.runDailyCheck()),
 };
 
 let weeklyTask = null;
 let reminderTask = null;
 let invoiceUrgeTask = null;
+let formAlertTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -151,19 +158,35 @@ function startCronJobs() {
     console.log('[定时任务] 未配置 INVOICE_URGE_SCHEDULE，催发票私聊未启用');
   }
 
+  // 4. 制单金额线兜底（主触发是采集落库后的即时检查，本任务防存量满额漏网）
+  formAlertService.init(config.formAlert.stateFile);
+  if (config.formAlert.schedule) {
+    formAlertTask = cron.schedule(config.formAlert.schedule, () => {
+      console.log('[定时任务] 触发制单金额线兜底检查');
+      quietHours.gateTask('form_alert', quietHours.shanghaiStamp(), quietTaskRunners.form_alert, '制单金额线兜底').catch(err => {
+        console.error('[定时任务] 制单金额线兜底失败:', err.message);
+      });
+    }, { timezone: 'Asia/Shanghai' });
+
+    console.log(`[定时任务] 制单金额线兜底已启动: ${config.formAlert.schedule} (Asia/Shanghai, 满额 ¥${config.formAlert.amount} / 冷却 ${config.formAlert.cooldownHours}h) -> 下次 ${getNextExecutionTime(config.formAlert.schedule)}`);
+  } else {
+    console.log('[定时任务] 未配置 FORM_ALERT_SCHEDULE，制单金额线每日兜底未启用（采集落库后的即时检查仍生效）');
+  }
+
   // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
   for (const [name, fn] of Object.entries(quietTaskRunners)) {
     quietHours.registerTask(name, fn);
   }
   quietHours.initQuietHoursFlush();
 
-  return { weeklyTask, reminderTask, invoiceUrgeTask };
+  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask };
 }
 
 function stopCronJobs() {
   if (weeklyTask) { weeklyTask.stop(); weeklyTask = null; }
   if (reminderTask) { reminderTask.stop(); reminderTask = null; }
   if (invoiceUrgeTask) { invoiceUrgeTask.stop(); invoiceUrgeTask = null; }
+  if (formAlertTask) { formAlertTask.stop(); formAlertTask = null; }
 }
 
 /**
@@ -208,16 +231,19 @@ function getCronStatus() {
       weeklyBroadcast: !!weeklyTask,
       dailyReminder: !!reminderTask,
       invoiceUrge: !!invoiceUrgeTask,
+      formAlert: !!formAlertTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
       dailyReminder: config.reminder.schedule || '(未启用)',
       invoiceUrge: config.invoiceUrge.schedule || '(未启用)',
+      formAlert: config.formAlert.schedule || '(未启用，采集后即时检查仍生效)',
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
       dailyReminder: reminderTask ? getNextExecutionTime(config.reminder.schedule) : null,
       invoiceUrge: invoiceUrgeTask ? getNextExecutionTime(config.invoiceUrge.schedule) : null,
+      formAlert: formAlertTask ? getNextExecutionTime(config.formAlert.schedule) : null,
     },
     quietHours: quietHours.getStatus(),
   };
@@ -237,12 +263,18 @@ async function runInvoiceUrgeOnce(options = {}) {
   return withRetry('invoice_urge', () => runInvoiceUrge(options));
 }
 
+/** 手动触发一次制单金额线检查（测试/管理接口用；dryRun=true 只查不发） */
+async function runFormAlertOnce(options = {}) {
+  return withRetry('form_alert', () => formAlertService.runDailyCheck(options));
+}
+
 module.exports = {
   startCronJobs,
   stopCronJobs,
   runBroadcast,
   runReminder,
   runInvoiceUrgeOnce,
+  runFormAlertOnce,
   getCronStatus,
   getBroadcastHistory,
 };

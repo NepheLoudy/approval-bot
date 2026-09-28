@@ -16,6 +16,9 @@ const approvalService = require('./approvalService');
 const collectStore = require('./collectStore');
 const ocrService = require('./ocrService');
 const invoiceParser = require('./invoiceParser');
+// 延迟使用（函数体内 require）：formAlertService 顶部连着 batchService 重依赖
+// （pdf-lib/exceljs/sharp），采集链路不常驻加载
+let formAlertService = null;
 
 // 查重/回写附件的按记录串行锁（附件字段整列覆盖，并发读改写会互相丢图）
 const recordLocks = new Map();
@@ -249,6 +252,18 @@ async function collectFromMessage(payload) {
   if (verifyStatus === '抬头存疑') lines.push(`· ⚠️ ${buyerCheck.note}`);
   lines.push('· 请核对上面的金额与归类，有误请尽快联系财务调整');
   await bot.sendTextToUser(openId, lines.join('\n')).catch(() => {});
+
+  // 10. 制单金额线即时检查（2026-09-29 曼波定）：新票落库可能让所属项目「已开发票且
+  //     未制单」金额满阈值 → 群播报提醒锁定批次。异步不阻塞回执；过晚间静默闸，
+  //     失败仅日志（formAlertService 内部已兜，不向采集链路抛）
+  setImmediate(() => {
+    try {
+      formAlertService = formAlertService || require('./formAlertService');
+      formAlertService.triggerAfterCollect();
+    } catch (err) {
+      console.error('[发票采集] 制单金额线即时检查调度失败:', err.message);
+    }
+  });
 
   return {
     ok: true,
