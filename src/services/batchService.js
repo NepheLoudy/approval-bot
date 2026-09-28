@@ -30,6 +30,7 @@ const client = require('../feishu/client');
 const bitableApi = require('../feishu/bitable');
 const collectStore = require('./collectStore');
 const invoiceParser = require('./invoiceParser');
+const approvalService = require('./approvalService');
 const { numToCnyUpper, numToCnOrdinal } = require('../utils/cny');
 const { fieldText } = require('../utils/fields');
 
@@ -134,6 +135,42 @@ async function previewBatch() {
     }))
     .sort((a, b) => b.count - a.count);
   return { poolSize: pool.length, suggestions };
+}
+
+/**
+ * 「已开发票且未制单」票池外补充（2026-09-29 曼波定口径：审批表「发票」与「补交发票」列
+ * 地位等效——前者是审批提交时附的票，后者是机器人采集/人工补的票）。
+ * 票池=采集表，只覆盖走了补交通道的票；审批时直接附票、没走采集的记录只出现在「发票」列，
+ * 票池看不到 → 金额线只看票池会漏算这类项目。本函数按审批表补算：
+ *   已通过 + 活跃流程 + 两列任一有票（hasInvoiceSubmitted 等效口径）+ 报销单空
+ *   + 是否打印≠是 + 申请编号不在采集台账（已有采集票的归票池计，不重复）。
+ * 金额用审批「总金额」近似（无采集票面价税合计；backfill 回溯进采集表后自动切回精确口径）。
+ * @returns {Map<project, {count, amount}>}
+ */
+async function getUnbatchedInvoicedByProject() {
+  const all = await approvalService.getAllApprovals();
+  const collectedNos = await approvalService.getCollectedApplyNoSet();
+  const byProject = new Map();
+  for (const record of all) {
+    const f = record.fields || {};
+    if (f['申请状态'] !== config.approvalStatus.APPROVED) continue;
+    if (!approvalService.isActiveProcess(f)) continue;
+    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+    if (applyNo && collectedNos.has(applyNo)) continue; // 已有采集票 → 票池已计
+    if (!approvalService.hasInvoiceSubmitted(f)) continue; // 两列都无票 → 不属于「已开发票」
+    const form = f['报销单'];
+    if (form !== null && form !== undefined && form !== '') continue; // 已制单
+    if (fieldText(f['是否打印']) === '是') continue; // 财务人工线
+    const raw = f['总金额'];
+    const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
+    if (!(amount > 0)) continue;
+    const project = f['项目'] ? (f['项目'].name || String(f['项目'])) : '未归类';
+    const agg = byProject.get(project) || { count: 0, amount: 0 };
+    agg.count++;
+    agg.amount = Math.round((agg.amount + amount) * 100) / 100;
+    byProject.set(project, agg);
+  }
+  return byProject;
 }
 
 // ---------- 批次锁定 ----------
@@ -1272,6 +1309,7 @@ async function getStaleBatches(days = config.batch.staleDays) {
 module.exports = {
   getPoolWithRecords,
   previewBatch,
+  getUnbatchedInvoicedByProject,
   lockBatch,
   isSpecialItem,
   markBatch,

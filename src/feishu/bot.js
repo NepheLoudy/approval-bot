@@ -573,7 +573,7 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
  * 先只发批次详情等财务确认——确认（/approval-batch confirm）后才生成交付件并发二维码卡。
  * 无二维码、无附件清单（都还没生成）；要退有 reject 出口。
  */
-function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0 } = {}) {
+function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0 } = {}) {
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
   const tableUrl = config.bitable.appToken
@@ -593,6 +593,9 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
   ].filter(Boolean);
   if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票（采集表「校验状态」非通过），确认前建议先核对`);
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」，录入时需现场补填`);
+  // 发票/补交发票两列等效口径（2026-09-29 曼波定）：审批提交时直接附票的记录不在采集表，
+  // 金额已计入本批触发，但无票面图片进不了打印批——如实提示，回溯采集后自动并入后续批次
+  if (unCollected > 0) lines.push(`⚠️ 该项目另有 ${unCollected} 笔申请的发票在审批表「发票」列（审批时直接提交，未走采集、无票面图片），未计入本批；如需并入请先发票回溯采集，下一批自动打包`);
 
   return {
     config: { wide_screen_mode: true },

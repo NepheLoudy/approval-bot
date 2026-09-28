@@ -96,8 +96,21 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   const threshold = config.formAlert.amount;
   const cooldownMs = config.formAlert.cooldownHours * 60 * 60 * 1000;
 
+  // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
+  // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
   const { suggestions } = await batchService.previewBatch();
-  const hits = suggestions.filter(s => s.amount >= threshold);
+  const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0 }]));
+  const supplement = await batchService.getUnbatchedInvoicedByProject();
+  for (const [project, agg] of supplement) {
+    const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0 };
+    cur.count += agg.count;
+    cur.amount = Math.round((cur.amount + agg.amount) * 100) / 100;
+    cur.unCollected = agg.count; // 该项目未采集笔数（锁定后详情卡提示，打印批只能打包采集票）
+    byProject.set(project, cur);
+  }
+  const all = [...byProject.values()].map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
+
+  const hits = all.filter(s => s.amount >= threshold);
   const now = Date.now();
   const due = hits.filter(s => {
     const st = state.projects[s.project];
@@ -105,7 +118,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   });
 
   const result = {
-    checked: suggestions.length,
+    checked: all.length,
     threshold,
     locked: [],
     failed: [],
@@ -129,6 +142,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
         await bot.sendMessage(bot.buildAutoLockNoticeCard({
           batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
           summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
+          unCollected: s.unCollected || 0,
         }));
       } catch (err) {
         console.error(`[制单金额线] 自动批次 ${r.batchNo} 详情卡发送失败（批次已锁定，可 confirm 继续）:`, err.message);
