@@ -169,7 +169,9 @@ function fmtMoney(fields) {
 }
 
 function truncate(text, max = 40) {
-  const s = fieldText(text).trim();
+  // 统一消毒（对抗审查 P2-2：队员可控的物资名称/项目名等直拼三张财务卡 markdown，
+  // 可伪造 @/链接——truncate 是全部卡片文本的必经口，在这里剥一次全覆盖）
+  const s = stripCardInjection(fieldText(text).trim());
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
@@ -528,8 +530,11 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     '',
   ];
 
-  // 按序内嵌全部有效二维码：每行两票，序号+金额+尾号+码，严格按录入顺序
-  const validQrs = (scanItems || []).filter(q => q.valid && q.imageKey);
+  // 按序内嵌全部有效二维码：每行两票，序号+金额+尾号+码，严格按录入顺序。
+  // 上限保护（对抗审查：超大批次内嵌图过多会撑爆卡片/上传拖慢交付卡）——
+  // 超出部分由「扫码清单」附件兜底（序号连续不跳号）
+  const QR_CARD_LIMIT = 24;
+  const validQrs = (scanItems || []).filter(q => q.valid && q.imageKey).slice(0, QR_CARD_LIMIT);
   if (validQrs.length) {
     lines.push(`**🎯 发票二维码（${validQrs.length} 张，严格按录入顺序扫码录入）**：`, '');
     for (let i = 0; i < validQrs.length; i += 2) {
@@ -537,7 +542,7 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     }
   }
   const invalidCount = (scanItems || []).length - validQrs.length;
-  if (invalidCount > 0) lines.push(``, `⚠️ ${invalidCount} 张票二维码不可重建（见「扫码清单」附件红字标注），录入时请扫其纸质原件`);
+  if (invalidCount > 0) lines.push(``, `⚠️ 另有 ${invalidCount} 张票未在本卡展示（二维码不可重建或超出卡片容量），序号连续不跳号，见「扫码清单」附件（红字标注的请扫其纸质原件）`);
 
   lines.push(
     `**📎 交付文件**（「报销批次」表该行附件下载）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,

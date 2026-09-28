@@ -69,8 +69,7 @@ function save() {
 /** 自动批次号：自动-<项目>-<MMDD>，同日同项目冲突追加 -2/-3（批次号唯一约束） */
 async function nextAutoBatchNo(project) {
   const collectStore = require('./collectStore');
-  const d = new Date();
-  const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const mmdd = require('../utils/time').shanghaiMmdd(); // 上海时区（对抗审查 P2-3）
   for (let n = 1; n < 50; n++) {
     const candidate = `自动-${project}-${mmdd}${n > 1 ? `-${n}` : ''}`;
     if (!(await collectStore.findBatchByName(candidate))) return candidate;

@@ -101,10 +101,9 @@ async function writeRange(sheetId, range, values) {
   return r;
 }
 
-/** 'YYYY/M/D'（与实表人工填写风格一致） */
+/** 'YYYY/M/D'（与实表人工填写风格一致；上海时区——对抗审查 P2-3） */
 function fmtDate(ms) {
-  const d = new Date(ms || Date.now());
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  return require('../utils/time').shanghaiYmdSlash(ms);
 }
 
 /**

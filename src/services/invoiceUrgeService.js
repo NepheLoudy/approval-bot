@@ -106,9 +106,7 @@ function shanghaiDayIndex(ms) {
 }
 
 function fmtDay(ms) {
-  const d = new Date(ms);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getMonth() + 1}-${d.getDate()}`;
+  return require('../utils/time').shanghaiMdDash(ms); // 上海时区（对抗审查 P2-3）
 }
 
 /**
@@ -428,10 +426,15 @@ async function runInvoiceUrgeInner(options = {}) {
       // 记录会话与批次，供回复轮询使用；发送响应自带 chat_id / create_time（毫秒）
       const recordIds = records.map((r) => r.record_id);
       const prevUser = urgeStateStore.getUser(openId) || {};
+      // lastReadTime 竞态（对抗审查 P2-1）：此前取 max(res.create_time, prev) 会把水位
+      // 抬到晚于「本轮 poll 已确认读到的位置」——poll 拉取后、私聊发送前到达的用户回复
+      //（延期/回票）createTime 落在新水位之下，被 `> since` 永久滤掉。已有水位（poll
+      // 已推进过）就不再抬升；首轮（无水位）才用机器人消息时间起步（会话刚建立无历史）
+      const prevRead = Number(prevUser.lastReadTime) || 0;
       urgeStateStore.updateUser(openId, {
         chatId: res?.chat_id || prevUser.chatId || '',
         lastUrgeRecordIds: recordIds,
-        lastReadTime: Math.max(Number(res?.create_time) || 0, prevUser.lastReadTime || 0),
+        lastReadTime: prevRead > 0 ? prevRead : (Number(res?.create_time) || 0),
         name, // 提交人姓名（复查 P2-7：此前从未写入，台账/回票链路的提交人姓名恒空）
       });
 

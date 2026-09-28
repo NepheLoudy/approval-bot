@@ -126,15 +126,18 @@ async function askPendingPrintConfirm() {
   let asked = 0;
   for (const t of targets) {
     try {
+      // 批次号/项目名来自表格（人工可写），先消毒再进卡片 markdown（对抗审查 P2-2 同款）
+      const safeNo = bot.stripCardInjection(t.batchNo);
+      const safeProject = bot.stripCardInjection(t.project);
       await bot.sendMessage({
         config: { wide_screen_mode: true },
-        header: { template: 'yellow', title: { tag: 'plain_text', content: `🖨️ 打印情况确认 · ${t.batchNo}` } },
+        header: { template: 'yellow', title: { tag: 'plain_text', content: `🖨️ 打印情况确认 · ${safeNo}` } },
         elements: [{
           tag: 'markdown',
           content: [
-            `批次 **${t.batchNo}**（${t.project}：${t.count} 张 ¥${Number(t.amount).toFixed(2)}）已确认交付并过了 ${config.batch.printAskDelayHours} 小时，打印完成了吗？`,
+            `批次 **${safeNo}**（${safeProject}：${t.count} 张 ¥${Number(t.amount).toFixed(2)}）已确认交付并过了 ${config.batch.printAskDelayHours} 小时，打印完成了吗？`,
             ``,
-            `✅ 已打印 → 回复 **/approval-batch printed ${t.batchNo}**（更新打印标记）`,
+            `✅ 已打印 → 回复 **/approval-batch printed ${safeNo}**（更新打印标记）`,
             `⏳ 还没打 → 忽略本卡尽快处理；交付件在报销批次表附件（扫码清单按序扫码录入）`,
           ].join('\n'),
         }],

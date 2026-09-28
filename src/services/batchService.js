@@ -1107,6 +1107,12 @@ async function markBatch(batchNo, status, operator = '') {
       }
     }
     const now = Date.now();
+    // 流程闸（对抗审查：两阶段流程的 submit 逃逸口）——自动批次未 confirm 时交付件
+    // 未生成（打印件/扫码清单都不存在），直接 submit 会造成「已提交但无打印件」的断链。
+    // 人工 lock 立即生成交付件必过此闸；confirm 幂等可补
+    if (status === collectStore.BATCH_STATUS.SUBMITTED && !(Array.isArray(batch.fields['打印文件']) && batch.fields['打印文件'].length)) {
+      throw new Error(`批次 ${batchNo} 尚未生成交付件（自动批次需先 /approval-batch confirm ${batchNo} 确认明细），不能标记已提交`);
+    }
     const fields = { '状态': status };
     if (status === collectStore.BATCH_STATUS.SUBMITTED) fields['提交时间'] = now;
     if (status === collectStore.BATCH_STATUS.PAID) fields['到账时间'] = now;
@@ -1203,22 +1209,26 @@ async function markBatch(batchNo, status, operator = '') {
  * @returns {{batchNo, generated: boolean, regen?: object}}
  */
 async function confirmDelivery(batchNo, operator = '') {
-  const batch = await collectStore.findBatchByName(batchNo);
-  if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  const status = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
-  if (status !== collectStore.BATCH_STATUS.LOCKED) throw new Error(`批次 ${batchNo} 状态【${status}】不可确认交付（仅【已锁定】可确认）`);
-  const hasDelivery = Array.isArray(batch.fields['打印文件']) && batch.fields['打印文件'].length > 0;
+  // 批次号锁（对抗审查：confirm 与 regen 指令/另一次 confirm 并发会双重生成附件+发两张
+  // 二维码卡；与 lockBatch/markBatch 同 key 族互斥）
+  return withLock(`batch_${batchNo}`, async () => {
+    const batch = await collectStore.findBatchByName(batchNo);
+    if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    const status = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
+    if (status !== collectStore.BATCH_STATUS.LOCKED) throw new Error(`批次 ${batchNo} 状态【${status}】不可确认交付（仅【已锁定】可确认）`);
+    const hasDelivery = Array.isArray(batch.fields['打印文件']) && batch.fields['打印文件'].length > 0;
 
-  let regen = null;
-  if (!hasDelivery) {
-    regen = await regenerateBatchFiles(batchNo); // 复用 regen：全套附件含扫码清单落表
-  }
-  await collectStore.updateBatch(batch.record_id, {
-    '交付确认人': operator || '财务确认',
-    '交付确认时间': Date.now(),
+    let regen = null;
+    if (!hasDelivery) {
+      regen = await regenerateBatchFiles(batchNo); // 复用 regen：全套附件含扫码清单落表
+    }
+    await collectStore.updateBatch(batch.record_id, {
+      '交付确认人': operator || '财务确认',
+      '交付确认时间': Date.now(),
+    });
+    console.log(`[批次] ${batchNo} 交付已确认（${operator || '财务确认'}）${regen ? `，交付件已生成（${regen.count} 张）` : '，交付件此前已生成'}`);
+    return { batchNo, generated: !!regen, regen };
   });
-  console.log(`[批次] ${batchNo} 交付已确认（${operator || '财务确认'}）${regen ? `，交付件已生成（${regen.count} 张）` : '，交付件此前已生成'}`);
-  return { batchNo, generated: !!regen, regen };
 }
 
 /** 打印完成标记（12h 询问流程的收尾）：财务回复后更新打印确认留痕 */

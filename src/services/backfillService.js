@@ -76,7 +76,22 @@ async function listInstanceIds(approvalCode, sinceMs) {
  * @param {object} [options] {limit, sinceDays} 单次最多处理实例数（默认 20）、回溯天数（默认 200）
  * @returns {object} {scanned, collected, skipped, failed, errors[]}
  */
+let backfillRunning = false; // 重入闸（对抗审查 P3-4）：并发触发会重复跑 OCR/下载白烧配额
 async function backfillCollect(options = {}) {
+  if (backfillRunning) {
+    const err = new Error('上一轮回溯仍在执行中，请稍后再试（防并发重复跑 OCR/下载）');
+    err.statusCode = 429;
+    throw err;
+  }
+  backfillRunning = true;
+  try {
+    return await doBackfillCollect(options);
+  } finally {
+    backfillRunning = false;
+  }
+}
+
+async function doBackfillCollect(options = {}) {
   const approvalCode = process.env.APPROVAL_CODE || '';
   if (!approvalCode) {
     const err = new Error('未配置 APPROVAL_CODE（审批定义 code）：请在飞书审批管理后台打开「采购申请/发票提交」流程详情获取，配入 .env 后重试');
@@ -164,10 +179,17 @@ async function backfillCollect(options = {}) {
         continue;
       }
       const fields = parsed.fields;
-      const hit = window.find((r) => {
+      // 唯一匹配断言（对抗审查 P1-1：原 find 永取第一条，同人同额多申请会静默错配，
+      // 票随批次错报销）——命中数 ≠1 一律转人工，与 ledger ambiguous 口径对齐
+      const hits = window.filter((r) => {
         const amt = typeof r.fields['总金额'] === 'number' ? r.fields['总金额'] : parseFloat(r.fields['总金额']);
         return amt !== null && !Number.isNaN(amt) && Math.abs(amt - fields.totalAmount) < 0.01;
       });
+      if (hits.length > 1) {
+        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内命中 ${hits.length} 条同额申请（ambiguous），转人工`);
+        continue;
+      }
+      const hit = hits[0];
       if (!hit) {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内无金额精确匹配的记录，转人工`);
         continue;

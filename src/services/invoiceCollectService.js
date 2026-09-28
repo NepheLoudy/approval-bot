@@ -257,7 +257,9 @@ async function collectFromMessage(payload) {
   // 9b. 抬头警报（2026-09-29 曼波定：只认重庆大学抬头，其他一律拦截+群警报）——
   // 除打回提交人外审批群同步响一声，财务不用从队员转述里才知道有人交错票
   if (verifyStatus === '抬头存疑' && f.buyerName) {
-    const esc = (s) => String(s).replace(/[\r\n]/g, ' ').slice(0, 60);
+    // 抬头/姓名来自外部（发票票面 OCR/队员），卡片 markdown 统一走 stripCardInjection
+    //（对抗审查 P2-2：esc 只滤换行不滤 md 语法，钓鱼链接可穿透）
+    const esc = (s) => bot.stripCardInjection(String(s)).replace(/[\r\n]/g, ' ').slice(0, 60);
     try {
       await bot.sendMessage({
         config: { wide_screen_mode: true },

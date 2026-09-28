@@ -13,7 +13,10 @@ const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronSta
 
 const app = express();
 
-app.use(cors());
+// CORS 收敛到同源（对抗审查 P1-2 缓解）：合法消费方全部是服务端 fetch（hub 同机转发、
+// 运维台 SSH curl），不受 CORS 约束；浏览器跨源请求（恶意网页打 localhost 资金指令/
+// 读审批 PII）在预检与响应读取两层全部拒绝。曾全开放 cors()，Firefox 旧内核不拦 PNA。
+app.use(cors({ origin: false }));
 // 网关会转发完整事件体（表格事件含 before/after 全量字段，可能超 100kb）+ OCR 转录
 // 端点直传 base64 图片（5MB 图 base64 后约 6.7MB），放宽 body 限制到 10mb
 app.use(express.json({ limit: '10mb' }));

@@ -108,7 +108,11 @@ function saveBacklog(items) {
     if (items.length === 0) {
       if (fs.existsSync(BACKLOG_FILE)) fs.unlinkSync(BACKLOG_FILE);
     } else {
-      fs.writeFileSync(BACKLOG_FILE, JSON.stringify({ items }, null, 2));
+      // 原子写（对抗审查 P3-2：直写中断会留半截 JSON，重启后整批积压丢失）——
+      // 与 urgeStateStore/formAlertService 同款 tmp+rename
+      const tmpFile = `${BACKLOG_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify({ items }, null, 2));
+      fs.renameSync(tmpFile, BACKLOG_FILE);
     }
   } catch (err) {
     console.warn('[晚间静默] 写积压文件失败（仅影响重启恢复）:', err.message);
