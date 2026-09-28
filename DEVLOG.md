@@ -437,3 +437,49 @@
 - **特殊事项附页**：触发=价税合计 ≥ `BATCH_SPECIAL_AMOUNT`（默认 500）或审批记录「支付记录（大于800元或宣传材料需要）」/「实物佐证照片（公私属性不分明或宣传材料需要）-副本」非空（表单字段名自带触发规则，实据查询生产表确认值形态=审批管理员预览链接）。每张特殊票单独一页 A4：物资/编号/金额/发票尾号 + 触发原因 + 付款记录/实物佐证预览链接（财务有管理员权限，浏览器点开即原件；PDF 侧运行时加载系统 simhei 中文字体——pdf-lib 中文渲染解锁，docx 侧 Word 原生全支持）。pdf+docx 落批次表新列「特殊事项附页」（已对生产 base 迁移）。
 - 测试：五套全绿；stub-test-delivery 新增约 10 组断言（触发判定三分支/附页 docx 解包含两条预览链接/pdf 文本层含链接/打印件 docx 图片嵌入+PDF 原件标注）。
 - 部署：与待上线批一并 push；APPROVAL_CODE 配置后可升级「预览链接→实例附件图片直嵌」（设计已留位）。
+
+## v56 · 2026-09-29 · `0a4528b` · feat
+
+**人机制单去重「是否打印」列 + 制单金额线播报（曼波定：财务同学也在自行制报销单）**
+
+- 审批表单选列「是否打印」（是/否，存量 140 条回填「否」，`scripts/add-print-flag-field.js` 幂等）；lock 批次自动回写批次内票对应记录=是；「是」的票不进票池/不催办（整条跳过不催制单不催转账）。
+- formAlertService 初版：项目「已开发票且未制单」满 500 播报提醒（采集落库后即时+每日 10:35 兜底，24h 冷却）；夜间过静默闸。
+- 部署状态：已上线（首次部署遇 NAS 不可达，git push 成功后改日 SFTP 直传完成）。
+
+## v57 · 2026-09-29 · `1393dc2` · feat
+
+**金额线升级自动锁定 + 扫码清单交付件 + 队员侧闭环（曼波定：财务听机器人发布报销单）**
+
+- 自动锁定：满 500 → 自动 lockBatch（批次号 `自动-<项目>-<MMDD>`）+群发交付卡；冷却防锁失败循环。
+- 扫码清单 docx：批次内全部票二维码按录入序重生成+序号+金额+尾号；采集表新列「二维码内容」存 QR 原文（parseQrPayload 保留 rawPayload），原文重生成 100% 可扫→回退解码原图→无效票红字不跳号；交付卡卡内按序内嵌全部有效二维码（`client.uploadImageToIM` 走 im/v1/images 换 image_key，bot.sendDeliveryCard 人工/自动共用）。
+- reject/paid 自动私聊发起人（notifyApplicantsOfBatch 按申请聚合，幂等重入不重发，失败不阻断状态机）；周报新增「批次推进超期」段（getStaleBatches，BATCH_STALE_DAYS 默认 7）。
+- 抬头校验只认重庆大学：打回提交人之外加审批群红色警报卡。
+- 线上建列：采集表「二维码内容」/批次表「扫码清单」。
+- 部署状态：已上线。
+
+## v58 · 2026-09-29 · `1625a62` · feat
+
+**自动批次改两阶段流程（曼波定：详情确认→确认生成交付件→12h 询问打印）**
+
+- lockBatch 加 deferDelivery：自动锁定只建批+打标+群发详情卡（buildAutoLockNoticeCard 带 confirm/reject 指引），不生成交付件。
+- confirmDelivery：`/approval-batch confirm` 后 regenerate 全套附件+发二维码卡开始工作；留痕 交付确认人/时间；幂等。markPrinted+`printed` 子指令：打印完成标记。
+- cron 新任务 printAsk（每小时 15 分）：确认超 BATCH_PRINT_ASK_DELAY_HOURS（默认 12h）未回复打印→群发询问卡，每批只自动问一次，过静默闸顺延。批次表新增 5 列（交付确认人/时间、打印确认人/时间、打印询问时间，线上已建）。
+- 部署状态：已上线；首部署暴露 `qrcode` 在 devDependencies 致 NAS `--omit=dev` 缺包崩溃（pm2 重启 61 次），`ca0bb13` 移入 dependencies 修复——**教训：新增运行时依赖必须落在 dependencies**。
+
+## v59 · 2026-09-29 · `bda62d9` · fix
+
+**第三轮对抗审查修复批（子代理扫边缘模块+主会话攻新功能接缝，10 修 5 记）**
+
+- **P1**：①backfill 唯一匹配落实代码（find→filter，命中>1 转人工——同人同额多申请不再静默错配）；②指令通道零鉴权缓解 CORS 收敛 origin:false（完整修复 v61 与 hub v122 同批）。
+- **P2**：催发票 lastReadTime 竞态（发送后不越过 poll 水位，回复不再永久丢失）；卡片注入统一消毒（truncate 必经口+抬头警报卡+打印询问卡过 stripCardInjection）；时区统一 UTC+8（新增 utils/time，台账日期/播报短日期/批次号 MMDD 三处收敛）。
+- **接缝**：submit 流程闸（自动批次未 confirm 禁止标记已提交）；confirmDelivery 包批次锁（防并发双 regen 双卡）；交付卡二维码上限 24 张（超出扫码清单附件兜底）。
+- P3：quietHours 积压原子写；backfill 重入闸（429）。
+- 已知限制记录：待归类采集票与「发票」列同票理论双算（低概率提前触发）；「二维码内容」列人工可改（信任边界）；confirm/printed 无白名单（与「接取」同口径）。
+- 测试：五套全绿。部署状态：已上线（CORS 收敛实测：预检响应无 ACAO 头）。
+
+## v60 · 2026-09-29 · 随本提交落地 · fix
+
+**指令通道鉴权完整闭环（P1-2 第二半，hub v122 同批）**
+
+- `/api/chat/command` 挂 `requireApiToken`（此前零鉴权信任 body 自报 senderId，本机进程/浏览器 CSRF 可伪造资金状态写台账/触发私聊）；调用方唯一=hub（含裸词「接取」），hub 侧 `handleApprovalCommand` 同批补 X-API-Token 头（hub v122 先部署），链路无断窗。运维台只 GET 只读端点不受影响；auth.js「用户可达链路不挂鉴权」历史口径废止注释更新。
+- 验证：目标机本机 curl 无 token 403 / 带 token 200。

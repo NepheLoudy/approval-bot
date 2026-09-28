@@ -218,8 +218,10 @@ app.post('/api/invoice/backfill', requireApiToken, async (req, res) => {
 // 共用飞书应用的长连接事件是随机分发的，指令消息可能不会到达本服务。
 // 爆米花机（project-management-robot）可在 chatService 中把 /approval-*
 // 指令转发到这里：POST http://localhost:3002/api/chat/command {command, args}
+//（需 X-API-Token 头——2026-09-29 对抗审查 P1-2：本端点是资金指令通道，
+//  曾零鉴权信任 body 自报 senderId；hub 同批补头发先上，见 auth.js 注释）
 
-app.post('/api/chat/command', async (req, res) => {
+app.post('/api/chat/command', requireApiToken, async (req, res) => {
   try {
     const { command, args } = req.body;
 

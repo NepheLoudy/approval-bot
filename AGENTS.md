@@ -10,7 +10,7 @@
 
 与其它机器人/服务的交互契约（改接口前先对顶层文档）：
 - 五个机器人**共用同一个飞书应用**；长连接只属于 feishu-gateway，本项目事件一律 `FEISHU_USE_LONG_CONNECTION=false`，由网关转发到本项目的 `POST /api/feishu/event`；
-- 指令交互契约：`POST /api/chat/command`，入参 `{command, args}`，回 `{reply}`（回复由调用方——网关或 hub——代发）；
+- 指令交互契约：`POST /api/chat/command`，入参 `{command, args}`，回 `{reply}`，**需 `X-API-Token` 头**（2026-09-29 对抗审查 P1-2 起挂 requireApiToken；hub 转发同批带头，旧文档「用户可达链路不挂鉴权」口径已废）；
 - 群播报走群自定义机器人 webhook，对话回复走飞书 IM API；
 - 部署一律项目内 `npm run push "说明"`（规则见 qianli-deploy skill 与顶层 AGENTS.md），NAS 凭证在 .env 的 NAS_*；
 - 通用坑：@识别要兼容 mentioned_type='bot'；多维表格字段值先过 fieldText 类工具再拼字符串；express.json 需放宽到 10mb（OCR base64 直传，v46）。
