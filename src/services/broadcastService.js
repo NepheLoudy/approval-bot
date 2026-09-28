@@ -38,6 +38,15 @@ async function runWeeklyBroadcast(options = {}) {
     console.warn('[周播报] 报销台账摘要跳过:', err.message);
   }
 
+  // 批次推进超期（2026-09-29 曼波定）：锁定后超 staleDays 天未到账的批次，财务照单跟进；
+  // 查询失败降级跳过不炸周报
+  let overdueBatches = [];
+  try {
+    overdueBatches = await batchService.getStaleBatches();
+  } catch (err) {
+    console.warn('[周播报] 批次推进超期段跳过:', err.message);
+  }
+
   const card = buildWeeklyFinanceCard(followUp, stats, {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
@@ -45,6 +54,7 @@ async function runWeeklyBroadcast(options = {}) {
     // 未交发票行的私聊状态徽标（无法提交/已延期/已催N次）
     urgeStates: urgeStateStore.init(config.invoiceUrge.stateFile).allRecords(),
     ledger,
+    overdueBatches,
   });
 
   if (options.dryRun) {

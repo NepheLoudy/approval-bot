@@ -288,6 +288,20 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     elements.push({ tag: 'markdown', content: ledgerLines.join('\n') });
   }
 
+  // 5. 批次推进超期（2026-09-29 曼波定）：锁定后超 staleDays 天未到账，财务照单跟进
+  if (Array.isArray(options.overdueBatches) && options.overdueBatches.length) {
+    const ob = options.overdueBatches;
+    const obLines = [`**⏳ 批次推进超期**（锁定超 ${config.batch.staleDays} 天未到账，共 ${ob.length} 批）`];
+    for (const b of ob.slice(0, 8)) {
+      const safeNo = stripCardInjection(b.batchNo);
+      const safeProj = stripCardInjection(b.project);
+      obLines.push(`- ${safeNo}（${safeProj}）：${b.count} 张 ¥${Number(b.amount).toFixed(2)}【${b.status}】锁定于 ${new Date(b.lockedAt).toLocaleDateString('zh-CN')}${b.taker ? ` 接取:${stripCardInjection(b.taker)}` : ''}`);
+    }
+    if (ob.length > 8) obLines.push(`- …另有 ${ob.length - 8} 批超期（详见报销批次表）`);
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: obLines.join('\n') });
+  }
+
   // 底部：本周统计（仅本周结果，不放全量数据）+ 按项目粗分类
   elements.push({ tag: 'hr' });
   const statLines = [
@@ -490,9 +504,11 @@ function stripCardInjection(s) {
 
 /**
  * 报销交付卡（锁定批次后审批群播报）：四件附件清单 + 摘要草稿 + 接取指引。
- * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 四列）。
+ * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 等列）。
+ * 2026-09-29 曼波定：卡内直接按序内嵌全部有效发票二维码（imageKey 由 sendDeliveryCard
+ * 预先上传换得），财务对屏幕按序号扫码即可完成录入；自动触发场景头部/文案切换。
  */
-function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, generated = {} } = {}) {
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, auto = false, scanItems = [], generated = {} } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
@@ -503,19 +519,36 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
   const safeSummary = stripCardInjection(summary);
 
   const lines = [
-    `**项目** ${safeProject || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
+    auto
+      ? `🤖 本批次由制单金额线**自动触发**生成（项目未制单发票满额），请接取后按序完成录入与打印`
+      : `**项目** ${safeProject || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
     '',
     `**摘要**（录入学校系统时直接复制）：`,
     `${safeSummary || '（未生成）'}`,
     '',
+  ];
+
+  // 按序内嵌全部有效二维码：每行两票，序号+金额+尾号+码，严格按录入顺序
+  const validQrs = (scanItems || []).filter(q => q.valid && q.imageKey);
+  if (validQrs.length) {
+    lines.push(`**🎯 发票二维码（${validQrs.length} 张，严格按录入顺序扫码录入）**：`, '');
+    for (let i = 0; i < validQrs.length; i += 2) {
+      lines.push(validQrs.slice(i, i + 2).map(q => `**#${q.seq}** ${q.amountText} 尾号${q.tail} ![二维码 #140px #140px](${q.imageKey})`).join('　'));
+    }
+  }
+  const invalidCount = (scanItems || []).length - validQrs.length;
+  if (invalidCount > 0) lines.push(``, `⚠️ ${invalidCount} 张票二维码不可重建（见「扫码清单」附件红字标注），录入时请扫其纸质原件`);
+
+  lines.push(
     `**📎 交付文件**（「报销批次」表该行附件下载）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,
     mark(generated.pdf, '打印文件', '按录入顺序一页两票，照序扫描'),
+    mark(generated.scanSheet, '扫码清单', '按序二维码 docx（屏幕/打印皆可扫），照单依次扫码'),
     mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
     mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途/采购类型），交学校'),
     mark(generated.deliverySheet, '投递底单', '学校系统填报预填稿，照单录入小翼Plus'),
     mark(generated.printDocx, '打印件 docx', '可编辑版（Word 里可调可删后打印）'),
     mark(generated.specialSheet, '特殊事项附页', `${specialCount} 张（大额/公私属性不分明/有支付记录），单独成页`),
-  ];
+  );
   if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);
 
@@ -530,9 +563,28 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     elements: [{ tag: 'markdown', content: lines.join('\n') }],
     header: {
       template: 'orange',
-      title: { content: `📦 报销交付包 · ${batchNo}`, tag: 'plain_text' },
+      title: { content: `${auto ? '🤖 报销单已自动生成' : '📦 报销交付包'} · ${batchNo}`, tag: 'plain_text' },
     },
   };
+}
+
+/**
+ * 交付卡发送（人工 lock 与金额线自动锁定共用，2026-09-29）：
+ * scanItems 里的有效票二维码逐张上传 IM 换 image_key 后内嵌卡片（严格按录入序）。
+ * 单码上传失败降级（卡内不放、扫码清单附件兜底）；整体失败向上抛（调用方决定降级文案）。
+ */
+async function sendDeliveryCard(cardData) {
+  const qrImages = [];
+  for (const q of cardData.scanItems || []) {
+    if (!q.valid || !q.png) continue;
+    try {
+      const imageKey = await client.uploadImageToIM(q.png);
+      qrImages.push({ ...q, imageKey });
+    } catch (err) {
+      console.warn(`[交付卡] 二维码 #${q.seq} 上传失败（${err.message}），该码降级为扫码清单附件扫码`);
+    }
+  }
+  return sendMessage(buildDeliveryCard({ ...cardData, scanItems: qrImages }));
 }
 
 /**
@@ -611,6 +663,7 @@ module.exports = {
   buildUrgeCard,
   buildTodayUrgedCard,
   buildDeliveryCard,
+  sendDeliveryCard,
   stripCardInjection, // 交付卡注入消毒（桩测试断言用）
   buildInvoiceUrgePost,
   previewInvoiceUrgePost,

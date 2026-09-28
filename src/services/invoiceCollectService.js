@@ -210,6 +210,7 @@ async function collectFromMessage(payload) {
       ...(match && match.amount !== null ? { '金额差': amountDiff } : {}),
       '识别通道': result.source === 'qrcode+ocr' ? 'qrcode+ocr' : result.source,
       '校验状态': verifyStatus,
+      ...(f.qrPayload ? { '二维码内容': f.qrPayload } : {}),
       ...(notes.length ? { '备注': notes.join('；') } : {}),
       ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
       '采集时间': Date.now(),
@@ -252,6 +253,29 @@ async function collectFromMessage(payload) {
   if (verifyStatus === '抬头存疑') lines.push(`· ⚠️ ${buyerCheck.note}`);
   lines.push('· 请核对上面的金额与归类，有误请尽快联系财务调整');
   await bot.sendTextToUser(openId, lines.join('\n')).catch(() => {});
+
+  // 9b. 抬头警报（2026-09-29 曼波定：只认重庆大学抬头，其他一律拦截+群警报）——
+  // 除打回提交人外审批群同步响一声，财务不用从队员转述里才知道有人交错票
+  if (verifyStatus === '抬头存疑' && f.buyerName) {
+    const esc = (s) => String(s).replace(/[\r\n]/g, ' ').slice(0, 60);
+    try {
+      await bot.sendMessage({
+        config: { wide_screen_mode: true },
+        header: { template: 'red', title: { tag: 'plain_text', content: '🚨 非重大抬头发票已拦截' } },
+        elements: [{
+          tag: 'markdown',
+          content: [
+            `· 提交人：${esc(resolvedName || openId)}`,
+            `· 发票：尾号 ${esc(String(f.invoiceNo).slice(-6))} ¥${f.totalAmount.toFixed(2)}（${esc(result.invoiceType || '发票')}）`,
+            `· 识别抬头：${esc(f.buyerName)}`,
+            `· 已打回提交人核实换票；如属特殊情况请财务在采集表人工登记`,
+          ].join('\n'),
+        }],
+      });
+    } catch (err) {
+      console.error('[发票采集] 抬头警报群播失败:', err.message);
+    }
+  }
 
   // 10. 制单金额线即时检查（2026-09-29 曼波定）：新票落库可能让所属项目「已开发票且
   //     未制单」金额满阈值 → 群播报提醒锁定批次。异步不阻塞回执；过晚间静默闸，

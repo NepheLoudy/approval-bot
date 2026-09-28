@@ -31,6 +31,7 @@ const COLLECT_FIELDS = [
   { field_name: '识别通道', type: FIELD_TYPES.SINGLE_SELECT, property: { options: [{ name: 'pdfText' }, { name: 'qrcode' }, { name: 'qrcode+ocr' }, { name: 'ocr' }] } },
   { field_name: '校验状态', type: FIELD_TYPES.SINGLE_SELECT, property: { options: [{ name: '通过' }, { name: '金额不符' }, { name: '抬头存疑' }, { name: '待人工' }] } },
   { field_name: '批次', type: FIELD_TYPES.TEXT }, // = 审批表「报销单」批次号，锁定时回填
+  { field_name: '二维码内容', type: FIELD_TYPES.TEXT }, // 发票二维码原始串（qrcode 通道解码原文），扫码清单重生成二维码用（2026-09-29）
   { field_name: '发票图片', type: 17 }, // 附件：发票原件（下载重传的 file_token）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
   { field_name: '采集时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
@@ -61,6 +62,7 @@ const BATCH_FIELDS = [
   { field_name: '物料清单', type: 17 }, // 附件：校格式物料清单 xlsx（交付包④）
   { field_name: '投递底单', type: 17 }, // 附件：学校系统填报预填稿 xlsx（交付包⑤）
   { field_name: '特殊事项附页', type: 17 }, // 附件：大额/公私属性不分明票的付款记录+实物佐证单独排纸（pdf+docx，2026-09-27）
+  { field_name: '扫码清单', type: 17 }, // 附件：按录入序重生成的发票二维码 docx（序号+金额+尾号），财务按序扫码录入（2026-09-29）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
 ];
 

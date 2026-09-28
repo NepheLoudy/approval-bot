@@ -6,6 +6,8 @@ const assert = require('assert/strict');
 const http = require('http');
 
 process.env.API_TOKEN = process.env.API_TOKEN || 'test-token-collect';
+// 测试禁用制单金额线钩子（防 stub 采集触发写真实积压/状态文件——2026-09-29）
+process.env.FORM_ALERT_DISABLED = '1';
 
 const config = require('../src/config');
 config.bitable.collectTableId = 'tblCollectTest';
@@ -25,6 +27,10 @@ const approvalService = require('../src/services/approvalService');
 const sentTexts = []; // {openId, text}
 bot.sendTextToUser = async (openId, text) => { sentTexts.push({ openId, text }); return {}; };
 bot.sendPostToUser = async () => ({ create_time: Date.now() });
+// 群播/交付卡一律桩掉（抬头警报卡、交付卡内嵌二维码上传 IM 都是真网络，测试不出去）
+const sentCards = [];
+bot.sendMessage = async (card) => { sentCards.push(card); return {}; };
+bot.sendDeliveryCard = async (cardData) => ({ sent: true, validQrs: (cardData.scanItems || []).filter(q => q.valid && q.imageKey).length });
 
 let downloadCalls = [];
 client.downloadMessageResource = async (messageId, fileKey, fileType) => {

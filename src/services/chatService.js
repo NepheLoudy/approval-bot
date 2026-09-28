@@ -2,7 +2,7 @@ const config = require('../config');
 const approvalService = require('./approvalService');
 const invoiceUrgeService = require('./invoiceUrgeService');
 const contacts = require('../feishu/contacts');
-const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildDeliveryCard } = require('../feishu/bot');
+const { sendTextToChat, replyTextMessage, sendMessage, buildUrgeCard, buildDeliveryCard, sendDeliveryCard } = require('../feishu/bot');
 const { fieldText } = require('../utils/fields');
 
 // ============================================================
@@ -314,14 +314,16 @@ async function handleBatchCommand(args = [], ctx = {}) {
     if (r.markFailed && r.markFailed.length) lines.push(`· ⚠️ ${r.markFailed.length} 张打标失败（${r.markFailed.slice(0, 5).join('、')}${r.markFailed.length > 5 ? '…' : ''}，已记入批次备注），请对漏标票人工补「批次/报销单」栏`);
     if (r.warningCount) lines.push(`· ⚠️ 含 ${r.warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
     if (r.missingContent) lines.push(`· ⚠️ ${r.missingContent} 张缺「开票内容」（底单已标黄），录入时现场补填`);
-    // 交付卡（人工锁定触发的直接回路，即时发群；失败不阻断锁定）
+    // 交付卡（人工锁定触发的直接回路，即时发群；卡内按序内嵌全部有效发票二维码——
+    // 2026-09-29 曼波定；失败不阻断锁定）
     try {
-      await sendMessage(buildDeliveryCard({
+      await sendDeliveryCard({
         batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
         summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
-        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken) },
+        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
         specialCount: r.specialCount,
-      }));
+        scanItems: r.scanItems || [],
+      });
     } catch (err) {
       console.error('[对话服务] 交付卡发送失败:', err.message);
       lines.push('· ⚠️ 交付卡发送失败（文件已在报销批次表附件，不影响使用）');

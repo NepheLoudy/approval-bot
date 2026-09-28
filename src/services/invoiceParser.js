@@ -144,8 +144,9 @@ function parseInvoiceText(rawText) {
  * 返回带 invoiceShape：payload 是否形似发票 QR（区分「发票 QR 要素不全」与
  * 微信码/付款码等任意二维码——后者不得触发打回，复查 P1-3）。
  */
-function parseQrPayload(payload) {
-  const parts = String(payload || '').split(',').map(s => s.trim()).filter(s => s !== '');
+function parseQrPayload(rawPayload) {
+  const payload = String(rawPayload || '');
+  const parts = payload.split(',').map(s => s.trim()).filter(s => s !== '');
   if (parts.length < 4) return { ok: false, reason: 'qr 格式段数不足', invoiceShape: false };
 
   const fields = { invoiceCode: null, invoiceNo: null, issueDate: null, totalAmount: null, checkCode: null };
@@ -160,9 +161,11 @@ function parseQrPayload(payload) {
 
   const invoiceShape = Boolean(fields.invoiceNo || fields.invoiceCode);
   const missing = ['invoiceNo', 'issueDate', 'totalAmount'].filter(k => !fields[k]);
-  if (missing.length) return { ok: false, reason: 'qr 可读但查验要素不全', missing, fields, invoiceShape };
+  if (missing.length) return { ok: false, reason: 'qr 可读但查验要素不全', missing, fields, invoiceShape, qrPayload: String(rawPayload || '') };
   const invoiceType = fields.invoiceNo.length === 20 ? '全电发票' : '增值税发票';
-  return { ok: true, fields, invoiceType, warnings: [], invoiceShape };
+  // rawPayload：二维码原始串原样保留（2026-09-29 曼波定：扫码清单要按序重新生成二维码供
+  // 财务录入扫码——重大财务系统与小翼Plus 读的就是这个串，必须原文重生成不能重排字段）
+  return { ok: true, fields, invoiceType, warnings: [], qrPayload: String(rawPayload || ''), invoiceShape };
 }
 
 /** 图片 Buffer → 二维码解码 → parseQrPayload；无码/解码失败返回 null（调用方降级 OCR） */
@@ -242,7 +245,7 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
           if (qrResult.fields[k] && !merged[k]) merged[k] = qrResult.fields[k];
         }
         const stillMissing = ['invoiceNo', 'issueDate', 'totalAmount'].filter(k => !merged[k]);
-        if (!stillMissing.length) return { ok: true, source: 'qrcode+ocr', fields: merged, missing: [], warnings: parsedInvoice.warnings, invoiceType: qrResult.invoiceType };
+        if (!stillMissing.length) return { ok: true, source: 'qrcode+ocr', fields: merged, missing: [], warnings: parsedInvoice.warnings, invoiceType: qrResult.invoiceType, qrPayload: qrResult.qrPayload || '' };
         return { ok: false, source: 'ocr', reason: '识别要素不全', fields: merged, missing: stillMissing, warnings: parsedInvoice.warnings, looksLikeInvoice: like || Boolean(qrResult.invoiceShape) };
       }
       return { ok: false, source: 'ocr', reason: '识别要素不全', fields: parsedInvoice.fields, missing: parsedInvoice.missing, warnings: parsedInvoice.warnings, looksLikeInvoice: like };

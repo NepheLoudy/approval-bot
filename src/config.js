@@ -127,13 +127,14 @@ module.exports = {
     amountToleranceFixed: parseFloat(process.env.INVOICE_AMOUNT_TOLERANCE_FIXED) || 10,
   },
 
-  // 制单金额线播报（2026-09-29 曼波定：财务同学也在自行制报销单，与机器人制单去重——
-  // 审批表「是否打印=是」的票视为已进打印/制单流程，不进票池、不催制单、不计入本统计）。
-  // 项目维度「已开发票且未制单」金额合计满阈值 → 审批群播报提醒锁定批次；
-  // 触发点：发票采集落库后即时检查 + schedule 每日兜底（防存量满额无人触发）；
-  // 同一项目冷却时间内不重复播报（发票催办同款防刷屏口径）
+  // 制单金额线自动锁定（2026-09-29 曼波定：财务同学听机器人发布报销单，不再主动拟批——
+  // 审批表「是否打印=是」的票视为已进财务打印/制单流程，不进票池、不催制单、不计入本统计）。
+  // 项目维度「已开发票且未制单」金额合计满阈值 → **自动锁定批次**：生成三件套+扫码清单、
+  // 回写「报销单」栏与「是否打印=是」、群发交付卡（卡内按序内嵌全部有效发票二维码）；
+  // 触发点：发票采集落库后即时 + schedule 每日兜底（防存量满额无人触发）；
+  // 同一项目冷却时间内不重复触发（锁定失败防循环）
   formAlert: {
-    // 留空 = 不启用每日兜底（采集落库后的即时检查不受此开关影响）
+    // 留空 = 不启用每日兜底（采集落库后的即时触发不受此开关影响）
     schedule: process.env.FORM_ALERT_SCHEDULE || '0 35 10 * * *',
     amount: parseFloat(process.env.FORM_ALERT_AMOUNT) || 500,
     cooldownHours: parseInt(process.env.FORM_ALERT_COOLDOWN_HOURS, 10) || 24,
@@ -156,6 +157,8 @@ module.exports = {
     preparer: process.env.BATCH_PREPARER_NAME || '',
     // 特殊事项附页触发金额阈值（≥此额 或 支付记录/实物佐证字段非空 → 单独排纸；2026-09-27 曼波反馈）
     specialAmount: parseFloat(process.env.BATCH_SPECIAL_AMOUNT) || 500,
+    // 批次推进超期线（周报「批次推进超期」段）：已锁定/已提交状态超此天数未到账 → 周报提醒（2026-09-29）
+    staleDays: parseInt(process.env.BATCH_STALE_DAYS, 10) || 7,
     // 报销人（投递单抬头；工号/电话缺失底单标黄）
     reporterStuId: process.env.CQ_REPORTER_STU_ID || '',
     reporterName: process.env.CQ_REPORTER_NAME || '',

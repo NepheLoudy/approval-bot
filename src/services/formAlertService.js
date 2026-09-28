@@ -1,20 +1,21 @@
 /**
- * 制单金额线播报（2026-09-29 曼波定）。
+ * 制单金额线自动锁定（2026-09-29 曼波定）。
  *
- * 背景：财务同学也在自行制报销单，机器人自动制单能力需要与财务手工线去重——
- * 审批表「是否打印=是」的票（财务人工标记 或 机器人 lock 批次后自动回写）不进票池，
- * 票池口径即「已开发票且未制单」的真源。
- *
- * 触发条件：项目维度「已开发票且未制单」的发票金额合计满 config.formAlert.amount（默认 500）
- * → 审批群播报提醒锁定批次（做报销单三件套）。
+ * 模式（曼波拍板）：财务同学不再主动干活，听机器人发布报销单——
+ * 项目维度「已开发票且未制单」（=票池，已剔除「是否打印=是」的人工线票）金额合计
+ * 满 config.formAlert.amount（默认 500）→ **自动锁定批次**：生成三件套+扫码清单、
+ * 回写审批表「报销单」栏与「是否打印=是」标记、审批群发交付卡（卡内按序内嵌全部
+ * 有效发票二维码，财务对屏幕按序扫码录入即可）。财务只接取配合，不再自己拟批。
  *
  * 触发点：
  *   - 事件驱动：发票采集落库成功后即时检查（invoiceCollectService 钩子，setImmediate 不阻塞回执）；
  *   - 每日兜底：FORM_ALERT_SCHEDULE 定时扫一遍（防存量满额后无新票落库、永不触发的漏网）。
  *
- * 防刷屏：同一项目冷却 config.formAlert.cooldownHours（默认 24h）内不重复播报——
- * 冷却而非「集合不变」判重：批次 reject 回票池后金额组可能复原成上次播报过的集合，
- * 按集合判重会静默吞掉该重播的提醒；冷却窗口后兜底扫描会再补一次。
+ * 防护：
+ *   - 冷却：同一项目 config.formAlert.cooldownHours（默认 24h）内不重复触发——锁定失败
+ *     （批次号冲突/表异常）时防循环重试；锁定成功后票出池自然不再命中；
+ *   - 互斥：批次池全局锁由 batchService.lockBatch 内部保证，多次触发并发也只锁一次成功；
+ *   - 静默闸：夜间采集落库的触发过 quietHours 积压，窗口结束补跑（以补跑时最新票池为准）。
  *
  * 状态持久化为 JSON 文件（同 urge-state 口径：pm2 重启不丢，生产路径配到项目目录之外）。
  */
@@ -29,7 +30,7 @@ const DEFAULT_FILE = path.join(__dirname, '..', '..', 'data', 'form-alert-state.
 let stateFile = DEFAULT_FILE;
 let state = { projects: {} };
 
-// 运行互斥：采集落库钩子与每日兜底并发跑时串行化，防同一项目双播
+// 运行互斥：采集落库钩子与每日兜底并发跑时串行化，防同一项目双锁
 let running = Promise.resolve();
 
 function init(file) {
@@ -45,7 +46,7 @@ function load() {
     return { projects: parsed.projects || {} };
   } catch (err) {
     if (err.code !== 'ENOENT') {
-      console.warn(`[制单播报] 状态读取失败（使用空状态继续）: ${err.message}`);
+      console.warn(`[制单金额线] 状态读取失败（使用空状态继续）: ${err.message}`);
     }
     return { projects: {} };
   }
@@ -59,33 +60,26 @@ function save() {
     fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2));
     fs.renameSync(tmpFile, stateFile);
   } catch (err) {
-    console.error(`[制单播报] 状态写入失败: ${err.message}`);
+    console.error(`[制单金额线] 状态写入失败: ${err.message}`);
   }
 }
 
-function buildAlertCard(due) {
-  const lines = due.map(s =>
-    `- ${s.project}：${s.count} 张 ¥${s.amount.toFixed(2)}${s.warningCount ? `（含 ${s.warningCount} 张待人工/金额不符 ⚠️）` : ''}`
-  );
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      template: 'turquoise',
-      title: { tag: 'plain_text', content: '🖨️ 制单金额线提醒' },
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `以下项目「已开发票且未制单」金额已满 ¥${config.formAlert.amount}（制单线），可以锁定批次做报销单：\n${lines.join('\n')}\n\n先看拟批建议：/approval-batch\n锁定：/approval-batch lock <批次号> [项目]（批次号沿用财务命名；财务已自行制单打印的票请把审批表「是否打印」标「是」，机器人不再重复制单）`,
-      },
-    ],
-  };
+/** 自动批次号：自动-<项目>-<MMDD>，同日同项目冲突追加 -2/-3（批次号唯一约束） */
+async function nextAutoBatchNo(project) {
+  const collectStore = require('./collectStore');
+  const d = new Date();
+  const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  for (let n = 1; n < 50; n++) {
+    const candidate = `自动-${project}-${mmdd}${n > 1 ? `-${n}` : ''}`;
+    if (!(await collectStore.findBatchByName(candidate))) return candidate;
+  }
+  throw new Error('自动批次号分配失败（同日同名批次过多）');
 }
 
 /**
- * 检查票池各项目未制单金额，满阈值且出冷却的项目群播报提醒。
- * @param {object} [options] { trigger 来源标记（collect|cron|manual，仅日志）, dryRun 只查不发 }
- * @returns {Promise<{checked: number, threshold: number, alerted: Array, skipped: number}>}
+ * 检查票池各项目未制单金额，满阈值且出冷却的项目自动锁定生成报销单。
+ * @param {object} [options] { trigger 来源标记（collect|cron|manual，仅日志）, dryRun 只查不锁 }
+ * @returns {Promise<{checked: number, threshold: number, locked: Array, failed: Array, skipped: number}>}
  */
 function checkAndBroadcast(options = {}) {
   const run = prev => prev.then(() => doCheck(options));
@@ -111,32 +105,55 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   const result = {
     checked: suggestions.length,
     threshold,
-    alerted: due.map(s => ({ project: s.project, count: s.count, amount: s.amount })),
+    locked: [],
+    failed: [],
     skipped: hits.length - due.length, // 命中阈值但在冷却期内的项目数
   };
-  if (!due.length || dryRun) return result;
+  if (!due.length) return result;
 
-  try {
-    await bot.sendMessage(buildAlertCard(due));
-    for (const s of due) {
-      state.projects[s.project] = { amount: s.amount, count: s.count, ts: now };
+  for (const s of due) {
+    if (dryRun) {
+      result.locked.push({ project: s.project, count: s.count, amount: s.amount, dryRun: true });
+      continue;
     }
-    save();
-    console.log(`[制单播报] 已播报（${trigger}）：${due.map(s => `${s.project} ¥${s.amount.toFixed(2)}`).join('、')}；冷却内跳过 ${result.skipped} 项`);
-  } catch (err) {
-    // 播报失败不写状态（下次触发重试），不向上抛（采集钩子/定时任务都不该被播报失败打断）
-    console.error(`[制单播报] 群播失败（${trigger}，下次触发重试）:`, err.message);
+    try {
+      const batchNo = await nextAutoBatchNo(s.project);
+      const r = await batchService.lockBatch(batchNo, s.project, { operator: '机器人自动锁定' });
+      // 交付卡（卡内按序内嵌全部有效二维码——2026-09-29 曼波定：通知财务时直接带码）。
+      // 发送失败不回滚锁定（批次已建、票已出池），只记日志，财务可从批次表取交付包
+      try {
+        await bot.sendDeliveryCard({
+          batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
+          summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
+          auto: true,
+          generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
+          specialCount: r.specialCount,
+          scanItems: r.scanItems || [],
+        });
+      } catch (err) {
+        console.error(`[制单金额线] 自动批次 ${r.batchNo} 交付卡发送失败（批次已锁定，不影响使用）:`, err.message);
+      }
+      state.projects[s.project] = { batchNo: r.batchNo, amount: s.amount, count: s.count, ts: now };
+      result.locked.push({ project: s.project, batchNo: r.batchNo, count: r.count, amount: r.amount });
+      console.log(`[制单金额线] 自动锁定（${trigger}）：${s.project} 满额 ¥${s.amount.toFixed(2)} → 批次 ${r.batchNo}（${r.count} 张）；冷却内跳过 ${result.skipped} 项`);
+    } catch (err) {
+      console.error(`[制单金额线] 自动锁定失败（${s.project}，冷却后自动重试）:`, err.message);
+      result.failed.push({ project: s.project, error: err.message });
+    }
   }
+  if (result.locked.some(l => !l.dryRun)) save();
   return result;
 }
 
 /**
- * 采集落库后的即时检查入口（invoiceCollectService 钩子调用）：
- * 过晚间静默闸（深夜交票不吵群，窗口结束随积压冲刷补跑——冲刷时重算最新金额，不怕数据过期）。
+ * 采集落库后的即时触发入口（invoiceCollectService 钩子调用）：
+ * 过晚间静默闸（深夜交票不动群，窗口结束随积压冲刷补跑——冲刷时重算最新票池，不怕数据过期）。
+ * 测试环境（FORM_ALERT_DISABLED=1）直接跳过，防 stub 测试写真实积压/状态文件。
  */
 function triggerAfterCollect() {
-  quietHours.gateTask('form_alert_live', quietHours.shanghaiStamp(), () => checkAndBroadcast({ trigger: 'collect' }), '制单金额线即时播报')
-    .catch(err => console.error('[制单播报] 采集后即时检查失败:', err.message));
+  if (process.env.FORM_ALERT_DISABLED === '1') return;
+  quietHours.gateTask('form_alert_live', quietHours.shanghaiStamp(), () => checkAndBroadcast({ trigger: 'collect' }), '制单金额线自动锁定')
+    .catch(err => console.error('[制单金额线] 采集后即时触发失败:', err.message));
 }
 
 /** 每日兜底扫描（cron 调用） */
@@ -149,6 +166,7 @@ module.exports = {
   checkAndBroadcast,
   triggerAfterCollect,
   runDailyCheck,
+  nextAutoBatchNo,
 };
 
 // 模块加载即按配置初始化状态文件（cron 的显式 init 幂等）：保证 FORM_ALERT_SCHEDULE

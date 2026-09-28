@@ -141,6 +141,31 @@ async function uploadMediaToBitable(buffer, fileName) {
 }
 
 /**
+ * 上传图片到飞书 IM（消息图片），返回 image_key——卡片 markdown 内嵌图用
+ * （交付卡按序嵌发票二维码，2026-09-29 曼波定）。需 im:message 发送同域权限。
+ */
+async function uploadImageToIM(buffer) {
+  const token = await getTenantAccessToken();
+  const form = new FormData();
+  form.append('image_type', 'message');
+  form.append('image', new Blob([buffer]), 'image.png');
+
+  const res = await fetch(`${BASE_URL}/im/v1/images`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(60000),
+    headers: { 'Authorization': `Bearer ${token}` },
+    body: form,
+  });
+
+  const data = await res.json().catch(() => null);
+  if (!data || data.code !== 0 || !data.data || !data.data.image_key) {
+    const msg = data ? `${data.code}: ${data.msg}` : `HTTP ${res.status} 非 JSON 响应`;
+    throw new Error(`上传 IM 图片失败: ${msg}`);
+  }
+  return data.data.image_key;
+}
+
+/**
  * 下载云空间媒体（采集表/批次表附件字段的 file_token → 原文件二进制）。
  * 批次打印 PDF 排版时取回发票原件用。需 drive 读权限（与 uploadMediaToBitable 同域）。
  */
@@ -219,6 +244,7 @@ module.exports = {
   downloadImage,
   downloadMessageResource,
   uploadMediaToBitable,
+  uploadImageToIM,
   downloadMedia,
   getApprovalInstance,
   downloadApprovalFile,
