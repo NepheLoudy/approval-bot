@@ -3,6 +3,8 @@
 // 批次指令、HTTP 端点鉴权。全离线：stub 掉飞书/多维表格/机器人发送。
 // （接入 push.js 部署前测试闸门，行为改动必须过本套件）
 const assert = require('assert/strict');
+const path = require('path');
+const fs = require('fs');
 const http = require('http');
 
 process.env.API_TOKEN = process.env.API_TOKEN || 'test-token-collect';
@@ -226,6 +228,32 @@ async function main() {
       collectRows.splice(rowIdx, 1); // 隔离：不污染后续链路用例的 collectRows 计数断言
     } finally {
       client.downloadMessageResource = realDownload;
+    }
+  }
+
+  // ---------- 单元：播报熔断（2026-09-30 曼波定：同类型当日超额度拒发） ----------
+  {
+    const quota = require('../src/utils/broadcastQuota');
+    const os = require('os');
+    const tmpQuota = path.join(os.tmpdir(), 'quota-test-' + Date.now() + '.json');
+    const savedQuotaFile = config.broadcast.quotaFile;
+    const savedQuotaLimit = config.broadcast.dailyQuotaPerType;
+    config.broadcast.quotaFile = tmpQuota;
+    config.broadcast.dailyQuotaPerType = 2;
+    quota.init(tmpQuota);
+    try {
+      assert.equal(quota.checkAndCount('🖨️ 报销单已生成，待确认 · A').allowed, true, '第 1 张放行');
+      assert.equal(quota.checkAndCount('🖨️ 报销单已生成，待确认 · B').allowed, true, '第 2 张放行');
+      const q3 = quota.checkAndCount('🖨️ 报销单已生成，待确认 · C');
+      assert.equal(q3.allowed, false, '第 3 张同类型拒发');
+      assert.equal(q3.count, 3, '计数 3');
+      assert.equal(quota.keyOf('🖨️ 报销单已生成，待确认 · X'), '报销单已生成，待确认', 'emoji 剥离后取前 10 字归并同源卡');
+      assert.ok(quota.checkAndCount('📦 报销交付包 · 其他类型').allowed, '不同类型独立计数');
+    } finally {
+      config.broadcast.quotaFile = savedQuotaFile;
+      config.broadcast.dailyQuotaPerType = savedQuotaLimit;
+      quota.init(savedQuotaFile);
+      fs.unlinkSync(tmpQuota);
     }
   }
 

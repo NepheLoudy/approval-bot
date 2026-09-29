@@ -226,7 +226,8 @@ function uploadEnv() {
 // ============ [4/4] 重启服务 ============
 function restart() {
   console.log('\n========== [4/4] 重启服务 ==========');
-  const cmd = 'pm2 restart ' + PM2_NAME + ' --update-env 2>/dev/null || pm2 start ' + REMOTE_DIR + '/src/index.js --name ' + PM2_NAME + '; pm2 save';
+  // --time：pm2 日志加时间戳前缀（2026-09-30 曼波定——排查「群里发了什么」需要时间线）
+  const cmd = 'pm2 restart ' + PM2_NAME + ' --time --update-env 2>/dev/null || pm2 start ' + REMOTE_DIR + '/src/index.js --name ' + PM2_NAME + ' --time; pm2 save';
   exec(cmd, () => {
     console.log('\n✅ 部署完成，服务状态：');
     conn.exec('pm2 list', (err, stream) => {

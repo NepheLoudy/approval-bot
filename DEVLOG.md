@@ -511,3 +511,12 @@
 - **主会话自查×2**：formAlertService 跳过「未归类」项目（未归类票满 500 会自动锁出无主批次）与「票池 0 张」的补充口径-only 项目（lockBatch 必抛且无冷却无限重试）；red 警报触发条件改看 buyerCheck（金额不符优先级压过抬头存疑时警报不再被吞）。
 - **P3×4**：fmtDateMs/buildArchiveFolderName 时区统一 UTC+8（P2-3 漏网）；test-form-alert 手动触发路由；状态文件损坏改名备份（urgeStateStore/formAlertService）；withLock Map settle 后清理（只增不删内存爬升）。
 - **测试纪律教训**：本轮暴露 delivery 套件自 v57（sendDeliveryCard 上线）起就没跑过全绿——sendDeliveryCard 模块内直引 sendMessage 绕过 stub，**测试交付卡一直在偷偷发往真实 webhook**（tryQrChannel 同款直引陷阱第二次踩）；修复走 module.exports 引用，个人测试命令的 grep 筛选把 ❌ 行滤掉了（tail -1 只看最后一行）导致多轮带病运行——已改为跑完整输出。五套全绿（delivery 补 台账桩/基数归零/回写断言更新/无交付件 submit 闸断言）。
+
+## v64 · 2026-09-30 · 随本提交落地 · feat
+
+**群播报当日量熔断 + pm2 日志时间戳（曼波问「群里自动发送这么多是否失控」的加固批）**
+
+- 背景：排查确认无失控（自动锁定仅 1 次、打印询问 0 条、周报/今日已催均为既定节奏；pm2 日志 append 无时间戳造成「连发」观感），但失控防线值得前置。
+- **播报熔断**：新增 utils/broadcastQuota——bot.js 四个群播出口（webhook 卡/文、IM 卡/文；私聊不计）发送前按「类型 key（标题去 emoji 前 10 字，同源卡归并）×上海日历日」计数，超 BROADCAST_DAILY_QUOTA（默认 3 张/类型/天）拒发并在 error 日志告警；当天首次熔断发一张独立「🛑 自动播报已熔断」红卡（自身限 1 张/天）。计数 JSON 原子写持久化（BROADCAST_QUOTA_FILE 可配项目外）。
+- **pm2 --time**：push.js 重启命令加 --time，日志带时间戳前缀——以后「群里某时刻发了什么」可按时间线秒查。
+- 测试：五套全绿；熔断单元断言（额度内放行/超限拒发/emoji 归并/异类型独立计数）。

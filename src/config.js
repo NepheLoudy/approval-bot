@@ -95,6 +95,14 @@ module.exports = {
   // 审批者配置（逗号分隔 open_id，用于提醒回落等场景）
   approvers: parseArrayConfig(process.env.APPROVERS),
 
+  // 群播报熔断（2026-09-30 曼波定）：同一类型卡片/文本当日超过额度即拒发（防自动化
+  // 失控刷屏财务群），当天首次熔断发一张独立告警卡；额度按上海日历日滚动
+  broadcast: {
+    dailyQuotaPerType: parseInt(process.env.BROADCAST_DAILY_QUOTA, 10) || 3,
+    // 计数文件：SFTP 部署清空可接受（重启清零仅影响当天已计数），稳妥可配到项目外
+    quotaFile: process.env.BROADCAST_QUOTA_FILE || '',
+  },
+
   // 资金指令操作人白名单（逗号分隔 open_id，2026-09-27 对抗审查 P1）：配置后
   // lock/submit/paid/reject 仅限名单内操作人（以 hub 透传 senderId 为准，自报名不可信）；
   // 留空 = 不限（回执仍显示操作人校验状态）。建议配置财务 open_id

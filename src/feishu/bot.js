@@ -1,6 +1,7 @@
 const config = require('../config');
 const { requestAPI } = require('./client');
 const { fieldText } = require('../utils/fields');
+const quota = require('../utils/broadcastQuota');
 
 // ============================================================
 // 消息发送层
@@ -31,11 +32,38 @@ async function sendToWebhook(webhookUrl, payload) {
 }
 
 /**
+ * 播报熔断闸（2026-09-30 曼波定）：群播出口统一计量，同一类型当日超额度拒发；
+ * 当天首次触发熔断发一张独立告警卡（自身限 1 张/天）。返回被拒的 key，放行返回 null。
+ */
+function quotaGate(titleOrText) {
+  const q = quota.checkAndCount(titleOrText);
+  if (q.allowed) return null;
+  console.error(`[播报熔断] 「${q.key}」今日已发 ${q.count - 1} 张达上限 ${q.limit}，本次拒发——如非预期请查 automation 循环`);
+  const today = quota.todayKey();
+  if (!quota.alertAlreadySent(today)) {
+    quota.markAlertSent(today);
+    setImmediate(() => {
+      sendToWebhook(config.bot.webhookUrl, {
+        msg_type: 'interactive',
+        card: {
+          config: { wide_screen_mode: true },
+          header: { template: 'red', title: { tag: 'plain_text', content: '🛑 自动播报已熔断' } },
+          elements: [{ tag: 'markdown', content: `类型「${q.key}」今日已发 ${q.count - 1} 张达上限 ${q.limit}，后续同类消息已暂停（当天内）。\n正常节奏下每类型每天 ≤2 张，触发熔断大概率是自动化循环失控，请检查机器人日志并联系管理员。` }],
+        },
+      }).catch(err => console.error('[播报熔断] 告警卡发送失败:', err.message));
+    });
+  }
+  return q.key;
+}
+
+/**
  * 通过群自定义机器人 Webhook 发送卡片
  * @param {object} cardContent 卡片 JSON
  * @param {string} [webhookUrl] 可覆盖默认 webhook
  */
 async function sendMessage(cardContent, webhookUrl) {
+  const title = cardContent && cardContent.header && cardContent.header.title && cardContent.header.title.content;
+  if (quotaGate(title)) return null;
   return sendToWebhook(webhookUrl || config.bot.webhookUrl, {
     msg_type: 'interactive',
     card: cardContent,
@@ -43,6 +71,7 @@ async function sendMessage(cardContent, webhookUrl) {
 }
 
 async function sendTextMessage(text, webhookUrl) {
+  if (quotaGate(text)) return null;
   return sendToWebhook(webhookUrl || config.bot.webhookUrl, {
     msg_type: 'text',
     content: { text },
@@ -52,6 +81,7 @@ async function sendTextMessage(text, webhookUrl) {
 // ---------- IM API（应用身份） ----------
 
 async function sendTextToChat(chatId, text) {
+  if (quotaGate(text)) return null;
   const res = await requestAPI(
     'POST',
     '/im/v1/messages?receive_id_type=chat_id',
@@ -704,6 +734,8 @@ function previewInvoiceUrgePost(post) {
 }
 
 async function sendCardToChat(chatId, cardContent) {
+  const title = cardContent && cardContent.header && cardContent.header.title && cardContent.header.title.content;
+  if (quotaGate(title)) return null;
   const res = await requestAPI(
     'POST',
     '/im/v1/messages?receive_id_type=chat_id',
@@ -718,6 +750,9 @@ async function sendCardToChat(chatId, cardContent) {
   }
   return res.data;
 }
+
+// 播报熔断计数器按配置初始化（模块加载即生效；cron 侧无需再 init）
+quota.init(config.broadcast.quotaFile);
 
 module.exports = {
   sendMessage,
