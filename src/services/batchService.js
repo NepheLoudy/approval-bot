@@ -220,7 +220,7 @@ async function lockBatch(batchNo, project, options = {}) {
     const amount = Math.round(pool.reduce((s, p) => s + p.totalAmount, 0) * 100) / 100;
     const projects = [...new Set(pool.map(p => p.project))];
     const primaryProject = projects[0] || '未归类';
-    const purpose = String(options.purpose || '').trim() || primaryProject;
+    const purpose = String(options.purpose || '').trim() || config.batch.defaultPurpose;
     const feeItem = String(options.feeItem || '').trim() || config.batch.feeItem;
     const purchaseType = String(options.purchaseType || '').trim() || config.batch.purchaseType;
     const payee = String(options.payee || '').trim() || config.batch.reporterName;
@@ -354,20 +354,48 @@ async function lockBatch(batchNo, project, options = {}) {
 
 // ---------- 交付包元数据（摘要/笔序/归档名） ----------
 
-/** 同主项目的既有批次数 + 1 → 「第N笔」序号 */
+/** 下一笔序（2026-09-29 曼波定改口径）：财务的「第N笔」是**全局**递增（台账历史行不分
+ *  项目，实样飞镖第二十四笔/步兵已做三十笔共用一个序列）——从台账摘要列（C 列）解析
+ *  历史最大「第X笔」接续（中文/阿拉伯序号都认）；台账不可用回落「本项目机器人批次数
+ *  + BATCH_ORDINAL_BASE 基数」（基数留给财务口供进度，如 29 → 下一笔 30）。
+ *  此前实现「同项目机器人批次数+1」完全没接财务手工进度，自动批次恒「第一笔」 */
 async function nextProjectOrdinal(primaryProject) {
+  const { cnOrdinalToNum } = require('../utils/cny');
+  try {
+    const ledger = require('./ledgerSheetService');
+    const { sheetId, rowCount } = await ledger.resolveSheet();
+    const grid = await ledger.readGrid(sheetId, Math.min(rowCount || 1000, 1000));
+    let maxSeen = 0;
+    for (const row of grid) {
+      const summary = String((row && row[2]) ?? ''); // C 列（SUMMARY_COL_INDEX 同源）
+      const m = summary.match(/第(.+?)笔/);
+      if (m) {
+        const n = cnOrdinalToNum(m[1]);
+        if (n > maxSeen) maxSeen = n;
+      }
+    }
+    if (maxSeen > 0 || config.batch.ordinalBase > 0) {
+      // 基数=「台账之外的财务进度下限」（台账常滞后于实际制单——曼波口供 30 笔时台账仅录到 25）
+      return Math.max(maxSeen, config.batch.ordinalBase || 0) + 1;
+    }
+    console.warn('[批次] 台账无「第N笔」历史行且未配基数，回落本地批次计数');
+  } catch (err) {
+    console.warn(`[批次] 台账笔序读取失败（回落本地批次计数）: ${err.message}`);
+  }
+  // 回落：本项目机器人批次数 + 配置基数（台账未配置/失败时的接续手段）
   const batches = await collectStore.listBatches();
-  // 项目名自身含 '/' 时 split('/') 会把它劈成两段、includes 永不命中（笔序恒 1 →
-  // 摘要重复 → 台账按摘要匹配丢账）——复查 P2：此时改用「项目」字段精确等值计数
+  // 项目名自身含 '/' 时 split('/') 会把它劈成两段、includes 永不命中——
+  // 此时改用「项目」字段精确等值计数
   const count = String(primaryProject).includes('/')
     ? batches.filter(b => String(b.fields['项目'] || '') === primaryProject).length
     : batches.filter(b => String(b.fields['项目'] || '').split('/').includes(primaryProject)).length;
-  return count + 1;
+  return count + 1 + (config.batch.ordinalBase || 0);
 }
 
-/** 摘要拼装（照实样：机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔） */
+/** 摘要拼装（照财务实样段序：机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔——
+ *  用途段在前、项目段在后，2026-09-29 曼波核对：机器人生成曾把项目名放用途位造成重复段） */
 function composeSummary({ project, purpose, ordinal }) {
-  const parts = [config.batch.summaryPrefix, config.batch.season, project, purpose, config.batch.feeType]
+  const parts = [config.batch.summaryPrefix, config.batch.season, purpose, project, config.batch.feeType]
     .map(s => String(s || '').trim()).filter(Boolean);
   const cn = numToCnOrdinal(ordinal);
   parts.push(cn ? `第${cn}笔` : `第${ordinal}笔`);
@@ -1360,6 +1388,7 @@ module.exports = {
   getPrintAskTargets,
   markPrintAsked,
   claimBatch,
+  nextProjectOrdinal,
   composeSummary,
   buildArchiveFolderName,
   fmtDateMs,

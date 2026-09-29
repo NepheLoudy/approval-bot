@@ -328,6 +328,16 @@ async function main() {
   assert.equal(nosEmpty.size, 0, '采集表未配置返回空集（fail-open 不崩）');
   config.bitable.collectTableId = savedCollectId;
 
+  // 台账桩：笔序解析不走真实 Sheets API（nextProjectOrdinal 依赖；空台账 → 回落本地计数）。
+  // 基数归零（本地 .env 的 BATCH_ORDINAL_BASE 是生产口供值，不能带进测试断言）
+  const ledgerSheetService = require('../src/services/ledgerSheetService');
+  const realResolveSheet = ledgerSheetService.resolveSheet;
+  const realReadGrid = ledgerSheetService.readGrid;
+  const realOrdinalBase = config.batch.ordinalBase;
+  config.batch.ordinalBase = 0;
+  ledgerSheetService.resolveSheet = async () => ({ sheetId: 'testSheet', rowCount: 100 });
+  ledgerSheetService.readGrid = async () => [];
+
   // ---------- 链路：拟批 + 锁定（批次数组/回写/金额合计） ----------
   const batchService = require('../src/services/batchService');
   const preview = await batchService.previewBatch();
@@ -348,16 +358,34 @@ async function main() {
   assert.ok(batchRows[0].fields['打印文件'], '打印 PDF 应生成落附件');
   assert.ok(batchRows[0].fields['物料清单'], '校格式物料清单应生成落附件（交付包④）');
   assert.ok(batchRows[0].fields['投递底单'], '投递底单应生成落附件（交付包⑤）');
-  assert.equal(locked.ordinal, 1, '同项目首笔笔序=1');
-  assert.equal(locked.purpose, '步兵机器人', '用途缺省=主项目');
-  assert.match(locked.summary, /^机甲大师实验室-.*-步兵机器人-材料费-第一笔$/, `摘要拼装（实际 ${locked.summary}）`);
+  assert.equal(locked.ordinal, 1, '同项目首笔笔序=1（stub 台账空+无基数，回落本地计数）');
+  assert.equal(locked.purpose, '对抗赛', '用途缺省=defaultPurpose（曼波 2026-09-29：实样该位是对抗赛类用途词）');
+  assert.match(locked.summary, /^机甲大师实验室-.*-对抗赛-步兵机器人-材料费-第一笔$/, `摘要段序=用途在前项目在后（实际 ${locked.summary}）`);
   assert.equal(batchRows[0].fields['摘要'], locked.summary, '摘要落批次记录');
   assert.equal(batchRows[0].fields['笔序'], 1, '笔序落批次记录');
+  // 笔序接财务全局进度（2026-09-29 曼波反馈）：台账历史最大「第N笔」与基数取 max + 1
+  {
+    ledgerSheetService.readGrid = async () => [
+      ['1', '', '机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔'],
+      ['2', '', '机甲大师实验室-27赛季-对抗赛-步兵机器人-材料费-第二十五笔'],
+    ];
+    try {
+      const savedBase = config.batch.ordinalBase;
+      config.batch.ordinalBase = 0;
+      assert.equal(await batchService.nextProjectOrdinal('步兵机器人'), 26, '台账最大笔序 25 → 下一笔 26');
+      config.batch.ordinalBase = 30;
+      assert.equal(await batchService.nextProjectOrdinal('步兵机器人'), 31, '基数 30 > 台账 25 → 下一笔 31（台账滞后口供进度）');
+      config.batch.ordinalBase = savedBase;
+    } finally {
+      ledgerSheetService.readGrid = realReadGrid;
+    }
+  }
   const lockedCollect = collectRows.find(r => r.fields['发票号码'] === '24312000000123456789');
   assert.equal(lockedCollect.fields['批次'], '27备赛99步兵9', '锁定回写采集表批次');
 
   // 重复批次号拒绝
   await assert.rejects(() => batchService.lockBatch('27备赛99步兵9', ''), /已存在/);
+  config.batch.ordinalBase = realOrdinalBase; // 恢复基数（后续笔序用例自行控制）
 
   // 状态流转（复查 P1-3：状态机校验后，合法流转 已锁定→已提交 必须仍畅通）
   assert.equal(batchRows[0].fields['状态'], '已锁定', '锁定后批次状态=已锁定');

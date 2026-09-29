@@ -155,10 +155,16 @@ module.exports = {
     purchaseType: process.env.BATCH_PURCHASE_TYPE || '机器人零件',
     // 物料清单「制单人」（留空回落报销人姓名）
     preparer: process.env.BATCH_PREPARER_NAME || '',
+    // 摘要「用途」段默认值（lock 用途= 覆盖；2026-09-29 曼波定——此前默认=项目名，
+    // 造成摘要「步兵机器人-步兵机器人」重复段；实样该位是「对抗赛」类用途词）
+    defaultPurpose: process.env.BATCH_DEFAULT_PURPOSE || '对抗赛',
     // 特殊事项附页触发金额阈值（≥此额 或 支付记录/实物佐证字段非空 → 单独排纸；2026-09-27 曼波反馈）
     specialAmount: parseFloat(process.env.BATCH_SPECIAL_AMOUNT) || 500,
     // 批次推进超期线（周报「批次推进超期」段）：已锁定/已提交状态超此天数未到账 → 周报提醒（2026-09-29）
     staleDays: parseInt(process.env.BATCH_STALE_DAYS, 10) || 7,
+    // 笔序下限基数（财务已完成的「第N笔」数，台账常滞后于实际进度——曼波 2026-09-29 口供 30）：
+    // 下一笔序 = max(台账解析最大笔序, 本基数) + 1；台账与基数都不可用才回落本地批次计数
+    ordinalBase: parseInt(process.env.BATCH_ORDINAL_BASE, 10) || 0,
     // 交付确认后询问打印情况的延时（默认 12h）与扫描节奏（每小时扫，发送过晚间静默闸）
     printAskDelayHours: parseInt(process.env.BATCH_PRINT_ASK_DELAY_HOURS, 10) || 12,
     printAskSchedule: process.env.BATCH_PRINT_ASK_SCHEDULE || '0 15 * * * *',

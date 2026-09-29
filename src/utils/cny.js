@@ -77,4 +77,22 @@ function numToCnyUpper(n) {
   return s;
 }
 
-module.exports = { numToCnyUpper, numToCnOrdinal, sectionCn };
+/** 中文序号 → 数字（二十四→24，一十一→11，十→10，一百零五→105）；阿拉伯数字直接转；
+ *  含未知字符/空串返回 0（调用方按「无法解析」处理）。台账历史行「第X笔」解析接续笔序用 */
+function cnOrdinalToNum(s) {
+  const str = String(s || '').trim();
+  if (/^\d+$/.test(str)) return parseInt(str, 10) || 0;
+  let section = 0, current = 0, seen = false;
+  for (const ch of str) {
+    const d = Math.max(CN_LO.indexOf(ch), CN_DIGITS.indexOf(ch)); // 简繁大写都容错
+    if (d > 0) { current = d; seen = true; }
+    else if (ch === '十') { section += (current || 1) * 10; current = 0; seen = true; }
+    else if (ch === '百' || ch === '佰') { section += (current || 1) * 100; current = 0; seen = true; }
+    else if (ch === '千' || ch === '仟') { section += (current || 1) * 1000; current = 0; seen = true; }
+    else if (ch === '零') continue;
+    else return 0;
+  }
+  return seen ? section + current : 0;
+}
+
+module.exports = { numToCnyUpper, numToCnOrdinal, cnOrdinalToNum, sectionCn };
