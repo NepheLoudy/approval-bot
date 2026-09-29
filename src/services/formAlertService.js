@@ -48,7 +48,9 @@ function load() {
     return { projects: parsed.projects || {} };
   } catch (err) {
     if (err.code !== 'ENOENT') {
-      console.warn(`[制单金额线] 状态读取失败（使用空状态继续）: ${err.message}`);
+      // 损坏文件改名备份（同 urgeStateStore 对抗审查 P3 口径；此处仅冷却丢失，低危）
+      try { fs.renameSync(stateFile, `${stateFile}.corrupt-${Date.now()}`); } catch { /* 无所谓 */ }
+      console.warn(`[制单金额线] 状态文件损坏已备份并重建（冷却丢失，失败项目可能重试）: ${err.message}`);
     }
     return { projects: {} };
   }
@@ -98,16 +100,21 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
   // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
   const { suggestions } = await batchService.previewBatch();
-  const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0 }]));
+  const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0, poolCount: s.count }]));
   const supplement = await batchService.getUnbatchedInvoicedByProject();
   for (const [project, agg] of supplement) {
-    const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0 };
+    const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
     cur.count += agg.count;
     cur.amount = Math.round((cur.amount + agg.amount) * 100) / 100;
     cur.unCollected = agg.count; // 该项目未采集笔数（锁定后详情卡提示，打印批只能打包采集票）
     byProject.set(project, cur);
   }
-  const all = [...byProject.values()].map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
+  // 未归类票不自动锁批（对抗审查：票池「未归类」项目金额满线会自动锁出无主批次——
+  // 这些票需财务人工归类后才能制单）；补充口径-only 项目（票池 0 张）不触发
+  //（lockBatch 必抛「票池无票」且失败不写冷却 → 无限重试，对抗审查 P3-1）
+  const all = [...byProject.values()]
+    .filter(s => s.project !== '未归类' && s.poolCount > 0)
+    .map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
 
   const hits = all.filter(s => s.amount >= threshold);
   const now = Date.now();

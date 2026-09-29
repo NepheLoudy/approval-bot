@@ -41,7 +41,9 @@ function load() {
     };
   } catch (err) {
     if (err.code !== 'ENOENT') {
-      console.warn(`[催发票状态] 读取失败（使用空状态继续）: ${err.message}`);
+      // 损坏文件改名备份（对抗审查 P3：清零重建会让延期/无法提交标记丢失、用户被重催）
+      try { fs.renameSync(stateFile, `${stateFile}.corrupt-${Date.now()}`); } catch { /* 无所谓 */ }
+      console.warn(`[催发票状态] 状态文件损坏已备份并重建（延期/停催标记丢失，需关注重催）: ${err.message}`);
     }
     return { records: {}, users: {} };
   }

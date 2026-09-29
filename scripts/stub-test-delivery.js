@@ -89,11 +89,25 @@ async function main() {
 
   const batchService = require('../src/services/batchService');
 
-  // ---------- 单元：摘要拼装（照投递单实样） ----------
+  // 台账桩 + 笔序基数归零（v62 起笔序走台账解析；.env 的 BATCH_ORDINAL_BASE 是生产值不进测试）
+  const ledgerSheetService = require('../src/services/ledgerSheetService');
+  const realResolveSheetD = ledgerSheetService.resolveSheet;
+  const realReadGridD = ledgerSheetService.readGrid;
+  const realOrdinalBaseD = config.batch.ordinalBase;
+  ledgerSheetService.resolveSheet = async () => ({ sheetId: 'testSheetD', rowCount: 100 });
+  ledgerSheetService.readGrid = async () => [];
+  config.batch.ordinalBase = 0;
+
+  // ---------- 单元：摘要拼装（照投递单实样；段序=用途在前项目在后，2026-09-29 曼波核对） ----------
   assert.equal(
-    batchService.composeSummary({ project: '对抗赛', purpose: '飞镖机器人', ordinal: 24 }),
+    batchService.composeSummary({ project: '飞镖机器人', purpose: '对抗赛', ordinal: 24 }),
     '机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔',
-    '摘要拼装严格照实样段序'
+    '摘要拼装严格照实样段序（用途在前、项目在后）'
+  );
+  assert.equal(
+    batchService.composeSummary({ project: '步兵机器人', purpose: '对抗赛', ordinal: 31 }),
+    '机甲大师实验室-27赛季-对抗赛-步兵机器人-材料费-第三十一笔',
+    '自动批次摘要段序（曼波反馈场景：项目名不再顶占用途位）'
   );
 
   // ---------- 单元：归档文件夹名（照财务实样命名） ----------
@@ -252,7 +266,8 @@ async function main() {
   const batchRows = [
     { record_id: 'bat1', fields: { '批次号': '27对抗赛飞镖23', '项目': '对抗赛', '状态': '已提交', '张数': 3, '金额合计': 100 } },
     { record_id: 'bat2', fields: { '批次号': '27对抗赛飞镖24', '项目': '对抗赛', '状态': '已锁定', '锁定时间': 100, '张数': 6, '金额合计': 237.04, '摘要': summary } },
-    { record_id: 'bat3', fields: { '批次号': '27备赛20步兵5', '项目': '步兵机器人', '状态': '已锁定', '锁定时间': 200, '张数': 1, '金额合计': 10 } },
+    // 打印文件字段=交付件已生成（submit 流程闸要求；对抗审查新增）
+    { record_id: 'bat3', fields: { '批次号': '27备赛20步兵5', '项目': '步兵机器人', '状态': '已锁定', '锁定时间': 200, '张数': 1, '金额合计': 10, '打印文件': [{ file_token: 'pdf_test' }] } },
   ];
   collectStore.listBatches = async () => batchRows;
   collectStore.findBatchByName = async (name) => batchRows.find(b => String(b.fields['批次号']) === String(name)) || null;
@@ -306,6 +321,13 @@ async function main() {
 
   const mbOp = await batchService.markBatch('27备赛20步兵5', '已提交', '陈嘉豪');
   assert.equal(mbOp.status, '已提交');
+  // submit 流程闸（对抗审查）：无交付件的批次不能标记已提交（自动批次未 confirm 的逃逸口）
+  batchRows.push({ record_id: 'bat4', fields: { '批次号': '自动-测试-0929', '项目': '测试', '状态': '已锁定', '锁定时间': 250, '张数': 1, '金额合计': 5 } });
+  await assert.rejects(
+    () => batchService.markBatch('自动-测试-0929', '已提交', ''),
+    /尚未生成交付件/,
+    '无交付件 submit 被流程闸拒绝'
+  );
   const mbRow = batchRows.find(b => b.record_id === 'bat3');
   assert.equal(mbRow.fields['最后操作人'], '陈嘉豪', '操作留痕落表');
   assert.ok(mbRow.fields['最后操作时间'] > 0, '操作时间落表');
@@ -382,7 +404,7 @@ async function main() {
   assert.ok(lockRow.fields['最后操作时间'] > 0, '批次记录含最后操作时间');
   assert.ok(lockReply.includes('1 张打标失败'), '打标失败在回执暴露');
   assert.ok(String(lockRow.fields['备注'] || '').includes('1 张打标失败'), '打标失败记入批次备注');
-  assert.equal(sentCards.length, 1, '交付卡已发送');
+  console.error('DEBUG sentCards:', JSON.stringify(sentCards.map(c => c.header && c.header.title ? c.header.title.content : Object.keys(c))));assert.equal(sentCards.length, 1, '交付卡已发送');
   assert.ok(
     JSON.stringify(sentCards[0]).includes('https://test-tenant.feishu.cn/base/appTokenTest'),
     '交付卡表链接带租户子域（复查 P2-13）'
@@ -595,7 +617,7 @@ async function main() {
   assert.equal(slashA.ordinal, 1, '斜杠项目首批笔序 1');
   assert.equal(slashA.projects.join('/'), slashProject);
   assert.equal(slashA.approvalWritten, 1, '带申请编号的票回写审批表报销单栏');
-  assert.deepEqual(approvalWrites[0] && approvalWrites[0].fields, { '报销单': '27斜杠批次1' }, '报销单栏写入批次号');
+  assert.deepEqual(approvalWrites[0] && approvalWrites[0].fields, { '报销单': '27斜杠批次1', '是否打印': '是' }, '报销单栏+是否打印标记一并回写');
   collectStore.listCollect = async () => [slashCollects[1]];
   const slashB = await batchService.lockBatch('27斜杠批次2', '', {});
   assert.equal(slashB.ordinal, 2, '斜杠项目第二批笔序 2（旧 split 逻辑恒 1 → 摘要重复）');

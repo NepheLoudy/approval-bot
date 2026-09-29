@@ -37,13 +37,20 @@ const { fieldText } = require('../utils/fields');
 const A4 = { width: 595.28, height: 841.89 };
 const SLOT = { width: A4.width - 40, height: (A4.height - 60) / 2 }; // 半页票位（上下两票，边距 20/30）
 
-// 按批次号互斥（lock 与 regen 并发防护——复查 P1-6）
+// 按批次号互斥（lock 与 regen 并发防护——复查 P1-6）。
+// settle 后清理 entry（对抗审查 P3：Map 只增不删长期运行内存缓慢爬升）——
+// 仅当没有更晚的排队者接链（map 里还是自己的 wrapped）才删，不影响等待中的调用
 const locks = new Map();
 async function withLock(key, fn) {
   const prev = locks.get(key) || Promise.resolve();
   const run = prev.then(fn, fn);
-  locks.set(key, run.catch(() => {}));
-  return run;
+  const wrapped = run.catch(() => {});
+  locks.set(key, wrapped);
+  try {
+    return await run;
+  } finally {
+    if (locks.get(key) === wrapped) locks.delete(key);
+  }
 }
 
 // ---------- 票池与拟批 ----------
@@ -104,11 +111,15 @@ function collectToItem(r, byApplyNo) {
     // 人机制单去重标记（2026-09-29 曼波定）：审批表「是否打印=是」= 财务自行制单打印，
     // 该票不进票池/不参与机器人制单；regen 侧不受此过滤（已归批票照常重生成附件）
     printed: fieldText(af['是否打印']) === '是',
+    // 申请状态（对抗审查 P2-5：已撤回/已拒绝申请的票不得自动锁进可付款批次——
+    // 人工拟批有肉眼兜底，自动锁定没有。未归类票（无关联申请）状态空，不过滤）
+    approvalStatus: fieldText(af['申请状态']),
   };
 }
 
 /** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序）。
- *  「是否打印=是」的票不进池（财务已自行制单，与机器人制单能力去重） */
+ *  「是否打印=是」的票不进池（财务已自行制单，与机器人制单能力去重）；
+ *  关联申请状态非「已通过」的票不进池（撤回/拒绝申请的票自动锁定会误入付款批次） */
 async function getPoolWithRecords() {
   const collects = await collectStore.listCollect();
   const byApplyNo = await approvalFieldsByApplyNo();
@@ -117,6 +128,7 @@ async function getPoolWithRecords() {
     .filter(r => !r.fields['批次'])
     .map((r) => collectToItem(r, byApplyNo))
     .filter(p => !p.printed)
+    .filter(p => !p.approvalStatus || p.approvalStatus === config.approvalStatus.APPROVED)
     .sort((a, b) => a.collectedAt - b.collectedAt);
 }
 
@@ -364,7 +376,9 @@ async function nextProjectOrdinal(primaryProject) {
   try {
     const ledger = require('./ledgerSheetService');
     const { sheetId, rowCount } = await ledger.resolveSheet();
-    const grid = await ledger.readGrid(sheetId, Math.min(rowCount || 1000, 1000));
+    // 上限对齐 readGrid 的 5000（对抗审查 P2-4：cap 过小 → 台账增长超限后历史笔序读不到，
+    // 新批次重用旧序号 → 摘要撞车 → 台账回填改错行）
+    const grid = await ledger.readGrid(sheetId, Math.min(rowCount || 5000, 5000));
     let maxSeen = 0;
     for (const row of grid) {
       const summary = String((row && row[2]) ?? ''); // C 列（SUMMARY_COL_INDEX 同源）
@@ -402,10 +416,11 @@ function composeSummary({ project, purpose, ordinal }) {
   return parts.join('-');
 }
 
-/** 归档文件夹名建议（照财务实样：20260920-对抗赛-飞镖-第二十四笔-237.04；非法字符替换） */
+/** 归档文件夹名建议（照财务实样：20260920-对抗赛-飞镖-第二十四笔-237.04；非法字符替换）。
+ *  ymd 用上海时区（对抗审查 P3-3：此前服务器本地时区，跨日边界日期倒退一天） */
 function buildArchiveFolderName({ dateMs, project, purpose, ordinal, amount }) {
-  const d = new Date(dateMs || Date.now());
-  const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const d = new Date((dateMs || Date.now()) + 8 * 60 * 60 * 1000);
+  const ymd = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
   const sanitize = (s) => String(s || '').replace(/[\\/:*?"<>|]/g, '-').trim();
   const parts = [ymd, sanitize(project), sanitize(purpose || project)];
   if (ordinal) {
@@ -416,17 +431,27 @@ function buildArchiveFolderName({ dateMs, project, purpose, ordinal, amount }) {
   return parts.join('-');
 }
 
-/** 毫秒时间戳 → 'YYYY-MM-DD'（开票日期展示，+08:00） */
+/** 毫秒时间戳 → 'YYYY-MM-DD'（开票日期展示；上海时区——对抗审查 P3-3）
+ *  批次号 → 文件名安全段（P3-6：项目名含 / 等字符会让媒体上传被拒） */
+function batchNoFileSafe(batchNo) {
+  return String(batchNo || '').replace(/[/:*?"<>|]/g, '-').trim();
+}
+
 function fmtDateMs(ms) {
-  if (!ms) return '';
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const d = new Date((ms || Date.now()) + 8 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 // ---------- 批次附件重生成（/approval-batch regen） ----------
 
-/** 重新生成指定批次的四件附件（打印件/BOM/物料清单/投递底单，生成失败自愈入口——复查 P2-5） */
+/** 重新生成指定批次的四件附件（打印件/BOM/物料清单/投递底单，生成失败自愈入口——复查 P2-5）。
+ *  外壳按批次号加锁（对抗审查 P2-1：与 confirm/reject 并发会双份附件互相覆盖+双二维码卡；
+ *  confirmDelivery 持同 key 锁调内部无锁版，避免自死锁） */
 async function regenerateBatchFiles(batchNo) {
+  return withLock(`batch_${batchNo}`, () => doRegenerateBatchFiles(batchNo));
+}
+
+async function doRegenerateBatchFiles(batchNo) {
   const batch = await collectStore.findBatchByName(batchNo);
   if (!batch) throw new Error(`批次不存在：${batchNo}`);
   const collects = (await collectStore.listCollect()).filter(r => String(r.fields['批次'] || '') === batchNo);
@@ -535,7 +560,7 @@ async function uploadBatchPdf(batchNo, items) {
   if (index === 0) throw new Error('批次内没有任何可排版的票面');
 
   const bytes = await out.save();
-  const uploaded = await client.uploadMediaToBitable(Buffer.from(bytes), `报销单_${batchNo}_打印件.pdf`);
+  const uploaded = await client.uploadMediaToBitable(Buffer.from(bytes), `报销单_${batchNoFileSafe(batchNo)}_打印件.pdf`);
   return uploaded;
 }
 
@@ -635,7 +660,7 @@ async function uploadBatchBom(batchNo, items) {
   totalRow.font = { bold: true };
 
   const buffer = Buffer.from(await wb.xlsx.writeBuffer());
-  return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_BOM.xlsx`);
+  return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_BOM.xlsx`);
 }
 
 // ---------- 交付包④：物料清单（校格式，严格照财务《物料清单》模板排版） ----------
@@ -707,7 +732,7 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
   if (!preparer) { prepCell.fill = YELLOW_FILL; }
 
   const buffer = Buffer.from(await wb.xlsx.writeBuffer());
-  return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_物料清单.xlsx`);
+  return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_物料清单.xlsx`);
 }
 
 // ---------- 交付包⑤：投递底单（照学校「智能财务服务大厅投递单」字段预填） ----------
@@ -808,7 +833,7 @@ async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
   }
 
   const buffer = Buffer.from(await wb.xlsx.writeBuffer());
-  return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_投递底单.xlsx`);
+  return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_投递底单.xlsx`);
 }
 
 // ---------- 交付包⑥：打印件 docx 可编辑版 + 特殊事项附页（2026-09-27 曼波反馈） ----------
@@ -878,7 +903,7 @@ async function uploadBatchSpecialSheetPdf(batchNo, specials) {
     draw(page, 'Note: links require approval-admin permission in browser.', y, { size: 8 });
   });
   const bytes = await out.save();
-  return client.uploadMediaToBitable(Buffer.from(bytes), `报销单_${batchNo}_特殊事项附页.pdf`);
+  return client.uploadMediaToBitable(Buffer.from(bytes), `报销单_${batchNoFileSafe(batchNo)}_特殊事项附页.pdf`);
 }
 
 /** 特殊事项附页 docx（Word 原生：中文/超链接全支持，财务可编辑） */
@@ -908,7 +933,7 @@ async function uploadBatchSpecialSheetDocx(batchNo, specials) {
     sections: [{ properties: { page: { size: { width: 11906, height: 16838 } } }, children: specialSheetDocxChildren(batchNo, specials) }],
   });
   const buffer = await Packer.toBuffer(doc);
-  return client.uploadMediaToBitable(Buffer.from(buffer), `报销单_${batchNo}_特殊事项附页.docx`);
+  return client.uploadMediaToBitable(Buffer.from(buffer), `报销单_${batchNoFileSafe(batchNo)}_特殊事项附页.docx`);
 }
 
 /** 打印件 docx 可编辑版：发票图片按录入序纵向排入 Word（财务可调可删后直接打印；PDF 原件票标注见 PDF 版） */
@@ -945,7 +970,7 @@ async function uploadBatchDocx(batchNo, items) {
     sections: [{ properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 720, bottom: 720, left: 720, right: 720 } } }, children }],
   });
   const buffer = await Packer.toBuffer(doc);
-  return client.uploadMediaToBitable(buffer, `报销单_${batchNo}_打印件.docx`);
+  return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_打印件.docx`);
 }
 
 // ---------- 交付包⑦：扫码清单（2026-09-29 曼波定） ----------
@@ -982,8 +1007,16 @@ async function buildBatchQrImages(items) {
       out.push({ ...base, note: !item.fileTokens.length ? '票面原件缺失，请扫纸质原件' : '二维码不可重建（识别时未取得二维码原文），请扫纸质原件' });
       continue;
     }
-    // errorCorrectionLevel M + 480px：屏幕/打印两用都够清晰；原文串重生成，内容与小翼Plus 读到的一致
-    const png = await QRCode.toBuffer(payload, { type: 'png', width: 480, margin: 1, errorCorrectionLevel: 'M' });
+    // errorCorrectionLevel M + 480px：屏幕/打印两用都够清晰；原文串重生成，内容与小翼Plus 读到的一致。
+    // toBuffer 容错（对抗审查 P2-2：超长 payload 超出 QR 容量会抛错——单张失败标 invalid 跳号，
+    // 不让一张票打断整批清单）
+    let png;
+    try {
+      png = await QRCode.toBuffer(payload, { type: 'png', width: 480, margin: 1, errorCorrectionLevel: 'M' });
+    } catch (err) {
+      out.push({ ...base, note: `二维码生成失败（${String(err.message).slice(0, 40)}），请扫纸质原件` });
+      continue;
+    }
     out.push({ ...base, valid: true, png });
   }
   return out;
@@ -1017,7 +1050,7 @@ async function uploadBatchScanSheetDocx(batchNo, items) {
     }],
   });
   const buffer = await Packer.toBuffer(doc);
-  const token = await client.uploadMediaToBitable(Buffer.from(buffer), `报销单_${batchNo}_扫码清单.docx`);
+  const token = await client.uploadMediaToBitable(Buffer.from(buffer), `报销单_${batchNoFileSafe(batchNo)}_扫码清单.docx`);
   return { token, scanItems: qrImages };
 }
 
@@ -1202,7 +1235,9 @@ async function markBatch(batchNo, status, operator = '') {
           const hit = recordByApplyNo.get(applyNo);
           if (!hit) continue;
           try {
-            await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': '' });
+            // 是否打印一并清（对抗审查 P1-2：锁定时打的「是」随退票失效——残留会让回池票
+            // 被票池过滤/催办跳过/金额线漏算，发票凭空消失直到人工清标记）
+            await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': '', '是否打印': '' });
           } catch (err) {
             console.error(`[批次] 退回清审批表报销单栏失败（${applyNo}）:`, err.message);
             returnFailed.push(applyNo);
@@ -1266,10 +1301,14 @@ async function confirmDelivery(batchNo, operator = '') {
     const status = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
     if (status !== collectStore.BATCH_STATUS.LOCKED) throw new Error(`批次 ${batchNo} 状态【${status}】不可确认交付（仅【已锁定】可确认）`);
     const hasDelivery = Array.isArray(batch.fields['打印文件']) && batch.fields['打印文件'].length > 0;
+    // 半截生成补漏（对抗审查 P2-1 附带）：首 confirm 时某件生成失败（如扫码清单缺失），
+    // 再 confirm 会因「打印文件已存在」跳过重生成——条件补扫码清单，缺则全量重生成
+    //（regen 内核幂等全量重造，重复生成无害）
+    const hasScanSheet = Array.isArray(batch.fields['扫码清单']) && batch.fields['扫码清单'].length > 0;
 
     let regen = null;
-    if (!hasDelivery) {
-      regen = await regenerateBatchFiles(batchNo); // 复用 regen：全套附件含扫码清单落表
+    if (!hasDelivery || !hasScanSheet) {
+      regen = await doRegenerateBatchFiles(batchNo); // 复用 regen 内核（本函数已持批次锁）
     }
     await collectStore.updateBatch(batch.record_id, {
       '交付确认人': operator || '财务确认',

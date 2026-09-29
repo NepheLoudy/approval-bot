@@ -216,7 +216,9 @@ async function collectFromMessage(payload) {
       ...(match && match.amount !== null ? { '金额差': amountDiff } : {}),
       '识别通道': result.source === 'qrcode+ocr' ? 'qrcode+ocr' : result.source,
       '校验状态': verifyStatus,
-      ...(f.qrPayload ? { '二维码内容': f.qrPayload } : {}),
+      // qrPayload 挂识别结果顶层（invoiceParser 各通道统一），不在 fields 里——
+      // 对抗审查 P1-1：此前读 f.qrPayload（fields）恒 undefined，「二维码内容」列从未写入
+      ...(result.qrPayload ? { '二维码内容': result.qrPayload } : {}),
       ...(notes.length ? { '备注': notes.join('；') } : {}),
       ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
       '采集时间': Date.now(),
@@ -261,8 +263,10 @@ async function collectFromMessage(payload) {
   await bot.sendTextToUser(openId, lines.join('\n')).catch(() => {});
 
   // 9b. 抬头警报（2026-09-29 曼波定：只认重庆大学抬头，其他一律拦截+群警报）——
-  // 除打回提交人外审批群同步响一声，财务不用从队员转述里才知道有人交错票
-  if (verifyStatus === '抬头存疑' && f.buyerName) {
+  // 除打回提交人外审批群同步响一声，财务不用从队员转述里才知道有人交错票。
+  // 触发看 buyerCheck 本身（对抗审查 P3-5：金额不符优先级压过抬头存疑时也要响——
+  // 错误抬头+金额不符的票不能只躺在队员回执里）
+  if (buyerCheck.status === '抬头存疑' && f.buyerName) {
     // 抬头/姓名来自外部（发票票面 OCR/队员），卡片 markdown 统一走 stripCardInjection
     //（对抗审查 P2-2：esc 只滤换行不滤 md 语法，钓鱼链接可穿透）
     const esc = (s) => bot.stripCardInjection(String(s)).replace(/[\r\n]/g, ' ').slice(0, 60);

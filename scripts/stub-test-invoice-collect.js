@@ -211,6 +211,22 @@ async function main() {
     assert.equal(merged2.ok, true, 'QR 三要素齐 OCR 无抬头仍收票');
     assert.ok(!merged2.fields.buyerName && !merged2.fields.buyerTaxNo, 'OCR 无抬头时不注入（QR fields 本无抬头键，falsy 即未注入）');
     assert.ok((merged2.warnings || []).some(w => w.includes('人工核对抬头')), '无抬头时带人工核对 warning');
+
+    // P1-1 回归锁：QR 通道采集落库后「二维码内容」列必须写入原文（此前层级错位恒空，
+    // 扫码清单原文重生成整条链路静默失效而测试全绿）
+    const realDownload = client.downloadMessageResource;
+    const qrPayload2 = '01,24312000000098765432,88.00,20260915,abc123';
+    client.downloadMessageResource = async () => await QRCode.toBuffer(qrPayload2, { type: 'png', width: 320, margin: 1 });
+    try {
+      const collected = await invoiceCollectServiceModule.collectFromMessage({ openId: 'ou_qr_payload_test', messageId: 'm_qr_payload', fileKey: 'fk_qr', msgType: 'image', fileName: 'qr.png' });
+      assert.equal(collected.ok, true, 'QR 票采集成功');
+      const rowIdx = collectRows.findIndex(r => r.fields['发票号码'] === '24312000000098765432');
+      assert.ok(rowIdx >= 0, 'QR 票已落采集表');
+      assert.equal(collectRows[rowIdx].fields['二维码内容'], qrPayload2, '「二维码内容」列=二维码原文（P1-1 回归锁）');
+      collectRows.splice(rowIdx, 1); // 隔离：不污染后续链路用例的 collectRows 计数断言
+    } finally {
+      client.downloadMessageResource = realDownload;
+    }
   }
 
   // ---------- 链路：collectFromMessage（成功收录 + 镜像回写 + 金额比对） ----------

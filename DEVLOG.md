@@ -501,3 +501,13 @@
 - **笔序**：nextProjectOrdinal 从「本项目机器人批次数+1」（自动批次恒第一笔）改为 **max(台账摘要列解析的全局最大「第X笔」, BATCH_ORDINAL_BASE 基数) + 1**——财务笔序是全局递增且台账常滞后（口供 30 笔时台账仅录 25，基数=进度下限）；新增 utils/cny.cnOrdinalToNum 中文序号反解析（二十四→24，简繁容错）；台账与基数都不可用才回落本地计数。
 - **线上修正**：自动-步兵机器人-0929 摘要改「机甲大师实验室-27赛季-对抗赛-步兵机器人-材料费-第三十一笔」、笔序 31、用途 对抗赛（未 confirm 未生成交付件，改字段即可，confirm 后 regen 用新值）。
 - 测试：五套全绿；新增 笔序接台账断言（台账 25→26、基数 30→31）+ 摘要段序断言；stub 环境 ordinalBase 归零（.env 生产值不进断言）。
+
+## v63 · 2026-09-29 · 随本提交落地 · fix
+
+**第四轮对抗审查修复批（子代理攻新代码面 + 主会话攻接缝，13 修）**
+
+- **P1×2（都是「链路断了但测试全绿」的静默失效）**：①qrPayload 层级错位——识别结果顶层字段被当 fields 成员读，「二维码内容」列从未写入、扫码清单原文重生成整条链路空转（建列成了死列）；改读 result.qrPayload + 落库后列非空的端到端回归锁（stub 意识到 stub tryQrChannel 无效改用真二维码图）。②reject 回票不清「是否打印=是」——退回的票被票池/催办/金额线三处过滤永久隐身且 reject 终态无自愈；reject 分支随「报销单」一并清标记。
+- **P2×5**：regen 加批次锁（拆 doRegenerateBatchFiles 无锁内核防 confirm 自死锁；confirm 幂等补扫码清单缺失检测防半截生成）；QRCode.toBuffer 容错（超长 payload 单票降级不炸整批清单）；两处卡片 batchNo 消毒（自动批次号含项目段，与打印询问卡口径拉齐）+ 上传文件名 batchNoFileSafe + applyLink 协议白名单；nextProjectOrdinal readGrid 上限 1000→5000（台账增长超限后笔序倒退撞摘要）；票池过滤非「已通过」申请的票（撤回/拒绝申请的票不得自动锁进付款批次）。
+- **主会话自查×2**：formAlertService 跳过「未归类」项目（未归类票满 500 会自动锁出无主批次）与「票池 0 张」的补充口径-only 项目（lockBatch 必抛且无冷却无限重试）；red 警报触发条件改看 buyerCheck（金额不符优先级压过抬头存疑时警报不再被吞）。
+- **P3×4**：fmtDateMs/buildArchiveFolderName 时区统一 UTC+8（P2-3 漏网）；test-form-alert 手动触发路由；状态文件损坏改名备份（urgeStateStore/formAlertService）；withLock Map settle 后清理（只增不删内存爬升）。
+- **测试纪律教训**：本轮暴露 delivery 套件自 v57（sendDeliveryCard 上线）起就没跑过全绿——sendDeliveryCard 模块内直引 sendMessage 绕过 stub，**测试交付卡一直在偷偷发往真实 webhook**（tryQrChannel 同款直引陷阱第二次踩）；修复走 module.exports 引用，个人测试命令的 grep 筛选把 ❌ 行滤掉了（tail -1 只看最后一行）导致多轮带病运行——已改为跑完整输出。五套全绿（delivery 补 台账桩/基数归零/回写断言更新/无交付件 submit 闸断言）。

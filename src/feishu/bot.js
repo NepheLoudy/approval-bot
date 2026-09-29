@@ -519,6 +519,8 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
   // 外部可影响字段先消毒再拼 markdown（复查 P2-16）
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
+  // 批次号含项目段（自动批次号=自动-<项目>-MMDD），进 markdown/标题前消毒（对抗审查 P2-3）
+  const safeBatchNo = stripCardInjection(batchNo);
 
   const lines = [
     auto
@@ -561,8 +563,8 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
 
   lines.push(
     ``,
-    `👉 **认领：@机器人 回复「接取」**（可带批次号，如「接取 ${batchNo}」）`,
-    `✅ 录入完成后：/approval-batch submit ${batchNo}`
+    `👉 **认领：@机器人 回复「接取」**（可带批次号，如「接取 ${safeBatchNo}」）`,
+    `✅ 录入完成后：/approval-batch submit ${safeBatchNo}`
   );
 
   return {
@@ -570,7 +572,7 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     elements: [{ tag: 'markdown', content: lines.join('\n') }],
     header: {
       template: 'orange',
-      title: { content: `${auto ? '🤖 报销单已自动生成' : '📦 报销交付包'} · ${batchNo}`, tag: 'plain_text' },
+      title: { content: `${auto ? '🤖 报销单已自动生成' : '📦 报销交付包'} · ${safeBatchNo}`, tag: 'plain_text' },
     },
   };
 }
@@ -580,7 +582,9 @@ function abnormalItemLines(abnormalItems, cap = 8) {
   if (!Array.isArray(abnormalItems) || !abnormalItems.length) return [];
   const lines = abnormalItems.slice(0, cap).map(a => {
     const safeNo = stripCardInjection(a.applyNo);
-    const link = a.applyLink ? ` → [${safeNo || '查看审批'}](${a.applyLink})` : (safeNo ? ` → ${safeNo}（无链接）` : ' → 未关联申请');
+    // 协议白名单（对抗审查：applyLink 来自表格可写字段，非 https 一律不带链接只给文本）
+    const linkOk = /^https:\/\//i.test(String(a.applyLink || ''));
+    const link = linkOk ? ` → [${safeNo || '查看审批'}](${a.applyLink})` : (safeNo ? ` → ${safeNo}（无链接）` : ' → 未关联申请');
     const remark = a.remark ? `（${stripCardInjection(a.remark)}）` : '';
     return `- #${a.seq} ${a.amountText} 尾号${a.tail}「${stripCardInjection(a.verifyStatus)}」${remark}${link}`;
   });
@@ -596,6 +600,7 @@ function abnormalItemLines(abnormalItems, cap = 8) {
 function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [] } = {}) {
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
+  const safeBatchNo = stripCardInjection(batchNo); // 自动批次号含项目段，消毒后再进卡（P2-3）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
     : '';
@@ -607,8 +612,8 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
     '',
     `📋 该项目「已开发票且未制单」金额已达红线，报销单号已生成、发票已自动归批打标。`,
     `**请核对以上明细**：`,
-    `✅ 无误 → 回复 **/approval-batch confirm ${batchNo}**（确认后立即生成 发票排版文件/物料清单/扫码清单，并下发二维码开始录入）`,
-    `❌ 有误 → **/approval-batch reject ${batchNo}**（整批退回票池，重新核对后触发下一批）`,
+    `✅ 无误 → 回复 **/approval-batch confirm ${safeBatchNo}**（确认后立即生成 发票排版文件/物料清单/扫码清单，并下发二维码开始录入）`,
+    `❌ 有误 → **/approval-batch reject ${safeBatchNo}**（整批退回票池，重新核对后触发下一批）`,
     tableUrl ? `📄 批次明细：[报销批次表](${tableUrl})` : '',
   ].filter(Boolean);
   if (warningCount > 0) {
@@ -625,7 +630,7 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
     elements: [{ tag: 'markdown', content: lines.join('\n') }],
     header: {
       template: 'orange',
-      title: { content: `🖨️ 报销单已生成，待确认 · ${batchNo}`, tag: 'plain_text' },
+      title: { content: `🖨️ 报销单已生成，待确认 · ${safeBatchNo}`, tag: 'plain_text' },
     },
   };
 }
@@ -646,7 +651,9 @@ async function sendDeliveryCard(cardData) {
       console.warn(`[交付卡] 二维码 #${q.seq} 上传失败（${err.message}），该码降级为扫码清单附件扫码`);
     }
   }
-  return sendMessage(buildDeliveryCard({ ...cardData, scanItems: qrImages }));
+  // 走 exports 引用而非模块内直引（对抗审查补漏：直引绕过测试对 exports.sendMessage
+  // 的桩，交付卡会真发到生产 webhook——tryQrChannel 同款陷阱）
+  return module.exports.sendMessage(buildDeliveryCard({ ...cardData, scanItems: qrImages }));
 }
 
 /**

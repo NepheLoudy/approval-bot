@@ -9,7 +9,7 @@ const ocrService = require('./services/ocrService');
 const invoiceCollectService = require('./services/invoiceCollectService');
 const backfillService = require('./services/backfillService');
 const bot = require('./feishu/bot');
-const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, getCronStatus, getBroadcastHistory } = require('./cron');
+const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, runFormAlertOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
 const app = express();
 
@@ -123,6 +123,17 @@ app.post('/api/bot/test-invoice-urge', requireApiToken, async (req, res) => {
     res.json({ success: true, result });
   } catch (err) {
     console.error('测试催发票失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 手动触发一次制单金额线检查（dryRun=true 只查不锁，预览命中项目）
+app.post('/api/bot/test-form-alert', requireApiToken, async (req, res) => {
+  try {
+    const result = await runFormAlertOnce({ dryRun: !!req.body?.dryRun });
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('测试制单金额线失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
