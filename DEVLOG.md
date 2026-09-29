@@ -483,3 +483,11 @@
 
 - `/api/chat/command` 挂 `requireApiToken`（此前零鉴权信任 body 自报 senderId，本机进程/浏览器 CSRF 可伪造资金状态写台账/触发私聊）；调用方唯一=hub（含裸词「接取」），hub 侧 `handleApprovalCommand` 同批补 X-API-Token 头（hub v122 先部署），链路无断窗。运维台只 GET 只读端点不受影响；auth.js「用户可达链路不挂鉴权」历史口径废止注释更新。
 - 验证：目标机本机 curl 无 token 403 / 带 token 200。
+
+## v61 · 2026-09-29 · 随本提交落地 · feat
+
+**异常票明细带审批号超链接 + OCR 抬头识别强化（曼波反馈两连）**
+
+- **异常票明细**：collectToItem 提取审批「申请编号」Url link 与采集备注；collectAbnormalItems（lock/regen 共用）输出 批内序号/金额/尾号/状态/备注/审批号超链接；详情卡与交付卡 warning 行升级为逐张明细（上限 8 张，超出指向采集表；未关联申请如实标注），首张自动批次已实证触发（¥541.13 抬头存疑票 → 可点开 202608160002 审批页）。
+- **OCR 强化**：根因=发票 QR payload 不含购买方，纯 qrcode 通道抬头字段全空，checkBuyer 把「没识别」误判成「不匹配」。①recognizeInvoice 图片分支：QR 命中但缺抬头时继续跑 OCR 补抬头（QR 精确要素优先，补到 source=qrcode+ocr；补不到带「人工核对」warning 照常收票）；②checkBuyer 区分：抬头字段全空=「待人工」（识别渠道限制），「抬头存疑」只留给识别出但真不匹配的票。
+- 测试：五套全绿；stub 新增 真二维码图（qrcode 库生成）走完整解码链的合并断言（stub tryQrChannel 无效——模块内部直引，教训记录）；checkBuyer 空字段=待人工断言。

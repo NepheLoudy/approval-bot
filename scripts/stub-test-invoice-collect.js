@@ -185,10 +185,33 @@ async function main() {
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerTaxNo: '50000000TESTXX01' }).status, null, '税号命中放行');
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerName: '重庆大学' }).status, null, '名称命中放行');
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerName: '个人', buyerTaxNo: '123' }).status, '抬头存疑');
+  // 未识别 ≠ 不匹配（2026-09-29 强化）：纯 QR 票无抬头信息判「待人工」，不再误报「抬头存疑」
+  assert.equal(invoiceCollectServiceModule.checkBuyer({}).status, '待人工', '抬头字段全空=待人工（识别渠道限制）');
   const savedBuyers = config.invoiceCollect.allowedBuyers;
   config.invoiceCollect.allowedBuyers = [];
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerName: '个人' }).status, null, '未配置抬头=不校验');
   config.invoiceCollect.allowedBuyers = savedBuyers;
+
+  // ---------- 单元：QR 命中缺抬头 → OCR 补抬头合并（2026-09-29 强化） ----------
+  {
+    // 真二维码图片（qrcode 库生成发票 payload）：tryQrChannel 是模块内部直引，stub 无效，
+    // 用真图走完整解码链
+    const QRCode = require('qrcode');
+    const qrPayload = '01,24312000000123456789,120.50,20260901,33dsk';
+    const qrPng = await QRCode.toBuffer(qrPayload, { type: 'png', width: 320, margin: 1 });
+    const ocrWithBuyer = async () => ['购买方名称:重庆大学 统一社会信用代码:50000000TESTXX01', '价税合计(小写):¥120.50'];
+    const merged = await invoiceParser.recognizeInvoice(qrPng, {}, ocrWithBuyer);
+    assert.equal(merged.ok, true, 'QR+OCR 补抬头仍收票');
+    assert.equal(merged.source, 'qrcode+ocr', '补到抬头 source=qrcode+ocr');
+    assert.equal(merged.fields.buyerName, '重庆大学', 'OCR 抬头并入 merged 字段');
+    assert.equal(merged.fields.invoiceNo, '24312000000123456789', 'QR 三要素优先不被 OCR 覆盖');
+    assert.equal(merged.qrPayload, qrPayload, 'QR 原文保留（扫码清单重生成用）');
+    // OCR 也补不到抬头：照常收票 + 人工核对 warning（checkBuyer 按待人工分流）
+    const merged2 = await invoiceParser.recognizeInvoice(qrPng, {}, async () => ['完全无关的文本']);
+    assert.equal(merged2.ok, true, 'QR 三要素齐 OCR 无抬头仍收票');
+    assert.ok(!merged2.fields.buyerName && !merged2.fields.buyerTaxNo, 'OCR 无抬头时不注入（QR fields 本无抬头键，falsy 即未注入）');
+    assert.ok((merged2.warnings || []).some(w => w.includes('人工核对抬头')), '无抬头时带人工核对 warning');
+  }
 
   // ---------- 链路：collectFromMessage（成功收录 + 镜像回写 + 金额比对） ----------
   const svc = invoiceCollectServiceModule;

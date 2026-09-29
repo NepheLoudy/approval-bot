@@ -43,6 +43,12 @@ function parseAllowedBuyers() {
 function checkBuyer(fields) {
   const allowed = parseAllowedBuyers();
   if (!allowed.length) return { status: null, note: '未配置抬头校验' };
+  // 未识别 ≠ 不匹配（2026-09-29 曼波反馈强化）：名称/税号都空是「识别渠道没取到」
+  //（纯 QR 通道补 OCR 仍失败），不是票面抬头问题——判「待人工」让财务核票面，
+  // 「抬头存疑」只留给「识别出了抬头但确实不匹配」的票
+  if (!fields.buyerName && !fields.buyerTaxNo) {
+    return { status: '待人工', note: '未识别到购买方信息（识别渠道限制，非票面异常），请财务对照票面核对抬头' };
+  }
   const hit = allowed.find(a =>
     (a.taxNo && fields.buyerTaxNo && fields.buyerTaxNo === a.taxNo) ||
     (a.name && fields.buyerName && fields.buyerName.includes(a.name)));

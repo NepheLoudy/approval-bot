@@ -227,9 +227,34 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
     return { ok: false, source: 'pdfText', reason: error || 'PDF 识别失败', fields: {}, missing: [], warnings: [], looksLikeInvoice: true };
   }
 
-  // 图片：先二维码，后 OCR
+  // 图片：先二维码，后 OCR。
+  // 2026-09-29 强化：发票 QR payload 只含票号/日期/金额，不含购买方——QR 命中而抬头
+  // 缺失时继续跑 OCR 补抬头字段（此前直接返回，抬头校验对纯 QR 票无料可校，全部误判
+  // 「抬头存疑」）；OCR 失败/仍无抬头则带 warning 降级，QR 三要素齐全照常收票
   const { result: qrResult, error: qrError } = await tryQrChannel(buffer);
-  if (qrResult && qrResult.ok) return { source: 'qrcode', ...qrResult };
+  const qrOk = qrResult && qrResult.ok;
+  const needBuyer = qrOk && !qrResult.fields.buyerName && !qrResult.fields.buyerTaxNo;
+
+  if (qrOk && !needBuyer) return { source: 'qrcode', ...qrResult };
+
+  if (qrOk && needBuyer && typeof ocrFallback === 'function') {
+    try {
+      const segments = await ocrFallback(buffer);
+      const parsedInvoice = parseInvoiceText(segments.join('\n'));
+      const merged = { ...qrResult.fields };
+      // QR 精确要素优先，OCR 只补 QR 没有的字段（购买方/销售方/开票内容等）
+      for (const k of Object.keys(parsedInvoice.fields || {})) {
+        if (parsedInvoice.fields[k] && !merged[k]) merged[k] = parsedInvoice.fields[k];
+      }
+      const warnings = [...(qrResult.warnings || [])];
+      const gotBuyer = Boolean(merged.buyerName || merged.buyerTaxNo);
+      if (!gotBuyer) warnings.push('二维码不含购买方信息，OCR 亦未识别到抬头——请对照票面人工核对抬头');
+      return { source: gotBuyer ? 'qrcode+ocr' : 'qrcode', ...qrResult, fields: merged, warnings };
+    } catch (err) {
+      // OCR 补抬头失败不拦票（三要素已齐）：warning 标注，checkBuyer 按「待人工」分流
+      return { source: 'qrcode', ...qrResult, warnings: [...(qrResult.warnings || []), `抬头补识别失败（${String(err.message).slice(0, 40)}），请人工核对票面抬头`] };
+    }
+  }
 
   if (typeof ocrFallback === 'function') {
     try {
