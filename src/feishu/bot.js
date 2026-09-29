@@ -543,7 +543,7 @@ function stripCardInjection(s) {
 function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {} } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
-    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
+    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}&view=vewwHv4bG4`
     : '';
   const mark = (ok, label, desc) => `- ${ok ? '✅' : '⚠️'} **${label}** — ${desc}${ok ? '' : '（生成失败，可 /approval-batch regen 重试）'}`;
   // 外部可影响字段先消毒再拼 markdown（复查 P2-16）
@@ -632,7 +632,7 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
   const safeSummary = stripCardInjection(summary);
   const safeBatchNo = stripCardInjection(batchNo); // 自动批次号含项目段，消毒后再进卡（P2-3）
   const tableUrl = config.bitable.appToken
-    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
+    ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}&view=vewwHv4bG4`
     : '';
   const lines = [
     `**项目** ${safeProject || '—'} ｜ **张数** ${count} ｜ **金额合计** ¥${Number(amount).toFixed(2)}`,
