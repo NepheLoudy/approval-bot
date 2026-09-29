@@ -323,6 +323,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
         specialCount: r.specialCount,
         scanItems: r.scanItems || [],
+        abnormalItems: r.abnormalItems || [],
       });
     } catch (err) {
       console.error('[对话服务] 交付卡发送失败:', err.message);
@@ -432,7 +433,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         batchNo: r.batchNo, project: g.project || '', count: g.count, amount: g.amount || 0,
         summary: g.summary || '', warningCount: 0, missingContent: 0,
         generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, deliverySheet: !!g.dsToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
-        specialCount: g.specialCount, scanItems: g.scanItems || [],
+        specialCount: g.specialCount, scanItems: g.scanItems || [], abnormalItems: g.abnormalItems || [],
       });
     } catch (err) {
       console.error('[对话服务] 确认后交付卡发送失败:', err.message);

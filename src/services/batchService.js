@@ -94,6 +94,9 @@ function collectToItem(r, byApplyNo) {
     issueDateMs: Number(f['开票日期']) || 0,
     invoiceContent: String(f['开票内容'] || ''),
     qrPayload: String(f['二维码内容'] || ''),
+    // 审批实例链接（审批表「申请编号」Url 字段 {text, link}）——异常票明细卡直跳审批页
+    applyLink: af['申请编号'] && typeof af['申请编号'] === 'object' ? String(af['申请编号'].link || '') : '',
+    remark: String(f['备注'] || ''),
     // 特殊事项触发源（2026-09-27 曼波反馈：公私属性不分明/大额票要单独排纸——
     // 表单字段名自带触发规则，非空即命中；值为审批管理员预览链接 {link,text}）
     payRecord: af['支付记录（大于800元或宣传材料需要）'] || null,
@@ -135,6 +138,23 @@ async function previewBatch() {
     }))
     .sort((a, b) => b.count - a.count);
   return { poolSize: pool.length, suggestions };
+}
+
+/** 异常票明细（详情卡/交付卡共用，2026-09-29 曼波反馈：异常要带审批号超链接）：
+ *  校验状态非「通过」或金额无效的票，带批内序号（对齐扫码清单）/金额/尾号/状态/审批链接 */
+function collectAbnormalItems(items) {
+  return items
+    .map((item, idx) => ({ ...item, seq: idx + 1 }))
+    .filter(i => i.verifyStatus !== '通过' || i.amountInvalid)
+    .map(i => ({
+      seq: i.seq,
+      amountText: `¥${(i.totalAmount || 0).toFixed(2)}`,
+      tail: i.invoiceNo ? i.invoiceNo.slice(-6) : '??????',
+      verifyStatus: i.verifyStatus || '未校验',
+      remark: String(i.remark || '').slice(0, 60),
+      applyNo: String(i.applyNo || ''),
+      applyLink: String(i.applyLink || ''),
+    }));
 }
 
 /**
@@ -325,6 +345,7 @@ async function lockBatch(batchNo, project, options = {}) {
       specialCount: specials.length,
       summary, purpose, ordinal, markFailed,
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
+      abnormalItems: collectAbnormalItems(pool),
       missingContent: pool.filter(i => !i.invoiceContent).length,
       recordId: batchRecord.record_id, items: pool,
     };
@@ -450,7 +471,7 @@ async function regenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, amountDrift };
+  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------

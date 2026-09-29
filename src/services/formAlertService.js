@@ -142,6 +142,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
           batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
           summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
           unCollected: s.unCollected || 0,
+          abnormalItems: r.abnormalItems || [],
         }));
       } catch (err) {
         console.error(`[制单金额线] 自动批次 ${r.batchNo} 详情卡发送失败（批次已锁定，可 confirm 继续）:`, err.message);

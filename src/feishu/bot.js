@@ -510,7 +510,7 @@ function stripCardInjection(s) {
  * 2026-09-29 曼波定：卡内直接按序内嵌全部有效发票二维码（imageKey 由 sendDeliveryCard
  * 预先上传换得），财务对屏幕按序号扫码即可完成录入；自动触发场景头部/文案切换。
  */
-function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, auto = false, scanItems = [], generated = {} } = {}) {
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {} } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}`
@@ -554,7 +554,9 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     mark(generated.printDocx, '打印件 docx', '可编辑版（Word 里可调可删后打印）'),
     mark(generated.specialSheet, '特殊事项附页', `${specialCount} 张（大额/公私属性不分明/有支付记录），单独成页`),
   );
-  if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票，录入前先核对采集表「校验状态」`);
+  if (warningCount > 0) {
+    lines.push(``, `⚠️ 含 ${warningCount} 张异常票（录入时留意）：`, ...abnormalItemLines(abnormalItems));
+  }
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);
 
   lines.push(
@@ -573,12 +575,25 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
   };
 }
 
+/** 异常票明细行（详情卡/交付卡共用，2026-09-29 曼波反馈：异常要带审批号超链接直跳审批页） */
+function abnormalItemLines(abnormalItems, cap = 8) {
+  if (!Array.isArray(abnormalItems) || !abnormalItems.length) return [];
+  const lines = abnormalItems.slice(0, cap).map(a => {
+    const safeNo = stripCardInjection(a.applyNo);
+    const link = a.applyLink ? ` → [${safeNo || '查看审批'}](${a.applyLink})` : (safeNo ? ` → ${safeNo}（无链接）` : ' → 未关联申请');
+    const remark = a.remark ? `（${stripCardInjection(a.remark)}）` : '';
+    return `- #${a.seq} ${a.amountText} 尾号${a.tail}「${stripCardInjection(a.verifyStatus)}」${remark}${link}`;
+  });
+  if (abnormalItems.length > cap) lines.push(`- …另有 ${abnormalItems.length - cap} 张异常票（见发票采集表「校验状态」列）`);
+  return lines;
+}
+
 /**
  * 自动锁定详情卡（两阶段流程第一阶段，2026-09-29 曼波定）：金额线满额自动锁定后
  * 先只发批次详情等财务确认——确认（/approval-batch confirm）后才生成交付件并发二维码卡。
  * 无二维码、无附件清单（都还没生成）；要退有 reject 出口。
  */
-function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0 } = {}) {
+function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [] } = {}) {
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
   const tableUrl = config.bitable.appToken
@@ -596,7 +611,10 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
     `❌ 有误 → **/approval-batch reject ${batchNo}**（整批退回票池，重新核对后触发下一批）`,
     tableUrl ? `📄 批次明细：[报销批次表](${tableUrl})` : '',
   ].filter(Boolean);
-  if (warningCount > 0) lines.push(``, `⚠️ 含 ${warningCount} 张待人工/异常票（采集表「校验状态」非通过），确认前建议先核对`);
+  if (warningCount > 0) {
+    lines.push(``, `⚠️ 含 ${warningCount} 张异常票（校验状态非通过/金额无效），确认前逐张核对：`, ...abnormalItemLines(abnormalItems));
+    if (abnormalItems.length && abnormalItems.length < warningCount) lines.push(`（明细仅 ${abnormalItems.length} 条，与计数不符时以采集表为准）`);
+  }
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」，录入时需现场补填`);
   // 发票/补交发票两列等效口径（2026-09-29 曼波定）：审批提交时直接附票的记录不在采集表，
   // 金额已计入本批触发，但无票面图片进不了打印批——如实提示，回溯采集后自动并入后续批次
