@@ -256,7 +256,7 @@ function fundOperatorDenied(ctx = {}) {
  *   /approval-batch submit <批次号> [投递单号] → 标记已提交学校 + 台账表追加行（幂等）
  *   /approval-batch paid <批次号>        → 标记已到账（台账回填入账日期+已到账）+ 归档名建议
  *   /approval-batch reject <批次号>      → 标记已退回（台账标记已退回；退回票自动回票池）
- *   /approval-batch regen <批次号>       → 四件附件重新生成
+ *   /approval-batch regen <批次号>       → 全部交付件重新生成（打印PDF/docx、BOM、物料清单、投递底单、扫码清单、特殊事项附页）
  *   /approval-batch ledger <批次号> [投递单号] → 手动把批次同步进台账电子表格
  *   接取 [批次号]                        → 审批群回复「接取」领取交付包（登记接取人）
  */

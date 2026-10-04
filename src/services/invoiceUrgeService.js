@@ -110,11 +110,28 @@ function fmtDay(ms) {
 }
 
 /**
- * 轮询所有已建联用户的私聊回复
+ * 轮询所有已建联用户的私聊回复。
+ * 并发互斥（2026-10-04）：小时级回复轮询 cron 与每日催办轮的轮询阶段可能撞车，
+ * 重入会重复消费回复 → 双份回执/重复采集；后到者直接跳过（下一轮小时轮询兜住）。
  * @param {object} [options] { silent } silent=true 时纯只读：不写状态、不发确认回执（dry-run 用），
  *   已识别的回复留到下一次真实执行再消费
  */
+let pollRunning = false;
+
 async function pollAllReplies(options = {}) {
+  if (pollRunning) {
+    console.warn('[催发票] 上一轮回复轮询仍在执行，跳过本次触发（防重复回执/重复采集）');
+    return { skipped: true, reason: 'poll_running', users: 0, deferred: 0, cannotSubmit: 0, ignored: 0, collected: 0, rejected: 0, duplicated: 0, collectFailed: 0 };
+  }
+  pollRunning = true;
+  try {
+    return await pollAllRepliesInner(options);
+  } finally {
+    pollRunning = false;
+  }
+}
+
+async function pollAllRepliesInner(options = {}) {
   ensureInit();
   const stats = { users: 0, deferred: 0, cannotSubmit: 0, ignored: 0, collected: 0, rejected: 0, duplicated: 0, collectFailed: 0 };
 

@@ -224,17 +224,48 @@ function uploadEnv() {
 }
 
 // ============ [4/4] 重启服务 ============
+const HEALTH_PORT = process.env.PORT || '3002';
+
 function restart() {
   console.log('\n========== [4/4] 重启服务 ==========');
   // --time：pm2 日志加时间戳前缀（2026-09-30 曼波定——排查「群里发了什么」需要时间线）
   const cmd = 'pm2 restart ' + PM2_NAME + ' --time --update-env 2>/dev/null || pm2 start ' + REMOTE_DIR + '/src/index.js --name ' + PM2_NAME + ' --time; pm2 save';
-  exec(cmd, () => {
-    console.log('\n✅ 部署完成，服务状态：');
-    conn.exec('pm2 list', (err, stream) => {
-      if (err) { conn.end(); return; }
-      stream.on('data', (d) => process.stdout.write(d.toString()));
-      stream.on('close', () => conn.end());
+  exec(cmd, () => healthCheck(0));
+}
+
+// 部署后健康检查（2026-10-04）：重启后轮询 /api/health，防止「部署成功但进程起不来」
+// 的静默故障——09-29~10-03 目标机 node_modules 半残（qrcode 缺失）导致进程 crash
+// 循环、定时任务全灭，当时无任何部署期告警。6 次重试仍不就绪即判部署失败。
+function healthCheck(attempt) {
+  const MAX_ATTEMPTS = 6;
+  console.log(`健康检查 (${attempt + 1}/${MAX_ATTEMPTS}): localhost:${HEALTH_PORT}/api/health`);
+  conn.exec(`sleep 3; curl -s -m 3 localhost:${HEALTH_PORT}/api/health`, (err, stream) => {
+    if (err) { console.error('健康检查执行失败:', err.message); conn.end(); process.exit(1); }
+    let out = '';
+    stream.on('data', (d) => { out += d.toString(); });
+    stream.on('close', () => {
+      if (out.includes('"status":"ok"')) {
+        console.log('✅ 健康检查通过:', out.trim().slice(0, 160));
+        showStatus();
+        return;
+      }
+      if (attempt + 1 >= MAX_ATTEMPTS) {
+        console.error(`❌ 部署后健康检查失败（${MAX_ATTEMPTS} 次未就绪）——进程可能 crash 循环（依赖缺失/启动异常）。`);
+        console.error('   排查：ssh 上机后 pm2 logs ' + PM2_NAME + ' --err --lines 50；不要让机器人带病运行。');
+        conn.end();
+        process.exit(1);
+      }
+      healthCheck(attempt + 1);
     });
+  });
+}
+
+function showStatus() {
+  console.log('\n✅ 部署完成，服务状态：');
+  conn.exec('pm2 list', (err, stream) => {
+    if (err) { conn.end(); return; }
+    stream.on('data', (d) => process.stdout.write(d.toString()));
+    stream.on('close', () => conn.end());
   });
 }
 

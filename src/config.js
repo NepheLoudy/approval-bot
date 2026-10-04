@@ -77,6 +77,13 @@ module.exports = {
     maxTimes: parseInt(process.env.INVOICE_URGE_MAX_TIMES, 10) || 5,
     // 状态文件：部署目标的 SFTP 部署会清空项目目录，生产应配到项目目录之外
     stateFile: process.env.INVOICE_URGE_STATE_FILE || '',
+    // 回复轮询（小时级，2026-10-04）：催办私聊里的「延期/无法提交」文字回复与回票图片
+    // 即时处理+回执，不再等每日 10:30 催办轮（陈方硕延期反馈：回复后 18h 无确认+hub
+    // 欢迎语干扰，用户视角=功能坏了）。只发对话回执不发催办，属交互回路不受晚间静默限；
+    // 与其它 schedule 不同，本项代码默认启用（显式配空字符串才停用）
+    replyPollSchedule: process.env.INVOICE_REPLY_POLL_SCHEDULE !== undefined
+      ? process.env.INVOICE_REPLY_POLL_SCHEDULE
+      : '0 45 * * * *',
   },
 
   // 每日待审批提醒（发票提醒）：@当前处理人，为空时回落到配置的审批人

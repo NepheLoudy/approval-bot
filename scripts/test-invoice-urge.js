@@ -177,7 +177,28 @@ async function main() {
   assert.equal(pollStats.users, 1, '轮询统计覆盖该用户');
   client.requestAPI = realRequestAPI;
 
-  console.log('✅ 桩测试全部通过：parseReply ×10 / parseDeferDays ×16 / 间隔闸（含 48h 边界） / 计数升级 / 满上限跳过 / 今日已催播报闸 / 回复轮询秒级参数（230001 回归锁）');
+  // ---------- 行为：回复轮询并发互斥（2026-10-04 小时级回复轮询上线的防双消费锁） ----------
+  // 小时级回复轮询 cron 与每日催办轮的轮询阶段可能撞车：重入会重复消费回复 →
+  // 双份回执/重复采集；后到者必须跳过并带 skipped 标记
+  assert.equal(config.invoiceUrge.replyPollSchedule, '0 45 * * * *', '回复轮询默认每小时 45 分启用');
+  client.requestAPI = async (method, urlPath) => {
+    if (String(urlPath).startsWith('/im/v1/messages')) {
+      await new Promise((r) => setTimeout(r, 80)); // 拉长首轮执行窗口，让并发第二跑撞锁
+      return { code: 0, data: { items: [] } };
+    }
+    return realRequestAPI(method, urlPath);
+  };
+  urgeStateStore.updateUser('ou_poll', { chatId: 'oc_test', lastReadTime: Date.now() - 3600e3 });
+  const [first, second] = await Promise.all([pollAllReplies({ silent: true }), pollAllReplies({ silent: true })]);
+  assert.equal(second.skipped, true, '并发第二跑必须被互斥锁跳过');
+  assert.equal(second.reason, 'poll_running', '跳过原因=poll_running');
+  assert.equal(first.users, 1, '首跑正常执行');
+  // 锁释放后可再次执行（finally 释放语义）——保持桩离线，验证后恢复
+  const third = await pollAllReplies({ silent: true });
+  assert.equal(third.skipped, undefined, '锁释放后下一轮可正常执行');
+  client.requestAPI = realRequestAPI;
+
+  console.log('✅ 桩测试全部通过：parseReply ×10 / parseDeferDays ×16 / 间隔闸（含 48h 边界） / 计数升级 / 满上限跳过 / 今日已催播报闸 / 回复轮询秒级参数（230001 回归锁） / 回复轮询并发互斥+默认调度');
 }
 
 main()

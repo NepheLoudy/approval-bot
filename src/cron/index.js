@@ -3,7 +3,7 @@ const config = require('../config');
 const quietHours = require('../utils/quietHours');
 const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
-const { runInvoiceUrge, announceTodayUrged } = require('../services/invoiceUrgeService');
+const { runInvoiceUrge, announceTodayUrged, pollAllReplies } = require('../services/invoiceUrgeService');
 const formAlertService = require('../services/formAlertService');
 const batchService = require('../services/batchService');
 const bot = require('../feishu/bot');
@@ -27,6 +27,9 @@ const bot = require('../feishu/bot');
 //   5. 打印情况询问      BATCH_PRINT_ASK_SCHEDULE          (0 15 * * * *, 每小时15分,
 //      交付确认超 BATCH_PRINT_ASK_DELAY_HOURS（默认12h）未回复打印完成的批次 → 群发询问卡
 //      引导 /approval-batch printed <批次号>；每批只自动问一次；发送过晚间静默闸顺延）
+//   6. 回复轮询          INVOICE_REPLY_POLL_SCHEDULE       (0 45 * * * *, 每小时45分,
+//      2026-10-04：催办私聊的「延期/无法提交/回票」即时处理+回执，不等每日催办轮；
+//      只发对话回执不发催办，交互回路不受晚间静默限；与催办轮互斥见 invoiceUrgeService)
 //
 // 注：DAILY_INVOICE_REMINDER_SCHEDULE / INVOICE_URGE_SCHEDULE 代码默认留空 = 不启用，
 //     上文括号内时刻为现网 .env 配置值（非代码默认）；周播报代码默认周一 18:00
@@ -158,6 +161,7 @@ let reminderTask = null;
 let invoiceUrgeTask = null;
 let formAlertTask = null;
 let printAskTask = null;
+let replyPollTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -227,13 +231,34 @@ function startCronJobs() {
   }, { timezone: 'Asia/Shanghai' });
   console.log(`[定时任务] 打印情况询问已启动: ${config.batch.printAskSchedule} (Asia/Shanghai, 确认后 ${config.batch.printAskDelayHours}h 未打印则询问) -> 下次 ${getNextExecutionTime(config.batch.printAskSchedule)}`);
 
+  // 6. 回复轮询（小时级，2026-10-04 陈方硕延期反馈）：催办私聊里的「延期/无法提交」
+  //    文字回复与回票图片即时处理+回执，不再等每日 10:30 催办轮（此前回复后最长要等
+  //    18h 才有确认，叠加 hub 欢迎语干扰，用户视角=功能坏了）。只发对话回执不发催办，
+  //    属交互回路不受晚间静默限（与接单确认同口径）；与催办轮的并发互斥在
+  //    invoiceUrgeService.pollAllReplies 内部（后到者跳过，下轮兜住）
+  if (config.invoiceUrge.replyPollSchedule) {
+    replyPollTask = cron.schedule(config.invoiceUrge.replyPollSchedule, () => {
+      pollAllReplies().then((stats) => {
+        if (stats.skipped) return; // 撞上催办轮/上一轮未结束，静默让位
+        if (stats.users > 0) {
+          console.log(`[定时任务] 回复轮询: 监听 ${stats.users} 位用户, 延期 ${stats.deferred} 批, 无法提交 ${stats.cannotSubmit} 批, 未识别 ${stats.ignored} 条`);
+        }
+      }).catch(err => {
+        console.error('[定时任务] 回复轮询失败:', err.message);
+      });
+    }, { timezone: 'Asia/Shanghai' });
+    console.log(`[定时任务] 回复轮询已启动: ${config.invoiceUrge.replyPollSchedule} (Asia/Shanghai, 延期/无法提交/回票即时回执) -> 下次 ${getNextExecutionTime(config.invoiceUrge.replyPollSchedule)}`);
+  } else {
+    console.log('[定时任务] INVOICE_REPLY_POLL_SCHEDULE 配为空，小时级回复轮询未启用（每日催办轮的轮询仍在）');
+  }
+
   // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
   for (const [name, fn] of Object.entries(quietTaskRunners)) {
     quietHours.registerTask(name, fn);
   }
   quietHours.initQuietHoursFlush();
 
-  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask, printAskTask };
+  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask, printAskTask, replyPollTask };
 }
 
 function stopCronJobs() {
@@ -242,6 +267,7 @@ function stopCronJobs() {
   if (invoiceUrgeTask) { invoiceUrgeTask.stop(); invoiceUrgeTask = null; }
   if (formAlertTask) { formAlertTask.stop(); formAlertTask = null; }
   if (printAskTask) { printAskTask.stop(); printAskTask = null; }
+  if (replyPollTask) { replyPollTask.stop(); replyPollTask = null; }
 }
 
 /**
@@ -288,6 +314,7 @@ function getCronStatus() {
       invoiceUrge: !!invoiceUrgeTask,
       formAlert: !!formAlertTask,
       printAsk: !!printAskTask,
+      replyPoll: !!replyPollTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
@@ -295,6 +322,7 @@ function getCronStatus() {
       invoiceUrge: config.invoiceUrge.schedule || '(未启用)',
       formAlert: config.formAlert.schedule || '(未启用，采集后即时检查仍生效)',
       printAsk: config.batch.printAskSchedule,
+      replyPoll: config.invoiceUrge.replyPollSchedule || '(未启用)',
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
@@ -302,6 +330,7 @@ function getCronStatus() {
       invoiceUrge: invoiceUrgeTask ? getNextExecutionTime(config.invoiceUrge.schedule) : null,
       formAlert: formAlertTask ? getNextExecutionTime(config.formAlert.schedule) : null,
       printAsk: printAskTask ? getNextExecutionTime(config.batch.printAskSchedule) : null,
+      replyPoll: replyPollTask ? getNextExecutionTime(config.invoiceUrge.replyPollSchedule) : null,
     },
     quietHours: quietHours.getStatus(),
   };
