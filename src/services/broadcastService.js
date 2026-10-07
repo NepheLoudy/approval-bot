@@ -42,6 +42,9 @@ async function runWeeklyBroadcast(options = {}) {
   // 查询失败降级跳过不炸周报
   let overdueBatches = [];
   try {
+    // 延迟 require：batchService 重依赖（pdf-lib/exceljs），周报仅在构建该段时加载
+    // （此前漏 require，本段自 v57 起每周一抛 ReferenceError 被降级 catch 吞掉，从未显示）
+    const batchService = require('./batchService');
     overdueBatches = await batchService.getStaleBatches();
   } catch (err) {
     console.warn('[周播报] 批次推进超期段跳过:', err.message);

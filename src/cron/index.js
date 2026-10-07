@@ -273,9 +273,11 @@ function stopCronJobs() {
 /**
  * 计算下次执行时间（展示用，Asia/Shanghai 由调度器保证，这里按服务器本地时区渲染）。
  * 支持 node-cron 的 6 段（秒 分 时 日 月 周）与 5 段（分 时 日 月 周）写法，
- * 日/月/周域支持 * 与逗号列表；带步进/范围的表达式返回「未知」。
+ * 时/日/月/周域支持 * 与逗号列表；带步进/范围的表达式返回「未知」。
+ * @param {string} schedule cron 表达式
+ * @param {Date} [now] 计算基准时刻（测试注入用，默认当前时间）
  */
-function getNextExecutionTime(schedule) {
+function getNextExecutionTime(schedule, now = new Date()) {
   try {
     const parts = String(schedule).trim().split(/\s+/);
     if (parts.length < 5) return '未知';
@@ -286,19 +288,29 @@ function getNextExecutionTime(schedule) {
       if (!/^[\d,]+$/.test(field)) return null;
       return field.split(',').some((v) => parseInt(v, 10) === value);
     };
+    // 分/秒域仅支持单值数字（含列表/通配则显性未知）；通配只在小时位展开为每小时。
+    // （此前 parseInt('*') 静默落 0 点，每小时任务被显示成「明天 00:15/00:45」。）
+    if (!/^\d+$/.test(sec) || !/^\d+$/.test(min)) return '未知（暂不支持的表达式）';
+    const minutes = Number(min);
+    const seconds = Number(sec);
+    const hours = (hr === '*' || hr === '?')
+      ? Array.from({ length: 24 }, (_, i) => i)
+      : String(hr).split(',').map(v => parseInt(v, 10)).filter(Number.isFinite).sort((a, b) => a - b);
+    if (hours.length === 0) return '未知';
 
-    const now = new Date();
     for (let addDays = 0; addDays <= 366; addDays++) {
-      const candidate = new Date(
-        now.getFullYear(), now.getMonth(), now.getDate() + addDays,
-        parseInt(hr, 10) || 0, parseInt(min, 10) || 0, parseInt(sec, 10) || 0, 0
-      );
-      if (candidate <= now) continue;
-      const domHit = matchField(dom, candidate.getDate());
-      const monHit = matchField(mon, candidate.getMonth() + 1);
-      const dowHit = matchField(dow, candidate.getDay()); // 0=周日，与 node-cron 一致
-      if (domHit === null || monHit === null || dowHit === null) return '未知（暂不支持的表达式）';
-      if (domHit && monHit && dowHit) return candidate.toLocaleString('zh-CN');
+      for (const h of hours) {
+        const candidate = new Date(
+          now.getFullYear(), now.getMonth(), now.getDate() + addDays,
+          h, minutes, seconds, 0
+        );
+        if (candidate <= now) continue;
+        const domHit = matchField(dom, candidate.getDate());
+        const monHit = matchField(mon, candidate.getMonth() + 1);
+        const dowHit = matchField(dow, candidate.getDay()); // 0=周日，与 node-cron 一致
+        if (domHit === null || monHit === null || dowHit === null) return '未知（暂不支持的表达式）';
+        if (domHit && monHit && dowHit) return candidate.toLocaleString('zh-CN');
+      }
     }
     return '未知';
   } catch (e) {
@@ -364,4 +376,5 @@ module.exports = {
   runFormAlertOnce,
   getCronStatus,
   getBroadcastHistory,
+  getNextExecutionTime,
 };

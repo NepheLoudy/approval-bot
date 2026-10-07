@@ -661,6 +661,54 @@ async function main() {
   assert.ok(!evilStr.includes('<at'), '交付卡剥 <at> 标记');
   assert.ok(!evilStr.includes('https://evil.example'), '交付卡剥链接 URL');
   assert.ok(evilStr.includes('点我领奖'), '链接文本保留');
+
+  // ---------- 周报「批次推进超期」段可达（回归：v57 漏 require batchService，
+  //            ReferenceError 被降级 catch 吞掉，该段每周静默消失） ----------
+  const approvalService = require('../src/services/approvalService');
+  approvalService.getFinanceFollowUp = async () => ({ missingInvoice: [], missingForm: [], missingTransfer: [] });
+  approvalService.getApprovalStats = async () => ({ stats: { weekNew: 0, weekApproved: 0, weekRejected: 0 }, projects: { new: [] } });
+  collectStore.getLedgerSummary = async () => null;
+  batchService.getStaleBatches = async () => [{
+    batchNo: '27超期批次1', project: '对抗赛', count: 2, amount: 112.93,
+    status: '已锁定', lockedAt: Date.now() - 8 * 24 * 3600 * 1000, taker: '张三',
+  }];
+  const broadcastService = require('../src/services/broadcastService');
+  const weekly = await broadcastService.runWeeklyBroadcast({ dryRun: true });
+  const weeklyStr = JSON.stringify(weekly.card);
+  assert.ok(weeklyStr.includes('批次推进超期'), '周报超期段可达（不再被 ReferenceError 跳过）');
+  assert.ok(weeklyStr.includes('27超期批次1'), '超期段含批次号');
+  assert.ok(weeklyStr.includes('张三'), '超期段含接取人');
+
+  // ---------- cron 下次执行展示（回归：小时位 * 被解析成 0 点，每小时任务显示成「明天 00:45」） ----------
+  const { getNextExecutionTime } = require('../src/cron/index');
+  const wed = new Date(2026, 9, 7, 8, 50, 0, 0); // 2026-10-07（周三）08:50
+  assert.equal(
+    getNextExecutionTime('0 45 * * * *', wed),
+    new Date(2026, 9, 7, 9, 45, 0).toLocaleString('zh-CN'),
+    '每小时任务下一次=今天 09:45（而非 0 点错位的明天）'
+  );
+  assert.equal(
+    getNextExecutionTime('0 15 * * * *', new Date(2026, 9, 7, 8, 14, 0, 0)),
+    new Date(2026, 9, 7, 8, 15, 0).toLocaleString('zh-CN'),
+    '每小时任务当前小时内命中'
+  );
+  assert.equal(
+    getNextExecutionTime('0 0 18 * * 1', wed),
+    new Date(2026, 9, 12, 18, 0, 0).toLocaleString('zh-CN'),
+    '周报下一次=下周一 18:00'
+  );
+  assert.equal(
+    getNextExecutionTime('0 30 10 * * *', wed),
+    new Date(2026, 9, 7, 10, 30, 0).toLocaleString('zh-CN'),
+    '固定小时任务当天命中'
+  );
+  assert.equal(
+    getNextExecutionTime('0 30 10 * * *', new Date(2026, 9, 7, 11, 0, 0, 0)),
+    new Date(2026, 9, 8, 10, 30, 0).toLocaleString('zh-CN'),
+    '固定小时任务已过则次日'
+  );
+  assert.match(getNextExecutionTime('*/5 * * * * *', wed), /^未知/, '带步进的表达式显性未知');
+  assert.match(getNextExecutionTime('0 30,45 10 * * *', wed), /^未知/, '分钟列表显性未知（不支持）');
 }
 
 (async () => {
