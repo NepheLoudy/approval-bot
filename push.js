@@ -1,5 +1,5 @@
 /**
- * 统一部署脚本：一条命令完成「代码进 Git + 配置进 NAS + 部署」
+ * 统一部署脚本：一条命令完成「代码进 Git + 配置进部署目标 + 部署」
  *
  * 用法：
  *   npm run push "提交说明"   提交并部署
@@ -7,11 +7,11 @@
  *
  * 流程：
  *   [1/4] 代码提交推送到 GitHub（失败则标记，稍后改走 SFTP 直传）
- *   [2/4] 部署代码到 NAS（git push 成功走 git fetch，失败走 SFTP 打包直传）
- *   [3/4] 上传 .env 到 NAS（含飞书密钥，只单独进 NAS，绝不进 git）
+ *   [2/4] 部署代码到部署目标（git push 成功走 git fetch，失败走 SFTP 打包直传）
+ *   [3/4] 上传 .env 到部署目标（含飞书密钥，只单独进部署目标，绝不进 git）
  *   [4/4] npm install + 重启服务
  *
- * NAS 连接配置从 .env 读取（NAS_HOST/NAS_PORT/NAS_USER/NAS_PASSWORD），脚本不存任何密钥。
+ * 部署目标连接配置从 .env 读取（DEPLOY_HOST/DEPLOY_PORT/DEPLOY_USER/DEPLOY_PASSWORD），脚本不存任何密钥。
  */
 const { spawnSync } = require('child_process');
 const { Client } = require('ssh2');
@@ -50,14 +50,14 @@ const REMOTE_DIR_WIN = 'C:/qianli/opt/approval-bot';  // SFTP 用 Windows 路径
 const GIT_REMOTE = 'https://github.com/NepheLoudy/approval-bot.git';
 const PM2_NAME = 'approval-bot';
 
-const nasConfig = {
-  host: process.env.NAS_HOST,
-  port: Number(process.env.NAS_PORT || 22),
-  username: process.env.NAS_USER,
-  password: process.env.NAS_PASSWORD,
+const deployConfig = {
+  host: process.env.DEPLOY_HOST,
+  port: Number(process.env.DEPLOY_PORT || 22),
+  username: process.env.DEPLOY_USER,
+  password: process.env.DEPLOY_PASSWORD,
 };
-if (!nasConfig.host || !nasConfig.password) {
-  console.error('缺少 NAS 部署配置：请在 .env 中配置 NAS_HOST/NAS_PORT/NAS_USER/NAS_PASSWORD');
+if (!deployConfig.host || !deployConfig.password) {
+  console.error('缺少部署配置：请在 .env 中配置 DEPLOY_HOST/DEPLOY_PORT/DEPLOY_USER/DEPLOY_PASSWORD');
   process.exit(1);
 }
 
@@ -84,12 +84,12 @@ if (hasChanges) {
 const push = spawnSync('git', ['push'], { stdio: 'inherit' });
 const gitPushed = push.status === 0;
 if (gitPushed) {
-  console.log('✓ git push 成功，NAS 将通过 git fetch 拉取代码');
+  console.log('✓ git push 成功，部署目标将通过 git fetch 拉取代码');
 } else {
-  console.log('⚠ git push 失败（本地无法访问 GitHub 443），改用 SFTP 直传代码到 NAS');
+  console.log('⚠ git push 失败（本地无法访问 GitHub 443），改用 SFTP 直传代码到部署目标');
 }
 
-// ============ 连接 NAS ============
+// =* 连接部署目标 =*
 console.log('\n========== [2/4] 连接 小电脑 部署代码 ==========');
 
 const conn = new Client();
@@ -148,7 +148,7 @@ async function deployCode() {
       + 'git fetch origin main && git reset --hard origin/main';
     const code = await execCode(cmd);
     if (code === 0) return npmInstall();
-    console.log('⚠ NAS 拉取 GitHub 失败（NAS 网络不通），改用 SFTP 直传代码');
+    console.log('⚠ 部署目标拉取 GitHub 失败（目标机网络不通），改用 SFTP 直传代码');
   }
   {
     console.log('本地打包代码...');
@@ -204,7 +204,7 @@ function npmInstall() {
 
 // ============ [3/4] 上传 .env ============
 function uploadEnv() {
-  console.log('\n========== [3/4] 上传 .env 到 NAS ==========');
+  console.log('\n========== [3/4] 上传 .env 到部署目标 ==========');
   conn.sftp((err, sftp) => {
     if (err) {
       console.error('SFTP 失败:', err.message);
@@ -269,5 +269,5 @@ function showStatus() {
   });
 }
 
-console.log('正在连接 NAS...');
-conn.connect(nasConfig);
+console.log('正在连接部署目标...');
+conn.connect(deployConfig);
