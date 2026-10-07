@@ -217,7 +217,7 @@ curl http://localhost:3002/api/health
 
 ## 九、部署到部署目标（小电脑）
 
-### 一键部署（push.js，密钥存 .env 的 NAS_*；NAS_* 为历史命名，语义=部署目标）
+### 一键部署（push.js，连接键存 .env 的 DEPLOY_*）
 ```bash
 npm run push
 ```
@@ -229,7 +229,7 @@ ssh mechax@192.168.31.57 "pm2 logs approval-bot --lines 30"
 ```
 
 ### ⚠️ 仅回环监听（2026-09-25 v51 安全审查）
-本服务 `listen` 绑定 **127.0.0.1**（涉及资金，不对局域网暴露）：hub 同机 `localhost:3002` 转发、运维台 `/api/nas/api` SSH 代理在目标机本机 curl，均不受影响；**从其他机器直连 `192.168.31.57:3002` 一律不通**（含 `drill-online.js`——演练需 ssh 到目标机上跑，脚本默认目标已改 localhost）。跨机访问走 SSH 隧道；确需放开必须显式改 `src/index.js` 的 listen（有意识的行为，非配置项）。
+本服务 `listen` 绑定 **127.0.0.1**（涉及资金，不对局域网暴露）：hub 同机 `localhost:3002` 转发、运维台 `/api/deploy/api` SSH 代理在目标机本机 curl，均不受影响；**从其他机器直连 `192.168.31.57:3002` 一律不通**（含 `drill-online.js`——演练需 ssh 到目标机上跑，脚本默认目标已改 localhost）。跨机访问走 SSH 隧道；确需放开必须显式改 `src/index.js` 的 listen（有意识的行为，非配置项）。
 （2026-09-14 起部署目标=小电脑 DESKTOP-FE1MIGI 192.168.31.57:22；旧 NAS `qianli@10.253.33.233:8500` 已停用）
 
 ## 十、项目结构

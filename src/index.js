@@ -302,7 +302,7 @@ app.post('/api/feishu/event', async (req, res) => {
 
 function startServer() {
   // 2026-09-25 安全审查 #1（涉及资金）：仅回环监听，不对局域网暴露。
-  // 合法消费方全部在本机：hub 同机转发（http://localhost:3002）、运维台 /api/nas/api
+  // 合法消费方全部在本机：hub 同机转发（http://localhost:3002）、运维台 /api/deploy/api
   // 走 SSH 在目标机本机 curl——绑 127.0.0.1 均不受影响；跨机访问一律经 SSH 隧道，
   // 需要放开时必须显式改这里（有意识的行为，不是配置项）
   const server = app.listen(config.port, '127.0.0.1', () => {
