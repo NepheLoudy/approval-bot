@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v69**（2026-10-07，NAS_*→DEPLOY_* 连接键改名批，随本提交落地）。上一版 v68（2026-10-07，`5780a98`/`3aef361`，周报超期段漏 require 修复+健康检查；改名半成品曾混入其部署提交）。上一版 v67（2026-10-04，小时级回流轮询批）。
+当前最新：**v70**（2026-10-10，quietHours 冲刷竞态移植批——git 先行入库，部署待小电脑上线补跑）。上一版 v69（2026-10-07，NAS_*→DEPLOY_* 连接键改名批）。上一版 v68（2026-10-07，`5780a98`/`3aef361`，周报超期段漏 require 修复+健康检查；改名半成品曾混入其部署提交）。上一版 v67（2026-10-04，小时级回流轮询批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -563,3 +563,13 @@
 - 背景：2026-10-07 旧 NAS（qianli-NAS 192.168.31.153）实测探查——机器人零在跑（pm2 空、`pm2-qianli` disabled、docker 空），残留 cron（campus-keepalive/snapshot-data）已注释停用（原样备份在其 `/home/qianli/backups/crontab.bak-20261007`）。曼波令：全工作区 NAS 命名残留修正防误导。
 - 本仓收口：README 部署节/安全节键名与 `/api/nas/api`→`/api/deploy/api` 口径、src/index.js 合法消费方注释、AGENTS.md 部署行、本地 .env 键 NAS_*→DEPLOY_*（push 时覆盖部署目标同批生效）；v68 混入的 push.js/.env.example 半成品就此归位。
 - 不影响运行时行为：服务进程不消费部署连接键，改名只涉部署链路与文档；历史 DEVLOG/事故记录保持原貌。
+
+## v70 · 2026-10-10 · <本提交哈希> · fix
+
+全量审查修复批（quietHours 家族五仓联动）。
+
+- **冲刷收尾竞态修复**（自 ticket-bot 09-27 同款移植）：runFlush 收尾原 saveBacklog(remaining) 覆盖整个积压文件，冲刷期间并发落盘的 gateTask 积压被静默丢——收尾前重读文件按身份键合并保存。
+- **积压条目身份键唯一化**：gateTask/gatePayload 入队签发 crypto.randomUUID()，存量无 id 条目回落旧键兼容；补导出 runFlush。
+- 新增 scripts/stub-test-quiet-flush.js（任务型 9 断言：冲刷期间落盘不丢/失败保留回写/同毫秒不互吞）并入 package.json test 链。
+- **push.js 测试闸门对齐**：原手工清单比 npm run test 少 ledgerSheetService/cny 两个 --check 与 delivery/ledger 两套桩——闸门改跑 npm run test 单一事实来源。
+- npm test 六套全过。部署状态：git 先行入库，部署因小电脑离线挂起——上线后重跑 npm run push 补部署，无新版本。
