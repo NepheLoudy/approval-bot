@@ -1,5 +1,5 @@
 // 桩测试：报销交付包——大写金额/中文序号、摘要拼装、归档文件夹名、
-// 校格式物料清单 xlsx（严格照《物料清单》模板排版）、投递底单 xlsx（照投递单字段）、
+// 校格式物料清单 xlsx（严格照《物料清单》模板排版）、扫码清单 docx（按录入序二维码）、
 // 批次接取（claimBatch 状态机）。全离线：stub 掉飞书上传。
 // 运行：node scripts/stub-test-delivery.js
 const assert = require('assert/strict');
@@ -63,7 +63,7 @@ async function main() {
   const { numToCnyUpper, numToCnOrdinal } = require('../src/utils/cny');
   const ExcelJS = require('exceljs');
 
-  // ---------- 单元：大写金额（投递底单「大写金额」列） ----------
+  // ---------- 单元：大写金额/中文序号（utils/cny 纯函数） ----------
   const cnyCases = [
     [237.04, '贰佰叁拾柒圆零肆分'],
     [237, '贰佰叁拾柒圆整'],
@@ -156,55 +156,6 @@ async function main() {
   assert.equal(totalCell.result, 112.93, '公式缓存结果');
   assert.equal(ws1.getRow(6).getCell(2).value, '制单人：', '制单人行标签');
 
-  // ---------- 生成器：投递底单（照投递单字段全预填 + 电子发票明细） ----------
-  uploaded.length = 0;
-  const summary = batchService.composeSummary({ project: '对抗赛', purpose: '飞镖机器人', ordinal: 24 });
-  await batchService.uploadBatchDeliverySheet('27对抗赛飞镖24', items, { purpose: '飞镖机器人', ordinal: 24, summary });
-  assert.equal(uploaded.length, 1);
-  assert.equal(uploaded[0].fileName, '报销单_27对抗赛飞镖24_投递底单.xlsx', '投递底单文件名');
-
-  const wb2 = new ExcelJS.Workbook();
-  await wb2.xlsx.load(uploaded[0].buffer);
-  const ws2 = wb2.getWorksheet('投递底单');
-  // 表单区：label(A 列) → value(B 列) 映射
-  const form = {};
-  let detailHeadRow = 0;
-  for (let r = 1; r <= ws2.rowCount; r++) {
-    const label = ws2.getRow(r).getCell(1).value;
-    if (label === '发票代码') { detailHeadRow = r; break; }
-    if (label) form[label] = ws2.getRow(r).getCell(2).value;
-  }
-  for (const key of ['投递号', '填报时间', '公章', '报销人工号', '姓名', '联系电话', '项目编号', '项目所属部门', '项目名称', '项目负责人', '团队负责人', '摘要', '附件张数', '备注', '费用项', '报销金额', '申请总金额', '大写金额', '财务核准报销金额', '支付方式', '收款人工号', '收款人姓名', '卡号', '开户行', '金额']) {
-    assert.ok(key in form, `投递底单含字段「${key}」（照投递单全字段）`);
-  }
-  assert.equal(form['摘要'], summary, '摘要预填');
-  assert.equal(form['大写金额'], '壹佰壹拾贰圆玖角叁分', '大写金额自动转换');
-  assert.equal(form['附件张数'], 2, '附件张数=张数');
-  assert.equal(form['支付方式'], '转卡', '支付方式=转卡');
-  assert.equal(form['费用项'], '实验室用品', '费用项默认（config）');
-  // 缺失配置标黄（测试环境 CQ_* 未配置）
-  const stuRow = (() => {
-    for (let r = 1; r <= ws2.rowCount; r++) {
-      if (ws2.getRow(r).getCell(1).value === '报销人工号') return ws2.getRow(r).getCell(2);
-    }
-  })();
-  assert.equal(stuRow.fill && stuRow.fill.fgColor && stuRow.fill.fgColor.argb, 'FFFFFF00', '报销人工号缺失 → 标黄');
-  // 明细区：表头 + 每票一行（发票代码=数电票映射）
-  assert.ok(detailHeadRow > 0, '电子发票明细表头存在');
-  assert.deepEqual(
-    ws2.getRow(detailHeadRow).values.slice(1, 8),
-    ['发票代码', '发票号码', '开票单位', '开票日期', '开票内容', '发票金额', '是否已认证'],
-    '明细表头照投递单'
-  );
-  const d1 = ws2.getRow(detailHeadRow + 1).values.slice(1, 8);
-  assert.equal(d1[0], '数电票', '全电发票 → 发票代码「数电票」');
-  assert.equal(d1[1], '24312000000123456789');
-  assert.equal(d1[2], '深圳市立创电子商务有限公司', '开票单位=销售方名称');
-  assert.equal(d1[3], '2026-09-20', '开票日期格式 YYYY-MM-DD');
-  assert.equal(d1[6], '', '认证状态留空（学校系统生成）');
-  const d2 = ws2.getRow(detailHeadRow + 2).getCell(5);
-  assert.equal(d2.fill && d2.fill.fgColor && d2.fill.fgColor.argb, 'FFFFFF00', '明细缺开票内容 → 标黄');
-
   // ---------- 交付包⑥：打印件 docx + 特殊事项附页（2026-09-27 曼波反馈） ----------
   const { execSync } = require('child_process');
   const fsMod = require('fs');
@@ -265,7 +216,7 @@ async function main() {
   // ---------- 链路：批次接取（claimBatch 状态机） ----------
   const batchRows = [
     { record_id: 'bat1', fields: { '批次号': '27对抗赛飞镖23', '项目': '对抗赛', '状态': '已提交', '张数': 3, '金额合计': 100 } },
-    { record_id: 'bat2', fields: { '批次号': '27对抗赛飞镖24', '项目': '对抗赛', '状态': '已锁定', '锁定时间': 100, '张数': 6, '金额合计': 237.04, '摘要': summary } },
+    { record_id: 'bat2', fields: { '批次号': '27对抗赛飞镖24', '项目': '对抗赛', '状态': '已锁定', '锁定时间': 100, '张数': 6, '金额合计': 237.04, '摘要': batchService.composeSummary({ project: '对抗赛', purpose: '飞镖机器人', ordinal: 24 }) } },
     // 打印文件字段=交付件已生成（submit 流程闸要求；对抗审查新增）
     { record_id: 'bat3', fields: { '批次号': '27备赛20步兵5', '项目': '步兵机器人', '状态': '已锁定', '锁定时间': 200, '张数': 1, '金额合计': 10, '打印文件': [{ file_token: 'pdf_test' }] } },
   ];
@@ -300,6 +251,40 @@ async function main() {
     await batchService.claimBatch('', '别人'); // 此后无未接取 → 报错
   }, /没有待接取/);
 
+  // ---------- 锁定未确认交付提醒：目标筛选 + 防重留痕（2026-10-12，0929 首单卡 13 天事故） ----------
+  {
+    const now = Date.now();
+    const remindRows = [
+      // 超期未确认：应命中
+      { record_id: 'rm1', fields: { '批次号': '自动-超期-0930', '项目': '测试', '状态': '已锁定', '锁定时间': now - 2 * 24 * 3600e3, '张数': 1, '金额合计': 100, '接取人': '贺韵洁' } },
+      // 刚锁定未满阈值：不命中
+      { record_id: 'rm2', fields: { '批次号': '自动-新鲜-1012', '项目': '测试', '状态': '已锁定', '锁定时间': now - 3600e3, '张数': 1, '金额合计': 50 } },
+      // 已确认交付：不命中（confirm 后走 12h 打印询问线）
+      { record_id: 'rm3', fields: { '批次号': '自动-已确认-1001', '项目': '测试', '状态': '已锁定', '锁定时间': now - 5 * 24 * 3600e3, '交付确认时间': now - 4 * 24 * 3600e3, '张数': 1, '金额合计': 60 } },
+      // 已提醒过（防重留痕在）：不命中
+      { record_id: 'rm4', fields: { '批次号': '自动-已提醒-1002', '项目': '测试', '状态': '已锁定', '锁定时间': now - 5 * 24 * 3600e3, '确认提醒时间': now - 24 * 3600e3, '张数': 1, '金额合计': 70 } },
+      // 人工 lock 批次（交付件即时生成、无 confirm 环节）：锁定再久也不命中
+      { record_id: 'rm5', fields: { '批次号': '27人工批次1', '项目': '测试', '状态': '已锁定', '锁定时间': now - 9 * 24 * 3600e3, '打印文件': [{ file_token: 'pdf_x' }], '张数': 2, '金额合计': 80 } },
+    ];
+    const prevListBatches = collectStore.listBatches;
+    const prevUpdateBatch = collectStore.updateBatch;
+    collectStore.listBatches = async () => remindRows;
+    const markWrites = [];
+    collectStore.updateBatch = async (recordId, fields) => { markWrites.push({ recordId, fields }); return { record_id: recordId }; };
+    try {
+      const targets = await batchService.getConfirmRemindTargets();
+      assert.deepEqual(targets.map(t => t.batchNo), ['自动-超期-0930'], "只命中 超期+未确认+未提醒 的批次");
+      assert.equal(targets[0].taker, '贺韵洁', "目标带接取人（文案用）");
+      await batchService.markConfirmReminded(targets[0].recordId);
+      assert.equal(markWrites.length, 1, '只写目标批次一条');
+      assert.equal(markWrites[0].recordId, 'rm1', '防重标落在命中的批次上');
+      assert.deepEqual(Object.keys(markWrites[0].fields), ['确认提醒时间'], '只写「确认提醒时间」一个字段');
+      assert.ok(markWrites[0].fields['确认提醒时间'] > now - 60e3 && markWrites[0].fields['确认提醒时间'] <= now + 60e3, '留痕为当前时间附近的时间戳');
+    } finally {
+      collectStore.listBatches = prevListBatches;
+      collectStore.updateBatch = prevUpdateBatch;
+    }
+  }
   // ---------- 安全审查 #2：操作人实名反查（open_id 优先于自报名）+ markBatch 留痕 ----------
   const contacts = require('../src/feishu/contacts');
   const chatService = require('../src/services/chatService');
@@ -457,38 +442,7 @@ async function main() {
   assert.equal(pvGroup.warningCount, 2, '「未校验」空值 + 金额异常均计入 warningCount');
   collectStore.listCollect = prevListCollect;
 
-  // ---------- 投递底单金额格标黄（金额解析失败/<=0 的票，复查 P2） ----------
-  uploaded.length = 0;
-  await batchService.uploadBatchDeliverySheet('27金额异常批次', [
-    { invoiceNo: 'AMT2', totalAmount: 0, amountInvalid: true, sellerName: 'x', issueDateMs: 0, invoiceContent: '有内容' },
-  ], {});
-  const wbAmt = new ExcelJS.Workbook();
-  await wbAmt.xlsx.load(uploaded[0].buffer);
-  const wsAmt = wbAmt.getWorksheet('投递底单');
-  let amtYellow = false;
-  for (let r = 1; r <= wsAmt.rowCount; r++) {
-    if (wsAmt.getRow(r).getCell(2).value === 'AMT2') {
-      const c = wsAmt.getRow(r).getCell(6);
-      amtYellow = Boolean(c.fill && c.fill.fgColor && c.fill.fgColor.argb === 'FFFFFF00');
-    }
-  }
-  assert.ok(amtYellow, '投递底单金额异常票的金额格标黄');
-
-  // ---------- 投递底单收款方走 meta（复查 P1：lock 收款方= 覆盖要进底单，账实不分离） ----------
-  uploaded.length = 0;
-  await batchService.uploadBatchDeliverySheet('27对抗赛飞镖24', items, { purpose: '飞镖机器人', ordinal: 24, summary, payee: '陈杨明', payeeAccount: '6216613200015262463' });
-  const wbPayee = new ExcelJS.Workbook();
-  await wbPayee.xlsx.load(uploaded[0].buffer);
-  const wsPayee = wbPayee.getWorksheet('投递底单');
-  const payeeForm = {};
-  for (let r = 1; r <= wsPayee.rowCount; r++) {
-    const label = wsPayee.getRow(r).getCell(1).value;
-    if (label && label !== '发票代码') payeeForm[label] = wsPayee.getRow(r).getCell(2).value;
-  }
-  assert.equal(payeeForm['收款人姓名'], '陈杨明', '收款人姓名=meta.payee（lock 收款方= 覆盖）');
-  assert.equal(payeeForm['卡号'], '6216613200015262463', '卡号=meta.payeeAccount（lock 收款账号= 覆盖）');
-
-  // ---------- regen：收款方从批次记录读回进底单 + 金额漂移暴露（复查 P1） ----------
+  // ---------- regen：金额漂移暴露（复查 P1，观察点换打印件 PDF——投递底单已移除） ----------
   bitableApi.listAllRecords = async () => []; // 审批表空 → 项目回落「未归类」
   const driftRows = [
     { record_id: 'd1', fields: { '发票号码': 'D1', '价税合计': 52.93, '采集时间': 10, '批次': '27漂移批次1' } },
@@ -506,19 +460,8 @@ async function main() {
     { recorded: 999, current: 112.93 },
     'regen 金额与锁定值不一致时返回 amountDrift{recorded,current}'
   );
-  const driftSheet = uploaded.find(u => u.fileName === '报销单_27漂移批次1_投递底单.xlsx');
-  assert.ok(driftSheet, 'regen 生成投递底单');
-  const wbDrift = new ExcelJS.Workbook();
-  await wbDrift.xlsx.load(driftSheet.buffer);
-  const wsDrift = wbDrift.getWorksheet('投递底单');
-  const driftForm = {};
-  for (let r = 1; r <= wsDrift.rowCount; r++) {
-    const label = wsDrift.getRow(r).getCell(1).value;
-    if (label && label !== '发票代码') driftForm[label] = wsDrift.getRow(r).getCell(2).value;
-  }
-  assert.equal(driftForm['收款人姓名'], '陈杨明', 'regen 底单收款方从批次记录读回（非 .env 默认）');
-  assert.equal(driftForm['卡号'], '6216613200015262463', 'regen 底单卡号从批次记录读回');
-
+  const driftPdf = uploaded.find(u => u.fileName === '报销单_27漂移批次1_打印件.pdf');
+  assert.ok(driftPdf, 'regen 重造打印件 PDF（交付件本体仍在）');
   // ---------- 不同批次号并发 lock 共享票池：pool 锁互斥，不双计（复查 P1） ----------
   // （无项目过滤=锁整池：修复前两把锁各自快照同一池，两张票同时进两个批次记录
   //   → 双金额双张数；修复后 pool 锁串行，先到者锁走整池，后到者看到空池如实报错）
@@ -617,7 +560,7 @@ async function main() {
   assert.equal(slashA.ordinal, 1, '斜杠项目首批笔序 1');
   assert.equal(slashA.projects.join('/'), slashProject);
   assert.equal(slashA.approvalWritten, 1, '带申请编号的票回写审批表报销单栏');
-  assert.deepEqual(approvalWrites[0] && approvalWrites[0].fields, { '报销单': '27斜杠批次1', '是否打印': '是' }, '报销单栏+是否打印标记一并回写');
+  assert.deepEqual(approvalWrites[0].fields, { '报销单': '27斜杠批次1', '是否打印': '是' }, '报销单栏+是否打印标记一并回写');
   collectStore.listCollect = async () => [slashCollects[1]];
   const slashB = await batchService.lockBatch('27斜杠批次2', '', {});
   assert.equal(slashB.ordinal, 2, '斜杠项目第二批笔序 2（旧 split 逻辑恒 1 → 摘要重复）');

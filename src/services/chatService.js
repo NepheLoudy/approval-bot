@@ -250,13 +250,13 @@ function fundOperatorDenied(ctx = {}) {
  * 报销批次三件套指令（财务三件套自动化）：
  *   /approval-batch                      → 拟批建议（票池按项目分组）
  *   /approval-batch lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx]
- *                                        → 锁定（回写两表 + 生成 打印PDF/BOM/物料清单/投递底单
+ *                                        → 锁定（回写两表 + 生成 打印PDF/BOM/物料清单/扫码清单
  *                                          + 审批群发交付卡，回复「接取」领取）
  *   /approval-batch status               → 批次总览（含接取人）
  *   /approval-batch submit <批次号> [投递单号] → 标记已提交学校 + 台账表追加行（幂等）
  *   /approval-batch paid <批次号>        → 标记已到账（台账回填入账日期+已到账）+ 归档名建议
  *   /approval-batch reject <批次号>      → 标记已退回（台账标记已退回；退回票自动回票池）
- *   /approval-batch regen <批次号>       → 全部交付件重新生成（打印PDF/docx、BOM、物料清单、投递底单、扫码清单、特殊事项附页）
+ *   /approval-batch regen <批次号>       → 全部交付件重新生成（打印PDF/docx、BOM、物料清单、扫码清单、特殊事项附页）
  *   /approval-batch ledger <批次号> [投递单号] → 手动把批次同步进台账电子表格
  *   接取 [批次号]                        → 审批群回复「接取」领取交付包（登记接取人）
  */
@@ -272,7 +272,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
       lines.push(`· ${s.project}：${s.count} 张 ¥${s.amount.toFixed(2)}（${s.range}）${s.warningCount ? `⚠️ 含 ${s.warningCount} 张待人工/异常` : ''}`);
     }
     lines.push('锁定：/approval-batch lock <批次号> [项目] [用途=xx]（批次号沿用财务命名，如 27备赛20步兵5；不传项目=锁定全池）');
-    lines.push('锁定后自动生成 打印件PDF + BOM + 物料清单（校格式）+ 投递底单，落「报销批次」表附件并向本群发交付卡，回复「接取」领取');
+    lines.push('锁定后自动生成 打印件PDF + BOM + 物料清单（校格式）+ 扫码清单，落「报销批次」表附件并向本群发交付卡，回复「接取」领取');
     return lines.join('\n');
   }
 
@@ -307,7 +307,6 @@ async function handleBatchCommand(args = [], ctx = {}) {
       r.pdfToken ? '· 🖨️ 打印件 PDF ✅（按录入顺序，一页两票）' : '· ⚠️ 打印件 PDF 生成失败（可 /approval-batch regen 重试）',
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（可 regen）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（可 regen）',
-      r.dsToken ? '· 📮 投递底单 ✅（照单录入小翼Plus）' : '· ⚠️ 投递底单生成失败（可 regen）',
       r.docxToken ? '· 📄 打印件 docx（可编辑版）✅' : '· ⚠️ 打印件 docx 生成失败（可 regen）',
       ...(r.specialCount ? [`· 🚩 特殊事项附页 ✅（${r.specialCount} 张：大额/公私属性不分明/有支付记录，单独成页）`] : []),
     ].filter(Boolean);
@@ -320,7 +319,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
       await sendDeliveryCard({
         batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
         summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
-        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, deliverySheet: !!r.dsToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
+        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
         specialCount: r.specialCount,
         scanItems: r.scanItems || [],
         abnormalItems: r.abnormalItems || [],
@@ -403,14 +402,13 @@ async function handleBatchCommand(args = [], ctx = {}) {
   }
 
   if (sub === 'regen') {
-    if (!args[1]) return '❌ 用法：/approval-batch regen <批次号>（重新生成 打印PDF/BOM/物料清单/投递底单）';
+    if (!args[1]) return '❌ 用法：/approval-batch regen <批次号>（重新生成 打印PDF/BOM/物料清单/扫码清单）';
     const r = await batchService.regenerateBatchFiles(args[1]);
     const lines = [
       `🔄 批次 ${r.batchNo} 附件已重新生成（${r.count} 张）：`,
       r.pdfToken ? '· 🖨️ 打印件 PDF ✅' : '· ⚠️ 打印件 PDF 生成失败（见日志）',
       r.bomToken ? '· 📊 BOM 表 ✅' : '· ⚠️ BOM 生成失败（见日志）',
       r.mlToken ? '· 🧾 物料清单（校格式）✅' : '· ⚠️ 物料清单生成失败（见日志）',
-      r.dsToken ? '· 📮 投递底单 ✅' : '· ⚠️ 投递底单生成失败（见日志）',
       r.docxToken ? '· 📄 打印件 docx（可编辑版）✅' : '· ⚠️ 打印件 docx 生成失败（见日志）',
       ...(r.specialCount ? [`· 🚩 特殊事项附页 ✅（${r.specialCount} 张）`] : []),
     ];
@@ -432,7 +430,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
       await sendDeliveryCard({
         batchNo: r.batchNo, project: g.project || '', count: g.count, amount: g.amount || 0,
         summary: g.summary || '', warningCount: 0, missingContent: 0,
-        generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, deliverySheet: !!g.dsToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
+        generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
         specialCount: g.specialCount, scanItems: g.scanItems || [], abnormalItems: g.abnormalItems || [],
       });
     } catch (err) {

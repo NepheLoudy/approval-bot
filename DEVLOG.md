@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v71**（2026-10-12，交付卡二维码上传 client 未定义修复+0929 首单补 confirm）。上一版 v70（2026-10-10，quietHours 冲刷竞态修复批——本版随 v71 一同补部署）。上一版 v69（2026-10-07，NAS_*→DEPLOY_* 连接键改名批）。上一版 v68（2026-10-07，`5780a98`/`3aef361`，周报超期段漏 require 修复+健康检查）。
+当前最新：**v72**（2026-10-12，投递底单移除+锁定未确认交付提醒+审查修复批）。上一版 v71（2026-10-12，交付卡二维码上传 client 未定义修复+0929 首单补 confirm）。上一版 v70（2026-10-10，quietHours 冲刷竞态修复批）。上一版 v69（2026-10-07，NAS_*→DEPLOY_* 连接键改名批）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -583,3 +583,13 @@
 - 后续动作：部署本版后对该批次执行 `/approval-batch regen 自动-步兵机器人-0929` 重新生成+发卡，验证卡内嵌二维码真实上传成功（confirm 幂等不会重发卡，regen 会）。
 - 经验：与 v68 周报超期段同款模式——**降级 catch 吞 ReferenceError + 无「成功上传」断言的测试，「功能未见」13 天无人知**。异常票附页/扫码清单兜底让降级链路产出正常-looking 的卡，掩盖了主链路死亡。
 - 测试：六套全绿（bot.js 头部 require 变更，stub-test-delivery 端到端过）。部署：随本提交上线（v70 一并补部署）。
+
+## v72 · 2026-10-12 · <本提交哈希> · feat+refactor
+
+**投递底单移除 + 锁定未确认交付提醒 + 全量审查修复批（曼波三连指令）**
+
+- **投递底单移除**（曼波定：实际投递单由财务在学校智能财务服务大厅生成，机器人预填稿与实做流程不符）：batchService 删 uploadBatchDeliverySheet 生成器与 lock/regen 两处生成链、meta.payee/payeeAccount（批次表「收款方」字段保留——台账同步仍用）；chatService lock/regen 回执与帮助文本、bot.js 交付卡附件清单、config 注释同步；create-collect-tables.js 删字段定义；测试改负向断言（防回归）。numToCnyUpper 成无调用死代码但作为通用工具保留（测试覆盖仍在）。现网批次表「投递底单」列部署后 API 显式删除（ensureField 不会删存量列）。
+- **锁定未确认交付提醒**（0929 首单卡 13 天无人 confirm 事故的流程补漏）：锁定超 `BATCH_CONFIRM_REMIND_DAYS`（默认 1 天）且无交付确认时间的批次 → cron 每小时 25 分扫（`BATCH_CONFIRM_REMIND_SCHEDULE`，过静默闸）群发黄卡引导 `/approval-batch confirm`，「确认提醒时间」列留痕每批只提醒一次。批次表加列（create-collect-tables 幂等建）。
+- **全量审查（TRAE-code-review + 双子代理交叉验证，4 发现全确认全修）**：①[major] 人工 lock 批次会被误报——targets 补「无打印文件」过滤（人工批次交付件即时生成无 confirm 环节；边角：人工批次双附件全挂时命中属良性重叠，confirm 即自愈）；②[major] 播报熔断静默丢提醒——bot.sendMessage 熔断/无 webhook 静默返回 null 不抛错，原实现照写防重标致提醒永久丢失（且 ⏳ U+23F3 不在 quota keyOf 剥离区间，全部自动批次共享同一天 3 张桶），修=sent 为空跳过防重标下轮重试；既有 askPendingPrintConfirm 同款缺陷顺带修；③[minor] invoice-collect 投递底单断言改负向；④[minor] 提醒防重断言自引用改结构断言（键集/recordId/时间窗），既有 :559 空洞断言（期望值取自实际值）顺带修。
+- 配置：`.env.example` 加 BATCH_CONFIRM_REMIND_DAYS/SCHEDULE（代码默认 1 天 / 0 25 * * * *，现网未配走默认）。
+- 测试：六套全绿（含提醒目标筛选/防重/人工批次豁免断言）。部署后动作：跑 create-collect-tables.js 建「确认提醒时间」列 + API 删「投递底单」列 + 验证 cron 启动日志第 7 任务。

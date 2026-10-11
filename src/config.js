@@ -157,8 +157,9 @@ module.exports = {
     stateFile: process.env.FORM_ALERT_STATE_FILE || '',
   },
 
-  // 报销交付包（锁定批次后自动生成：校格式物料清单 + 投递底单，照学校「智能财务服务大厅
-  // 投递单」与财务《物料清单》模板口径；敏感信息（卡号）只存 .env，不进 git）
+  // 报销交付包（锁定批次后自动生成：校格式物料清单 + 扫码清单，照财务《物料清单》模板口径；
+  // 投递底单已移除（2026-10-12 曼波定：实际投递单由财务在学校智能财务服务大厅生成）；
+  // 敏感信息（卡号）只存 .env，不进 git）
   batch: {
     // 摘要拼装：`${summaryPrefix}-${season}-${项目}-${用途}-${feeType}-第N笔`
     // 模板实例：机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔
@@ -183,7 +184,12 @@ module.exports = {
     // 交付确认后询问打印情况的延时（默认 12h）与扫描节奏（每小时扫，发送过晚间静默闸）
     printAskDelayHours: parseInt(process.env.BATCH_PRINT_ASK_DELAY_HOURS, 10) || 12,
     printAskSchedule: process.env.BATCH_PRINT_ASK_SCHEDULE || '0 15 * * * *',
-    // 报销人（投递单抬头；工号/电话缺失底单标黄）
+    // 锁定后未确认交付的超期提醒（2026-10-12 曼波定）：自动批次锁定超此天数无人
+    // /approval-batch confirm（0929 首单卡 13 天事故）→ 群发提醒卡引导 confirm，
+    // 每批只提醒一次（确认提醒时间留痕防重）；扫描节奏每小时扫，发送过晚间静默闸
+    confirmRemindDays: parseInt(process.env.BATCH_CONFIRM_REMIND_DAYS, 10) || 1,
+    confirmRemindSchedule: process.env.BATCH_CONFIRM_REMIND_SCHEDULE || '0 25 * * * *',
+    // 报销人（批次表「收款方」默认值=台账同步用；工号/电话为学校系统侧人工信息）
     reporterStuId: process.env.CQ_REPORTER_STU_ID || '',
     reporterName: process.env.CQ_REPORTER_NAME || '',
     reporterPhone: process.env.CQ_REPORTER_PHONE || '',

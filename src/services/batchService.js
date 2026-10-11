@@ -7,11 +7,11 @@
  *   ② 打印文件 → 全自动：按录入顺序（=采集时间序）生成 A4 竖版一页两票 PDF，落批次表附件；
  *   ③ BOM 表 → 全自动：批次内审批记录（物资/型号/金额/发起人）生成 xlsx，落批次表附件。
  *
- * 交付包扩展（2026-09-25，照财务《物料清单》模板与学校「智能财务服务大厅投递单」实样）：
+ * 交付包扩展（2026-09-25，照财务《物料清单》模板）：
  *   ④ 物料清单（校格式）→ xlsx：序号/项目=开票内容/金额/用途/采购类型 + 总金额 + 制单人，
  *      缺开票内容的行「项目」列标黄（纯 QR 通道的票票面无该信息，录入小翼Plus 时现场补）；
- *   ⑤ 投递底单 → xlsx：投递单除投递号/公章/认证状态外的全部字段预填（报销人/项目卡/摘要/
- *      大写金额/转卡收款人/电子发票明细），财务照单录入小翼Plus；
+ *   （投递底单已于 2026-10-12 曼波定移除——实际投递单由财务在学校智能财务服务大厅生成，
+ *    机器人的预填稿与实做流程不符）
  *   锁定成功后向审批群发「交付卡」（人工触发的直接回路，即时发送不接静默闸门），
  *   财务 @机器人 回复「接取」领取批次（登记接取人/时间）。
  *
@@ -31,7 +31,7 @@ const bitableApi = require('../feishu/bitable');
 const collectStore = require('./collectStore');
 const invoiceParser = require('./invoiceParser');
 const approvalService = require('./approvalService');
-const { numToCnyUpper, numToCnOrdinal } = require('../utils/cny');
+const { numToCnOrdinal } = require('../utils/cny');
 const { fieldText } = require('../utils/fields');
 
 const A4 = { width: 595.28, height: 841.89 };
@@ -76,7 +76,7 @@ function collectToItem(r, byApplyNo) {
   const applyNo = String(f['关联申请编号'] || '');
   const af = byApplyNo.get(applyNo) || {};
   // 金额解析：parseFloat 前先去千分位逗号（复查 P2：'1,234.56' 直接 parseFloat 会截断成 1）；
-  // 解析后非数或 <=0 标 amountInvalid（计入 warningCount + 投递底单金额格标黄——复查 P2，
+  // 解析后非数或 <=0 标 amountInvalid（计入 warningCount——复查 P2，
   // 此前静默归零无任何警示，财务容易按 0 元漏录）
   const rawAmount = f['价税合计'];
   const totalAmount = typeof rawAmount === 'number'
@@ -209,7 +209,7 @@ async function getUnbatchedInvoicedByProject() {
 
 /**
  * 锁定批次：pool 内票（可选按项目过滤）→ 回写采集表「批次」+ 审批表「报销单」栏 →
- * 建批次记录（已锁定，含摘要/用途/笔序）→ 生成 打印 PDF + BOM + 物料清单 + 投递底单 落附件。
+ * 建批次记录（已锁定，含摘要/用途/笔序）→ 生成 打印 PDF + BOM + 物料清单 + 扫码清单 落附件。
  * 锁定后顺序不可变；迟到票进下一批。
  * @param {object} options {purpose 用途（默认=主项目）, note 备注, operator 操作人（锁定留痕）}
  */
@@ -307,15 +307,14 @@ async function lockBatch(batchNo, project, options = {}) {
     //    deferDelivery（2026-09-29 曼波定两阶段流程）：自动锁定只建批+打标+群发详情卡，
     //    财务群里 confirm 后才由 confirmDelivery → regenerateBatchFiles 生成交付件+发二维码卡；
     //    人工 lock 无此环节（人本来就在场）
-    const meta = { summary, purpose, ordinal, feeItem, purchaseType, payee, payeeAccount };
-    let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, dsToken = null, specialPdfToken = null, specialDocxToken = null, ssToken = null, scanItems = [];
+    const meta = { summary, purpose, ordinal, feeItem, purchaseType };
+    let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, specialPdfToken = null, specialDocxToken = null, ssToken = null, scanItems = [];
     const specials = pool.filter(isSpecialItem);
     if (!options.deferDelivery) {
       try { pdfToken = await uploadBatchPdf(batchNo, pool); } catch (err) { console.error('[批次] 打印 PDF 生成失败:', err.message); }
       try { docxToken = await uploadBatchDocx(batchNo, pool); } catch (err) { console.error('[批次] 打印件 docx 生成失败:', err.message); }
       try { bomToken = await uploadBatchBom(batchNo, pool); } catch (err) { console.error('[批次] BOM 生成失败:', err.message); }
       try { mlToken = await uploadBatchMaterialList(batchNo, pool, meta); } catch (err) { console.error('[批次] 物料清单生成失败:', err.message); }
-      try { dsToken = await uploadBatchDeliverySheet(batchNo, pool, meta); } catch (err) { console.error('[批次] 投递底单生成失败:', err.message); }
       try { ({ token: ssToken, scanItems } = await uploadBatchScanSheetDocx(batchNo, pool)); } catch (err) { console.error('[批次] 扫码清单生成失败:', err.message); }
       if (specials.length) {
         try { specialPdfToken = await uploadBatchSpecialSheetPdf(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 PDF 生成失败:', err.message); }
@@ -333,7 +332,6 @@ async function lockBatch(batchNo, project, options = {}) {
       }
       if (bomToken) attach['BOM表'] = [{ file_token: bomToken }];
       if (mlToken) attach['物料清单'] = [{ file_token: mlToken }];
-      if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
       if (ssToken) attach['扫码清单'] = [{ file_token: ssToken }];
       if (Object.keys(attach).length) await collectStore.updateBatch(batchRecord.record_id, attach);
     }
@@ -352,7 +350,7 @@ async function lockBatch(batchNo, project, options = {}) {
 
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
-      pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken,
+      pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken,
       ssToken, scanItems,
       specialCount: specials.length,
       summary, purpose, ordinal, markFailed,
@@ -444,7 +442,7 @@ function fmtDateMs(ms) {
 
 // ---------- 批次附件重生成（/approval-batch regen） ----------
 
-/** 重新生成指定批次的四件附件（打印件/BOM/物料清单/投递底单，生成失败自愈入口——复查 P2-5）。
+/** 重新生成指定批次的交付件（打印件/BOM/物料清单/扫码清单，生成失败自愈入口——复查 P2-5）。
  *  外壳按批次号加锁（对抗审查 P2-1：与 confirm/reject 并发会双份附件互相覆盖+双二维码卡；
  *  confirmDelivery 持同 key 锁调内部无锁版，避免自死锁） */
 async function regenerateBatchFiles(batchNo) {
@@ -473,13 +471,9 @@ async function doRegenerateBatchFiles(batchNo) {
     summary, purpose, ordinal,
     feeItem: String(bf['费用项'] || ''),
     purchaseType: String(bf['采购类型'] || ''),
-    // 收款方从批次记录读回（复查 P1：regen 也要让锁定时的 收款方=/收款账号= 覆盖进投递底单，
-    // 不能回落 .env CQ_* 默认卡造成账实分离）
-    payee: String(bf['收款方'] || ''),
-    payeeAccount: String(bf['收款账号'] || ''),
   };
 
-  // 金额漂移核对（复查 P1）：regen 用采集表现值重造四件附件，若与批次锁定时记录的
+  // 金额漂移核对（复查 P1）：regen 用采集表现值重造交付件，若与批次锁定时记录的
   // 「金额合计」对不上（票被挪动/金额被改），如实暴露给回执与批次备注，财务核对台账
   const regenTotal = Math.round(items.reduce((s, i) => s + i.totalAmount, 0) * 100) / 100;
   const recordedTotal = typeof bf['金额合计'] === 'number' ? bf['金额合计'] : (parseFloat(bf['金额合计']) || 0);
@@ -487,12 +481,11 @@ async function doRegenerateBatchFiles(batchNo) {
     ? { recorded: recordedTotal, current: regenTotal }
     : null;
 
-  let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, dsToken = null, specialPdfToken = null, specialDocxToken = null, ssToken = null, scanItems = [];
+  let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, specialPdfToken = null, specialDocxToken = null, ssToken = null, scanItems = [];
   try { pdfToken = await uploadBatchPdf(batchNo, items); } catch (err) { console.error('[批次] 打印 PDF 重生成失败:', err.message); }
   try { docxToken = await uploadBatchDocx(batchNo, items); } catch (err) { console.error('[批次] 打印件 docx 重生成失败:', err.message); }
   try { bomToken = await uploadBatchBom(batchNo, items); } catch (err) { console.error('[批次] BOM 重生成失败:', err.message); }
   try { mlToken = await uploadBatchMaterialList(batchNo, items, meta); } catch (err) { console.error('[批次] 物料清单重生成失败:', err.message); }
-  try { dsToken = await uploadBatchDeliverySheet(batchNo, items, meta); } catch (err) { console.error('[批次] 投递底单重生成失败:', err.message); }
   try { ({ token: ssToken, scanItems } = await uploadBatchScanSheetDocx(batchNo, items)); } catch (err) { console.error('[批次] 扫码清单重生成失败:', err.message); }
   const specials = items.filter(isSpecialItem);
   if (specials.length) {
@@ -511,7 +504,6 @@ async function doRegenerateBatchFiles(batchNo) {
   }
   if (bomToken) attach['BOM表'] = [{ file_token: bomToken }];
   if (mlToken) attach['物料清单'] = [{ file_token: mlToken }];
-  if (dsToken) attach['投递底单'] = [{ file_token: dsToken }];
   if (ssToken) attach['扫码清单'] = [{ file_token: ssToken }];
   if (Object.keys(attach).length) await collectStore.updateBatch(batch.record_id, attach);
   if (amountDrift) {
@@ -524,7 +516,7 @@ async function doRegenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, dsToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift };
+  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
@@ -735,106 +727,6 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
   return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_物料清单.xlsx`);
 }
 
-// ---------- 交付包⑤：投递底单（照学校「智能财务服务大厅投递单」字段预填） ----------
-
-async function uploadBatchDeliverySheet(batchNo, items, meta = {}) {
-  const b = config.batch;
-  const total = Math.round(items.reduce((s, i) => s + i.totalAmount, 0) * 100) / 100;
-  const upper = numToCnyUpper(total);
-
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('投递底单');
-  ws.columns = [{ width: 16 }, { width: 36 }, { width: 14 }, { width: 20 }, { width: 42 }, { width: 12 }, { width: 12 }];
-
-  let r = 1;
-  const put = (label, value, { yellow = false, bold = false, note = '' } = {}) => {
-    const row = ws.getRow(r++);
-    const lc = row.getCell(1);
-    lc.value = label;
-    lc.font = { ...SONG, size: 10, bold };
-    lc.alignment = { vertical: 'middle' };
-    const vc = row.getCell(2);
-    vc.value = value;
-    vc.font = { ...SONG, size: 10 };
-    vc.alignment = { vertical: 'middle' };
-    if (yellow) vc.fill = YELLOW_FILL;
-    if (note) {
-      const nc = row.getCell(3);
-      nc.value = note;
-      nc.font = { ...SONG, size: 9, italic: true, color: { argb: 'FF808080' } };
-    }
-  };
-
-  // 标题 + 说明
-  ws.mergeCells(`A${r}:G${r}`);
-  const title = ws.getCell(`A${r}`);
-  title.value = '重庆大学投递报销单（投递底单）';
-  title.font = { ...SONG, size: 14, bold: true };
-  title.alignment = { horizontal: 'center', vertical: 'middle' };
-  r++;
-  ws.mergeCells(`A${r}:G${r}`);
-  const note = ws.getCell(`A${r}`);
-  note.value = `机器人预填稿 · 批次 ${batchNo} · 照单录入小翼Plus；投递号/公章/认证状态由学校系统与纸质流程生成`;
-  note.font = { ...SONG, size: 9, italic: true, color: { argb: 'FF808080' } };
-  r++;
-
-  put('投递号', '', { note: '提交后由学校系统生成' });
-  put('填报时间', '', { note: '提交时自动生成' });
-  put('公章', '', { note: '纸质件盖章处' });
-  put('报销人工号', b.reporterStuId, { yellow: !b.reporterStuId });
-  put('姓名', b.reporterName, { yellow: !b.reporterName });
-  put('联系电话', b.reporterPhone, { yellow: !b.reporterPhone });
-  put('项目编号', b.projectCode, { yellow: !b.projectCode });
-  put('项目所属部门', b.projectDept, { yellow: !b.projectDept });
-  put('项目名称', b.projectName, { yellow: !b.projectName });
-  put('项目负责人', b.projectLeader, { yellow: !b.projectLeader });
-  put('团队负责人', '', { note: '如学校要求则手填' });
-  put('摘要', meta.summary || '');
-  put('附件张数', items.length);
-  put('备注', '');
-  put('费用项', String(meta.feeItem || '').trim() || config.batch.feeItem);
-  put('报销金额', total);
-  put('申请总金额', total);
-  put('大写金额', upper, { yellow: !upper });
-  put('财务核准报销金额', '', { note: '财务填写' });
-  put('支付方式', '转卡');
-  put('收款人工号', b.reporterStuId, { yellow: !b.reporterStuId });
-  // 收款人姓名/卡号：批次锁定时 收款方=/收款账号= 覆盖优先（meta 带入），回落 .env 默认卡
-  // （复查 P1：此前恒写默认卡，lock 的收款方覆盖只进批次记录与台账 → 账实分离）
-  const dsPayee = String(meta.payee || '').trim() || b.reporterName;
-  const dsPayeeAccount = String(meta.payeeAccount || '').trim() || b.bankCardNo;
-  put('收款人姓名', dsPayee, { yellow: !dsPayee });
-  put('卡号', dsPayeeAccount, { yellow: !dsPayeeAccount });
-  put('开户行', b.bankName, { yellow: !b.bankName });
-  put('金额', total);
-
-  r++;
-  // 电子发票明细
-  const headRow = ws.getRow(r++);
-  ['发票代码', '发票号码', '开票单位', '开票日期', '开票内容', '发票金额', '是否已认证'].forEach((h, i) => {
-    const c = headRow.getCell(i + 1);
-    c.value = h;
-    c.font = { ...SONG, size: 10, bold: true };
-    c.alignment = { vertical: 'middle' };
-  });
-  for (const item of items) {
-    const row = ws.getRow(r++);
-    const invoiceCode = item.invoiceType === '全电发票' ? '数电票' : (item.invoiceCode || item.invoiceType || '');
-    const values = [invoiceCode, item.invoiceNo, item.sellerName, fmtDateMs(item.issueDateMs), item.invoiceContent || '', item.totalAmount, ''];
-    values.forEach((v, col) => {
-      const c = row.getCell(col + 1);
-      c.value = v;
-      c.font = { ...SONG, size: 10 };
-      c.alignment = { vertical: 'middle' };
-      if (col === 4 && !item.invoiceContent) c.fill = YELLOW_FILL;
-      // 金额格：解析失败/<=0 的票标黄（复查 P2：collectToItem 静默归零的票在底单上要有警示）
-      if (col === 5 && item.amountInvalid) c.fill = YELLOW_FILL;
-    });
-  }
-
-  const buffer = Buffer.from(await wb.xlsx.writeBuffer());
-  return client.uploadMediaToBitable(buffer, `报销单_${batchNoFileSafe(batchNo)}_投递底单.xlsx`);
-}
 
 // ---------- 交付包⑥：打印件 docx 可编辑版 + 特殊事项附页（2026-09-27 曼波反馈） ----------
 
@@ -1361,6 +1253,40 @@ async function markPrintAsked(recordId) {
   await collectStore.updateBatch(recordId, { '打印询问时间': Date.now() });
 }
 
+/**
+ * 锁定未确认交付提醒目标（2026-10-12 曼波定，0929 首单卡 13 天事故）：自动批次锁定超
+ * CONFIRM_REMIND_DAYS（默认 1 天）仍无人 /approval-batch confirm → 群发提醒卡；
+ * 每批只提醒一次（确认提醒时间为空才算，markConfirmReminded 防重）。
+ * 「无打印文件」过滤：人工 lock 批次交付件即时生成、无 confirm 环节（交付确认时间恒空），
+ * 不滤会把全部人工锁定批次误报成「未确认交付」；两阶段卡住的自动批次锁定时
+ * deferDelivery 无交付件必命中。边角：人工批次双附件恰好全生成失败时也会命中——但那批
+ * 确实缺交付件且 confirm 即自愈路径（confirmDelivery 幂等重造），属良性重叠。
+ */
+async function getConfirmRemindTargets() {
+  const delayMs = config.batch.confirmRemindDays * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - delayMs;
+  return (await collectStore.listBatches())
+    .filter(b => (b.fields['状态'] || collectStore.BATCH_STATUS.LOCKED) === collectStore.BATCH_STATUS.LOCKED)
+    .filter(b => !Number(b.fields['交付确认时间']))
+    .filter(b => !b.fields['打印文件'])
+    .filter(b => Number(b.fields['锁定时间']) > 0 && Number(b.fields['锁定时间']) <= cutoff)
+    .filter(b => !b.fields['确认提醒时间'])
+    .map(b => ({
+      recordId: b.record_id,
+      batchNo: String(b.fields['批次号'] || ''),
+      project: String(b.fields['项目'] || ''),
+      count: b.fields['张数'] || 0,
+      amount: typeof b.fields['金额合计'] === 'number' ? b.fields['金额合计'] : (parseFloat(b.fields['金额合计']) || 0),
+      taker: String(b.fields['接取人'] || ''),
+      lockedAt: Number(b.fields['锁定时间']),
+    }));
+}
+
+/** 提醒后打防重标（每批只自动提醒一次；发送失败不要调用本函数） */
+async function markConfirmReminded(recordId) {
+  await collectStore.updateBatch(recordId, { '确认提醒时间': Date.now() });
+}
+
 /** 批次总览（/approval-batch status 用）：按状态机先后分组（未知的排最后），组内金额降序 */
 async function batchOverview() {
   const { BATCH_STATUS } = collectStore;
@@ -1419,13 +1345,14 @@ module.exports = {
   uploadBatchSpecialSheetDocx,
   uploadBatchBom,
   uploadBatchMaterialList,
-  uploadBatchDeliverySheet,
   uploadBatchScanSheetDocx,
   buildBatchQrImages,
   confirmDelivery,
   markPrinted,
   getPrintAskTargets,
   markPrintAsked,
+  getConfirmRemindTargets,
+  markConfirmReminded,
   claimBatch,
   nextProjectOrdinal,
   composeSummary,

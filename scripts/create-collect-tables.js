@@ -60,7 +60,6 @@ const BATCH_FIELDS = [
   { field_name: '最后操作人', type: FIELD_TYPES.TEXT }, // submit/paid/reject 操作留痕（open_id 反查实名，2026-09-25 安全审查 #2）
   { field_name: '最后操作时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '物料清单', type: 17 }, // 附件：校格式物料清单 xlsx（交付包④）
-  { field_name: '投递底单', type: 17 }, // 附件：学校系统填报预填稿 xlsx（交付包⑤）
   { field_name: '特殊事项附页', type: 17 }, // 附件：大额/公私属性不分明票的付款记录+实物佐证单独排纸（pdf+docx，2026-09-27）
   { field_name: '扫码清单', type: 17 }, // 附件：按录入序重生成的发票二维码 docx（序号+金额+尾号），财务按序扫码录入（2026-09-29）
   { field_name: '交付确认人', type: FIELD_TYPES.TEXT }, // 自动批次：财务确认详情后才生成交付件（2026-09-29 两阶段流程）
@@ -68,6 +67,7 @@ const BATCH_FIELDS = [
   { field_name: '打印确认人', type: FIELD_TYPES.TEXT }, // 12h 询问后财务回复打印完成 → 更新（printAsk 流程）
   { field_name: '打印确认时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '打印询问时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } }, // 防重复询问（每批自动问一次）
+  { field_name: '确认提醒时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } }, // 防重复提醒：锁定超期未确认交付只自动提醒一次（2026-10-12）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
 ];
 

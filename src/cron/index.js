@@ -30,6 +30,10 @@ const bot = require('../feishu/bot');
 //   6. 回复轮询          INVOICE_REPLY_POLL_SCHEDULE       (0 45 * * * *, 每小时45分,
 //      2026-10-04：催办私聊的「延期/无法提交/回票」即时处理+回执，不等每日催办轮；
 //      只发对话回执不发催办，交互回路不受晚间静默限；与催办轮互斥见 invoiceUrgeService)
+//   7. 锁定未确认交付提醒 BATCH_CONFIRM_REMIND_SCHEDULE    (0 25 * * * *, 每小时25分,
+//      2026-10-12：自动批次锁定超 BATCH_CONFIRM_REMIND_DAYS（默认1天）仍无人
+//      /approval-batch confirm（0929 首单卡 13 天事故）→ 群发提醒卡引导 confirm；
+//      每批只提醒一次（确认提醒时间留痕防重）；发送过晚间静默闸顺延）
 //
 // 注：DAILY_INVOICE_REMINDER_SCHEDULE / INVOICE_URGE_SCHEDULE 代码默认留空 = 不启用，
 //     上文括号内时刻为现网 .env 配置值（非代码默认）；周播报代码默认周一 18:00
@@ -116,6 +120,7 @@ const quietTaskRunners = {
   invoice_urge: () => withRetry('invoice_urge', () => runInvoiceUrge()).then((r) => announceTodayUrged(r)),
   form_alert: () => withRetry('form_alert', () => formAlertService.runDailyCheck()),
   print_ask: () => withRetry('print_ask', () => askPendingPrintConfirm()),
+  confirm_remind: () => withRetry('confirm_remind', () => remindUnconfirmedBatches()),
 };
 
 /**
@@ -132,7 +137,8 @@ async function askPendingPrintConfirm() {
       // 批次号/项目名来自表格（人工可写），先消毒再进卡片 markdown（对抗审查 P2-2 同款）
       const safeNo = bot.stripCardInjection(t.batchNo);
       const safeProject = bot.stripCardInjection(t.project);
-      await bot.sendMessage({
+      // 同确认提醒：熔断/无 webhook 静默 null 时不写防重标（markPrintAsked 契约），下轮重试
+      const sent = await bot.sendMessage({
         config: { wide_screen_mode: true },
         header: { template: 'yellow', title: { tag: 'plain_text', content: `🖨️ 打印情况确认 · ${safeNo}` } },
         elements: [{
@@ -145,6 +151,10 @@ async function askPendingPrintConfirm() {
           ].join('\n'),
         }],
       });
+      if (!sent) {
+        console.warn(`[打印询问] 批次 ${t.batchNo} 被播报熔断拒发，不写防重标（下轮重试）`);
+        continue;
+      }
       await batchService.markPrintAsked(t.recordId);
       asked++;
       console.log(`[打印询问] 已询问批次 ${t.batchNo}（接取人: ${t.taker || '未接取'}）`);
@@ -156,12 +166,58 @@ async function askPendingPrintConfirm() {
   return { asked, total: targets.length };
 }
 
+/**
+ * 锁定未确认交付提醒（2026-10-12 曼波定，0929 首单卡 13 天事故）：锁定超
+ * confirmRemindDays 仍无人 /approval-batch confirm 的批次，群发提醒卡引导确认；
+ * 每批只自动提醒一次（markConfirmReminded 防重）；整体过晚间静默闸。
+ */
+async function remindUnconfirmedBatches() {
+  const targets = await batchService.getConfirmRemindTargets();
+  if (!targets.length) return { reminded: 0 };
+  let reminded = 0;
+  for (const t of targets) {
+    try {
+      // 批次号/项目名来自表格（人工可写），先消毒再进卡片 markdown（对抗审查 P2-2 同款）
+      const safeNo = bot.stripCardInjection(t.batchNo);
+      const safeProject = bot.stripCardInjection(t.project);
+      // sendMessage 被播报熔断（BROADCAST_DAILY_QUOTA 同类型 3 张/天，标题 key=「批次待确认 ·」
+      // 全部自动批次共享一桶）或未配置 webhook 时静默返回 null——此时不得写防重标，否则该批
+      // 提醒被永久跳过（0929 事故同款静默失败），下轮 cron 自动重试
+      const sent = await bot.sendMessage({
+        config: { wide_screen_mode: true },
+        header: { template: 'yellow', title: { tag: 'plain_text', content: `⏳ 批次待确认 · ${safeNo}` } },
+        elements: [{
+          tag: 'markdown',
+          content: [
+            `批次 **${safeNo}**（${safeProject}：${t.count} 张 ¥${Number(t.amount).toFixed(2)}）已锁定超过 ${config.batch.confirmRemindDays} 天仍未确认交付${t.taker ? `，接取人 **${bot.stripCardInjection(t.taker)}** 已在等待` : ``}。`,
+            ``,
+            `✅ 明细无误 → 回复 **/approval-batch confirm ${safeNo}**（生成交付件与二维码卡）`,
+            `❓ 有问题 → 在报销批次表修正或联系管理员；本提醒每批只发一次`,
+          ].join('\n'),
+        }],
+      });
+      if (!sent) {
+        console.warn(`[确认提醒] 批次 ${t.batchNo} 被播报熔断拒发，不写防重标（下轮重试）`);
+        continue;
+      }
+      await batchService.markConfirmReminded(t.recordId);
+      reminded++;
+      console.log(`[确认提醒] 已提醒批次 ${t.batchNo}（接取人: ${t.taker || '未接取'}）`);
+    } catch (err) {
+      // 单批提醒失败不写防重标（下轮重提醒），也不阻断其余批次
+      console.error(`[确认提醒] 批次 ${t.batchNo} 提醒失败（下轮重试）:`, err.message);
+    }
+  }
+  return { reminded, total: targets.length };
+}
+
 let weeklyTask = null;
 let reminderTask = null;
 let invoiceUrgeTask = null;
 let formAlertTask = null;
 let printAskTask = null;
 let replyPollTask = null;
+let confirmRemindTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -252,13 +308,21 @@ function startCronJobs() {
     console.log('[定时任务] INVOICE_REPLY_POLL_SCHEDULE 配为空，小时级回复轮询未启用（每日催办轮的轮询仍在）');
   }
 
+  // 7. 锁定未确认交付提醒（锁定超 N 天无人 confirm → 群发提醒卡，每批一次，过静默闸）
+  confirmRemindTask = cron.schedule(config.batch.confirmRemindSchedule, () => {
+    quietHours.gateTask('confirm_remind', quietHours.shanghaiStamp(), quietTaskRunners.confirm_remind, '锁定未确认交付提醒').catch(err => {
+      console.error('[定时任务] 锁定未确认交付提醒失败:', err.message);
+    });
+  }, { timezone: 'Asia/Shanghai' });
+  console.log(`[定时任务] 锁定未确认交付提醒已启动: ${config.batch.confirmRemindSchedule} (Asia/Shanghai, 锁定后 ${config.batch.confirmRemindDays} 天未确认则提醒) -> 下次 ${getNextExecutionTime(config.batch.confirmRemindSchedule)}`);
+
   // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
   for (const [name, fn] of Object.entries(quietTaskRunners)) {
     quietHours.registerTask(name, fn);
   }
   quietHours.initQuietHoursFlush();
 
-  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask, printAskTask, replyPollTask };
+  return { weeklyTask, reminderTask, invoiceUrgeTask, formAlertTask, printAskTask, replyPollTask, confirmRemindTask };
 }
 
 function stopCronJobs() {
@@ -268,6 +332,7 @@ function stopCronJobs() {
   if (formAlertTask) { formAlertTask.stop(); formAlertTask = null; }
   if (printAskTask) { printAskTask.stop(); printAskTask = null; }
   if (replyPollTask) { replyPollTask.stop(); replyPollTask = null; }
+  if (confirmRemindTask) { confirmRemindTask.stop(); confirmRemindTask = null; }
 }
 
 /**
@@ -335,6 +400,7 @@ function getCronStatus() {
       formAlert: config.formAlert.schedule || '(未启用，采集后即时检查仍生效)',
       printAsk: config.batch.printAskSchedule,
       replyPoll: config.invoiceUrge.replyPollSchedule || '(未启用)',
+      confirmRemind: config.batch.confirmRemindSchedule,
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
@@ -343,6 +409,7 @@ function getCronStatus() {
       formAlert: formAlertTask ? getNextExecutionTime(config.formAlert.schedule) : null,
       printAsk: printAskTask ? getNextExecutionTime(config.batch.printAskSchedule) : null,
       replyPoll: replyPollTask ? getNextExecutionTime(config.invoiceUrge.replyPollSchedule) : null,
+      confirmRemind: confirmRemindTask ? getNextExecutionTime(config.batch.confirmRemindSchedule) : null,
     },
     quietHours: quietHours.getStatus(),
   };

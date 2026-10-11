@@ -401,7 +401,7 @@ async function main() {
   assert.ok(batchRows[0].fields['BOM表'], 'BOM xlsx 应生成落附件');
   assert.ok(batchRows[0].fields['打印文件'], '打印 PDF 应生成落附件');
   assert.ok(batchRows[0].fields['物料清单'], '校格式物料清单应生成落附件（交付包④）');
-  assert.ok(batchRows[0].fields['投递底单'], '投递底单应生成落附件（交付包⑤）');
+  assert.ok(!batchRows[0].fields['投递底单'], '投递底单已移除（2026-10-12）不应再生成落附件');
   assert.equal(locked.ordinal, 1, '同项目首笔笔序=1（stub 台账空+无基数，回落本地计数）');
   assert.equal(locked.purpose, '对抗赛', '用途缺省=defaultPurpose（曼波 2026-09-29：实样该位是对抗赛类用途词）');
   assert.match(locked.summary, /^机甲大师实验室-.*-对抗赛-步兵机器人-材料费-第一笔$/, `摘要段序=用途在前项目在后（实际 ${locked.summary}）`);

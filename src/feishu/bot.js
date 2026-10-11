@@ -537,7 +537,7 @@ function stripCardInjection(s) {
 
 /**
  * 报销交付卡（锁定批次后审批群播报）：四件附件清单 + 摘要草稿 + 接取指引。
- * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/投递底单 等列）。
+ * 附件本体在多维表格「报销批次」表该行（打印文件/BOM表/物料清单/扫码清单 等列）。
  * 2026-09-29 曼波定：卡内直接按序内嵌全部有效发票二维码（imageKey 由 sendDeliveryCard
  * 预先上传换得），财务对屏幕按序号扫码即可完成录入；自动触发场景头部/文案切换。
  */
@@ -583,7 +583,6 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     mark(generated.scanSheet, '扫码清单', '按序二维码 docx（屏幕/打印皆可扫），照单依次扫码'),
     mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
     mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途/采购类型），交学校'),
-    mark(generated.deliverySheet, '投递底单', '学校系统填报预填稿，照单录入小翼Plus'),
     mark(generated.printDocx, '打印件 docx', '可编辑版（Word 里可调可删后打印）'),
     mark(generated.specialSheet, '特殊事项附页', `${specialCount} 张（大额/公私属性不分明/有支付记录），单独成页`),
   );
