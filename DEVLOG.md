@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v70**（2026-10-10，quietHours 冲刷竞态移植批——git 先行入库，部署待小电脑上线补跑）。上一版 v69（2026-10-07，NAS_*→DEPLOY_* 连接键改名批）。上一版 v68（2026-10-07，`5780a98`/`3aef361`，周报超期段漏 require 修复+健康检查；改名半成品曾混入其部署提交）。上一版 v67（2026-10-04，小时级回流轮询批）。
+当前最新：**v71**（2026-10-12，交付卡二维码上传 client 未定义修复+0929 首单补 confirm）。上一版 v70（2026-10-10，quietHours 冲刷竞态修复批——本版随 v71 一同补部署）。上一版 v69（2026-10-07，NAS_*→DEPLOY_* 连接键改名批）。上一版 v68（2026-10-07，`5780a98`/`3aef361`，周报超期段漏 require 修复+健康检查）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -573,3 +573,13 @@
 - 新增 scripts/stub-test-quiet-flush.js（任务型 9 断言：冲刷期间落盘不丢/失败保留回写/同毫秒不互吞）并入 package.json test 链。
 - **push.js 测试闸门对齐**：原手工清单比 npm run test 少 ledgerSheetService/cny 两个 --check 与 delivery/ledger 两套桩——闸门改跑 npm run test 单一事实来源。
 - npm test 六套全过。部署状态：git 先行入库，部署因小电脑离线挂起——上线后重跑 npm run push 补部署，无新版本。
+
+## v71 · 2026-10-12 · <本提交哈希> · fix
+
+**交付卡二维码上传 `client is not defined` 修复 + 0929 首单补 confirm（曼波报「二维码与打印回执功能未见」排查批）**
+
+- **双因定位**：①流程层——`自动-步兵机器人-0929` 9-29 10:35 自动锁定后**财务始终未 confirm**（批次表 交付确认人/时间 空），两阶段流程卡在第一阶段 13 天，交付件与二维码卡从未生成；贺韵洁 9-29 17:17 已接取（接取仅要求已锁定状态，两阶段间无耦合闸），接取后一直无产出可领。②代码层——补 confirm 后日志实锤 `[交付卡] 二维码 #1 上传失败（client is not defined)`：bot.js `sendDeliveryCard` 用 `client.uploadImageToIM` 但头部仅解构 `{ requestAPI }`，`client` 未定义 → ReferenceError 被单码降级 catch 吞掉（v49 交付卡内嵌二维码上线起**从未成功过**，每次都静默降级为「扫码清单附件扫码」）。修复=头部补 `const client = require('./client')`（uploadImageToIM 在 client.js 正常导出）。
+- **补 confirm 操作**：曼波授权，经 SSH→`POST /api/chat/command`（X-API-Token，senderName 留痕「曼波授权补confirm(Exusiai)」）触发线上 `confirmDelivery`——交付件五件套（打印件 pdf+docx/物料清单/投递底单/扫码清单/BOM/异常票特殊附页）生成落批次表、详情卡群发；操作留痕符合资金指令留痕口径。⚠️ 运维坑：中文批次号经 SSH→远端 shell 传参会被编码损坏（`批次不存在：？？？`），body 需 base64 编码落远端临时文件再 `--data-binary @`。
+- 后续动作：部署本版后对该批次执行 `/approval-batch regen 自动-步兵机器人-0929` 重新生成+发卡，验证卡内嵌二维码真实上传成功（confirm 幂等不会重发卡，regen 会）。
+- 经验：与 v68 周报超期段同款模式——**降级 catch 吞 ReferenceError + 无「成功上传」断言的测试，「功能未见」13 天无人知**。异常票附页/扫码清单兜底让降级链路产出正常-looking 的卡，掩盖了主链路死亡。
+- 测试：六套全绿（bot.js 头部 require 变更，stub-test-delivery 端到端过）。部署：随本提交上线（v70 一并补部署）。

@@ -1,5 +1,6 @@
 const config = require('../config');
-const { requestAPI } = require('./client');
+const client = require('./client');
+const { requestAPI } = client;
 const { fieldText } = require('../utils/fields');
 const quota = require('../utils/broadcastQuota');
 
