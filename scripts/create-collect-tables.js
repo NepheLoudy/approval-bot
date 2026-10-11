@@ -21,7 +21,7 @@ const COLLECT_FIELDS = [
   { field_name: '购买方税号', type: FIELD_TYPES.TEXT },
   { field_name: '销售方名称', type: FIELD_TYPES.TEXT },
   { field_name: '销售方税号', type: FIELD_TYPES.TEXT },
-  { field_name: '开票内容', type: FIELD_TYPES.TEXT }, // 票面货物名称星号分类（*电子元件*存储器），物料清单「项目」列/投递单明细同源
+  { field_name: '开票内容', type: FIELD_TYPES.TEXT }, // 票面货物名称星号分类（*电子元件*存储器，多货品发票取第一个——曼波 2026-10-12），物料清单「项目」列同源
   { field_name: '校验码后6位', type: FIELD_TYPES.TEXT },
   { field_name: '提交人', type: FIELD_TYPES.TEXT }, // open_id（人员字段写入需 open_id 转 id，V1 存 open_id 文本）
   { field_name: '提交人姓名', type: FIELD_TYPES.TEXT },
@@ -52,7 +52,7 @@ const BATCH_FIELDS = [
   { field_name: '用途', type: FIELD_TYPES.TEXT }, // 物料清单「用途」列（lock 用途= 覆盖，默认=项目）
   { field_name: '笔序', type: FIELD_TYPES.NUMBER, property: { formatter: '0' } }, // 同项目第N笔（摘要/归档名共用）
   { field_name: '费用项', type: FIELD_TYPES.TEXT }, // 投递单费用项（lock 费用项= 覆盖，默认 实验室用品）
-  { field_name: '采购类型', type: FIELD_TYPES.TEXT }, // 物料清单「采购类型」列（lock 采购类型= 覆盖）
+  { field_name: '采购类型', type: FIELD_TYPES.TEXT }, // 批次元数据（lock 采购类型= 覆盖；物料清单采购类型列已删 2026-10-12）
   { field_name: '接取人', type: FIELD_TYPES.TEXT }, // 审批群回复「接取」的领取人
   { field_name: '接取时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
   { field_name: '收款方', type: FIELD_TYPES.TEXT }, // 台账「收款方」（lock 收款方= 覆盖，默认=报销人）

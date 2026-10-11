@@ -664,15 +664,15 @@ const SONG = { name: '宋体', family: 3, charset: 134 };
 
 async function uploadBatchMaterialList(batchNo, items, meta = {}) {
   const purpose = String(meta.purpose || '').trim();
-  const purchaseType = String(meta.purchaseType || '').trim() || config.batch.purchaseType;
   const preparer = config.batch.preparer || config.batch.reporterName;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Sheet1');
-  // 列宽/合并照模板：A 序号窄、B 项目宽、C 金额、D 用途、E 采购类型
-  ws.columns = [{ width: 6 }, { width: 58 }, { width: 12 }, { width: 14 }, { width: 14 }];
+  // 列宽/合并照模板：A 序号窄、B 项目宽、C 金额、D 用途
+  //（采购类型列已删——2026-10-12 曼波定，学校模板不需要）
+  ws.columns = [{ width: 6 }, { width: 58 }, { width: 12 }, { width: 20 }];
 
-  // 标题行（模板 A1:E1 合中）
-  ws.mergeCells('A1:E1');
+  // 标题行（模板 A1:D1 合中）
+  ws.mergeCells('A1:D1');
   const title = ws.getCell('A1');
   title.value = '物料清单';
   title.font = { ...SONG, size: 9 };
@@ -680,23 +680,33 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
 
   // 表头行
   const header = ws.getRow(2);
-  ['序号', '项目', '金额', '用途', '采购类型'].forEach((h, i) => {
+  ['序号', '项目', '金额', '用途'].forEach((h, i) => {
     const c = header.getCell(i + 1);
     c.value = h;
     c.font = { ...SONG, size: 9 };
     c.alignment = { vertical: 'middle' };
   });
 
-  // 数据行：项目列 = 开票内容（缺失标黄留空）
+  // 数据行：项目列 = 开票内容（票面货物文本，多货品发票取第一个货品——曼波 2026-10-12 口径）；
+  // qrcode 通道的票二维码里没有票面文本、开票内容必然为空 → 回落审批表「购买物资名称」
+  // （队员申报必填，与货品语义同源）；两者都无才标黄留空现场补。
+  // 用途列 = 该票审批记录的「项目」分类（2026-10-12 曼波：用途应从审批的项目分类来，
+  // 如「步兵机器人」而非批次用途「对抗赛」），无审批关联才回落批次用途
   items.forEach((item, i) => {
     const row = ws.getRow(3 + i);
-    const values = [i + 1, item.invoiceContent || '', item.totalAmount, purpose, purchaseType];
+    const values = [
+      i + 1,
+      String(item.invoiceContent || '').trim() || String(item.material || '').trim(),
+      item.totalAmount,
+      String(item.project || '').trim() || purpose,
+    ];
+    const missingContent = !(values[1]);
     values.forEach((v, col) => {
       const c = row.getCell(col + 1);
       c.value = v;
       c.font = { ...SONG, size: 9 };
       c.alignment = { vertical: 'middle' };
-      if (col === 1 && !item.invoiceContent) c.fill = YELLOW_FILL;
+      if (col === 1 && missingContent) c.fill = YELLOW_FILL;
     });
   });
 
@@ -914,17 +924,19 @@ async function buildBatchQrImages(items) {
   return out;
 }
 
-/** 扫码清单 docx：两列格排（序号+金额+尾号+二维码大图），无效票红字标注占位不跳号 */
+/** 扫码清单 docx：两列格排（序号+金额+尾号+二维码图），无效票红字标注占位不跳号。
+ *  篇幅紧凑（2026-10-12 曼波）：二维码 120px、边距 60——一页可排 6 票（原 150px 约 4 票/页，
+ *  多票批次纸张翻倍）；120px @96dpi≈3.2cm 打印件扫码可靠 */
 async function uploadBatchScanSheetDocx(batchNo, items) {
   const qrImages = await buildBatchQrImages(items);
   const cellOf = (q) => new TableCell({
     width: { size: 50, type: WidthType.PERCENTAGE },
-    margins: { top: 120, bottom: 120, left: 120, right: 120 },
+    margins: { top: 60, bottom: 60, left: 80, right: 80 },
     children: [
-      new Paragraph({ children: [new TextRun({ text: `#${q.seq}　${q.amountText}　尾号 ${q.tail}`, bold: true, size: 22 })] }),
+      new Paragraph({ children: [new TextRun({ text: `#${q.seq}　${q.amountText}　尾号 ${q.tail}`, bold: true, size: 20 })] }),
       ...(q.valid
-        ? [new Paragraph({ spacing: { before: 60 }, children: [new ImageRun({ data: q.png, transformation: { width: 150, height: 150 } })] })]
-        : [new Paragraph({ spacing: { before: 60 }, children: [new TextRun({ text: `⚠️ ${q.note || '二维码不可重建，请扫纸质原件'}`, color: 'FF0000', size: 18 })] })]),
+        ? [new Paragraph({ spacing: { before: 40 }, children: [new ImageRun({ data: q.png, transformation: { width: 120, height: 120 } })] })]
+        : [new Paragraph({ spacing: { before: 40 }, children: [new TextRun({ text: `⚠️ ${q.note || '二维码不可重建，请扫纸质原件'}`, color: 'FF0000', size: 18 })] })]),
     ],
   });
   const rows = [];
@@ -935,8 +947,8 @@ async function uploadBatchScanSheetDocx(batchNo, items) {
     sections: [{
       properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 720, bottom: 720, left: 720, right: 720 } } },
       children: [
-        new Paragraph({ children: [new TextRun({ text: `发票扫码清单 · 批次 ${batchNo}（${items.length} 张，严格按录入顺序）`, bold: true, size: 26 })] }),
-        new Paragraph({ spacing: { after: 120 }, children: [new TextRun({ text: '录入小翼Plus/重大财务系统时按序号逐张扫码（顺序与打印件一致）；标 ⚠️ 的票请扫其纸质原件并对应序号补录。', size: 18, color: '666666' })] }),
+        new Paragraph({ children: [new TextRun({ text: `发票扫码清单 · 批次 ${batchNo}（${items.length} 张，严格按录入顺序）`, bold: true, size: 24 })] }),
+        new Paragraph({ spacing: { after: 80 }, children: [new TextRun({ text: '录入小翼Plus/重大财务系统时按序号逐张扫码（顺序与打印件一致）；标 ⚠️ 的票请扫其纸质原件并对应序号补录。', size: 18, color: '666666' })] }),
         new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }),
       ],
     }],

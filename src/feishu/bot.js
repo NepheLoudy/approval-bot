@@ -578,12 +578,12 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
   if (invalidCount > 0) lines.push(``, `⚠️ 另有 ${invalidCount} 张票未在本卡展示（二维码不可重建或超出卡片容量），序号连续不跳号，见「扫码清单」附件（红字标注的请扫其纸质原件）`);
 
   lines.push(
-    `**📎 交付文件**（「报销批次」表该行附件下载）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,
-    mark(generated.pdf, '打印文件', '按录入顺序一页两票，照序扫描'),
+    `**📎 交付文件**（「报销批次」表该行附件下载，按使用顺序排列）：${tableUrl ? `[打开报销批次表](${tableUrl})` : ''}`,
+    mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途），交学校'),
     mark(generated.scanSheet, '扫码清单', '按序二维码 docx（屏幕/打印皆可扫），照单依次扫码'),
-    mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
-    mark(generated.materialList, '物料清单', '校格式（序号/项目/金额/用途/采购类型），交学校'),
+    mark(generated.pdf, '打印文件', '按录入顺序一页两票，照序扫描'),
     mark(generated.printDocx, '打印件 docx', '可编辑版（Word 里可调可删后打印）'),
+    mark(generated.bom, 'BOM表', '内部核对（物资/型号/金额/发票对照）'),
     mark(generated.specialSheet, '特殊事项附页', `${specialCount} 张（大额/公私属性不分明/有支付记录），单独成页`),
   );
   if (warningCount > 0) {

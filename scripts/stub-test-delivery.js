@@ -121,11 +121,12 @@ async function main() {
 
   // ---------- 生成器：校格式物料清单（严格照模板：标题合并/表头/列序/总金额/制单人） ----------
   const items = [
-    { invoiceNo: '24312000000123456789', totalAmount: 52.93, invoiceContent: '*电子元件*存储器', invoiceType: '全电发票', invoiceCode: '', sellerName: '深圳市立创电子商务有限公司', issueDateMs: new Date('2026-09-20T00:00:00+08:00').getTime() },
-    { invoiceNo: '24312000000123459999', totalAmount: 60, invoiceContent: '', invoiceType: '全电发票', invoiceCode: '', sellerName: '深圳市金芯源半导体有限公司', issueDateMs: new Date('2026-09-17T00:00:00+08:00').getTime() },
+    { invoiceNo: '24312000000123456789', totalAmount: 52.93, invoiceContent: '*电子元件*存储器', invoiceType: '全电发票', invoiceCode: '', sellerName: '深圳市立创电子商务有限公司', issueDateMs: new Date('2026-09-20T00:00:00+08:00').getTime(), project: '步兵机器人', material: '存储器' },
+    // qrcode 通道票：无票面开票内容 → 项目列回落审批「购买物资名称」，用途取审批项目分类
+    { invoiceNo: '24312000000123459999', totalAmount: 60, invoiceContent: '', invoiceType: '全电发票', invoiceCode: '', sellerName: '深圳市金芯源半导体有限公司', issueDateMs: new Date('2026-09-17T00:00:00+08:00').getTime(), project: '步兵机器人', material: '自封袋' },
   ];
   uploaded.length = 0;
-  await batchService.uploadBatchMaterialList('27对抗赛飞镖24', items, { purpose: '飞镖机器人', purchaseType: '机器人零件' });
+  await batchService.uploadBatchMaterialList('27对抗赛飞镖24', items, { purpose: '对抗赛', purchaseType: '机器人零件' });
   assert.equal(uploaded.length, 1);
   assert.equal(uploaded[0].fileName, '报销单_27对抗赛飞镖24_物料清单.xlsx', '物料清单文件名');
 
@@ -134,20 +135,22 @@ async function main() {
   const ws1 = wb1.getWorksheet('Sheet1');
   assert.ok(ws1, '工作表名 Sheet1（同模板）');
   assert.equal(ws1.getCell('A1').value, '物料清单', 'A1 标题');
-  assert.deepEqual(ws1.model.merges.map(String), ['A1:E1'], '标题 A1:E1 合并（同模板）');
+  assert.deepEqual(ws1.model.merges.map(String), ['A1:D1'], '标题 A1:D1 合并（采购类型列已删 2026-10-12）');
   assert.deepEqual(
     ws1.getRow(2).values.slice(1),
-    ['序号', '项目', '金额', '用途', '采购类型'],
-    '表头严格照模板'
+    ['序号', '项目', '金额', '用途'],
+    '表头严格照模板（无采购类型列）'
   );
   assert.deepEqual(
     ws1.getRow(3).values.slice(1),
-    [1, '*电子元件*存储器', 52.93, '飞镖机器人', '机器人零件'],
-    '数据行：项目列=开票内容、用途/采购类型按参数'
+    [1, '*电子元件*存储器', 52.93, '步兵机器人'],
+    '数据行：项目列=开票内容、用途=审批项目分类（非批次用途）'
   );
-  const missingCell = ws1.getRow(4).getCell(2);
-  assert.equal(missingCell.value, '', '缺开票内容 → 项目列留空');
-  assert.equal(missingCell.fill && missingCell.fill.fgColor && missingCell.fill.fgColor.argb, 'FFFFFF00', '缺开票内容 → 标黄');
+  const qrcodeCell = ws1.getRow(4).getCell(2);
+  assert.equal(qrcodeCell.value, '自封袋', 'qrcode 票无开票内容 → 项目列回落审批「购买物资名称」');
+  assert.equal(!(qrcodeCell.fill && qrcodeCell.fill.fgColor), true, '有审批物资名回落 → 不标黄');
+  const missingCell = ws1.getRow(4).getCell(4);
+  assert.equal(missingCell.value, '步兵机器人', '用途列=审批项目分类');
   const totalLabel = ws1.getRow(5).getCell(2);
   assert.equal(totalLabel.value, '总金额：', '总金额行标签');
   assert.equal(totalLabel.alignment && totalLabel.alignment.horizontal, 'right', '总金额标签右对齐（同模板）');
