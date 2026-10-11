@@ -16,7 +16,7 @@
 - 通用坑：@识别要兼容 mentioned_type='bot'；多维表格字段值先过 fieldText 类工具再拼字符串；express.json 需放宽到 10mb（OCR base64 直传，v46）。
 
 顶层职能速览（需求跨项目即停，走上方"发错时的规定动作"）：
-ticket-bot=工单域｜approval-bot=财务审批｜project-management-robot=对话枢纽+DDL｜bambu-print-reservation=打印预约｜duty-bot=值日+快递｜wecom-attendance-bot=企业微信考勤周报｜feishu-gateway=事件接入｜qianli 顶层=部署/架构/整理。
+ticket-bot=工单域｜approval-bot=财务审批｜project-management-robot=对话枢纽+DDL｜bambu-print-reservation=打印预约｜duty-bot=值日+快递｜feishu-gateway=事件接入｜qianli 顶层=部署/架构/整理。
 
 ## 只管这些（归属信号）
 审批、发票、报销单、转账、财务、采购、审批群指令、催办、APPROVERS、审批多维表格字段。
