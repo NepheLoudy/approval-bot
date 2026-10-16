@@ -220,12 +220,15 @@ function resetFieldRules() {
  * 图片 Buffer → 飞书 OCR 分段文本
  */
 async function recognizeBuffer(buffer) {
+  // Uint8Array（PDF 渲染页等来源）归一为 Buffer（压缩链与飞书上传均按 Buffer 处理）
+  if (buffer instanceof Uint8Array && !Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer);
   if (!Buffer.isBuffer(buffer) || !buffer.length) {
     throw new Error('OCR 失败: 图片内容为空');
   }
+  // 超限大图先压缩（2026-10-17 采购回溯实测：7.78MB 照片票被飞书直接拒）——
+  // 缩放 + JPEG 质量渐降压到上限内（发票为大字票据，压缩不影响识别）
   if (buffer.length > config.ocr.maxImageBytes) {
-    throw new Error(`OCR 失败: 图片 ${(buffer.length / 1024 / 1024).toFixed(2)}MB 超过上限 `
-      + `${(config.ocr.maxImageBytes / 1024 / 1024).toFixed(0)}MB（飞书 OCR 限制 5MB）`);
+    buffer = await shrinkForOcr(buffer);
   }
 
   const data = await client.requestAPI('POST', OCR_API_PATH, { image: buffer.toString('base64') }, {
@@ -240,6 +243,20 @@ async function recognizeBuffer(buffer) {
     throw new Error('飞书 OCR 未识别出文字（图片可能不是票据/清晰度不足）');
   }
   return textList;
+}
+
+/** 大图压缩至 OCR 上限内（缩放 2000px + JPEG 质量渐降；留 500KB 安全余量） */
+async function shrinkForOcr(buffer) {
+  const sharp = require('sharp');
+  const limit = config.ocr.maxImageBytes - 500 * 1024;
+  let out = await sharp(buffer).rotate().resize({ width: 2000, withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+  for (let q = 70; out.length > limit && q >= 30; q -= 15) {
+    out = await sharp(buffer).rotate().resize({ width: 1600, withoutEnlargement: true }).jpeg({ quality: q }).toBuffer();
+  }
+  if (out.length > limit) {
+    throw new Error(`OCR 失败: 图片 ${(buffer.length / 1024 / 1024).toFixed(2)}MB 压缩后仍超上限（${(out.length / 1024 / 1024).toFixed(2)}MB）`);
+  }
+  return out;
 }
 
 /**

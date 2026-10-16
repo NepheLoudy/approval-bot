@@ -652,8 +652,9 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
   }
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」，录入时需现场补填`);
   // 发票/补交发票两列等效口径（2026-09-29 曼波定）：审批提交时直接附票的记录不在采集表，
-  // 金额已计入本批触发，但无票面图片进不了打印批——如实提示，回溯采集后自动并入后续批次
-  if (unCollected > 0) lines.push(`⚠️ 该项目另有 ${unCollected} 笔申请的发票在审批表「发票」列（审批时直接提交，未走采集、无票面图片），未计入本批；如需并入请先发票回溯采集，下一批自动打包`);
+  // 金额已计入本批触发，但无票面图片进不了打印批——如实提示；锁定时已先做定点补采
+  //（2026-10-17），此处剩余=补采仍未入库的（无票面图/识别失败），入库后并入后续批次
+  if (unCollected > 0) lines.push(`⚠️ 另有 ${unCollected} 笔已交票暂未能采集入库（无票面图片或识别失败），未计入本批；处理入库后将并入后续批次`);
 
   return {
     config: { wide_screen_mode: true },

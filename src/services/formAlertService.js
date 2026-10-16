@@ -97,26 +97,59 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   const threshold = config.formAlert.amount;
   const cooldownMs = config.formAlert.cooldownHours * 60 * 60 * 1000;
 
-  // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
-  // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
-  const { suggestions } = await batchService.previewBatch();
-  const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0, poolCount: s.count }]));
-  const supplement = await batchService.getUnbatchedInvoicedByProject();
-  for (const [project, agg] of supplement) {
-    const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
-    cur.count += agg.count;
-    cur.amount = Math.round((cur.amount + agg.amount) * 100) / 100;
-    cur.unCollected = agg.count; // 该项目未采集笔数（锁定后详情卡提示，打印批只能打包采集票）
-    byProject.set(project, cur);
-  }
-  // 未归类票不自动锁批（对抗审查：票池「未归类」项目金额满线会自动锁出无主批次——
-  // 这些票需财务人工归类后才能制单）；补充口径-only 项目（票池 0 张）不触发
-  //（lockBatch 必抛「票池无票」且失败不写冷却 → 无限重试，对抗审查 P3-1）
-  const all = [...byProject.values()]
-    .filter(s => s.project !== '未归类' && s.poolCount > 0)
-    .map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
+  /** 项目维度金额汇总（票池 + 票池外补充合并）——补采后重算复用 */
+  const computeProjectAmounts = async () => {
+    // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
+    // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
+    const { suggestions } = await batchService.previewBatch();
+    const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0, poolCount: s.count }]));
+    const supplement = await batchService.getUnbatchedInvoicedByProject();
+    for (const [project, agg] of supplement) {
+      const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
+      cur.count += agg.count;
+      cur.amount = Math.round((cur.amount + agg.amount) * 100) / 100;
+      cur.unCollected = agg.count; // 该项目未采集笔数（详情卡提示 + 锁定前补采判定）
+      byProject.set(project, cur);
+    }
+    // 未归类票不自动锁批（对抗审查：票池「未归类」项目金额满线会自动锁出无主批次——
+    // 这些票需财务人工归类后才能制单）；补充口径-only 项目（票池 0 张）不触发
+    //（lockBatch 必抛「票池无票」且失败不写冷却 → 无限重试，对抗审查 P3-1）
+    return [...byProject.values()]
+      .filter(s => s.project !== '未归类' && s.poolCount > 0)
+      .map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
+  };
 
-  const hits = all.filter(s => s.amount >= threshold);
+  let all = await computeProjectAmounts();
+  let hits = all.filter(s => s.amount >= threshold);
+
+  // 「锁定前补采」（2026-10-17 曼波定「一个单子做完」）：待锁项目若仍有已交未采集的票
+  // （unCollected>0），先定点回溯把票收进采集池再锁——防「判定满额时票未进池 → 批次只锁
+  // 到一部分、其余进下批」的拆单（重装 1017 实案）。补采失败/收不全不拦锁：按现票池锁定，
+  // 未入库票由详情卡如实提示。noFormAlert 防 checkAndBroadcast→补采→触发 递归；dryRun 只查不采
+  let preCollected = 0;
+  if (!dryRun) {
+    const now0 = Date.now();
+    const dueNow = hits.filter(s => {
+      const st = state.projects[s.project];
+      return !st || now0 - (st.ts || 0) >= cooldownMs;
+    });
+    const needCollect = dueNow.filter(s => (s.unCollected || 0) > 0).map(s => s.project);
+    if (needCollect.length) {
+      try {
+        const backfillService = require('./backfillService');
+        const bf = await backfillService.backfillCollect({ limit: 100, sinceDays: 200, noFormAlert: true, onlyProjects: needCollect });
+        preCollected = bf.collected || 0;
+        console.log(`[制单金额线] 锁定前补采（${needCollect.join('/')}）：收 ${bf.collected} 张 / 处理 ${bf.scanned} 条候选（枚举 ${bf.totalInstances || 0} 实例）`);
+        if (preCollected > 0) {
+          all = await computeProjectAmounts();
+          hits = all.filter(s => s.amount >= threshold);
+        }
+      } catch (err) {
+        console.warn('[制单金额线] 锁定前补采失败（按现票池锁定，未采集票并入后续批次）:', err.message);
+      }
+    }
+  }
+
   const now = Date.now();
   const due = hits.filter(s => {
     const st = state.projects[s.project];
@@ -126,6 +159,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   const result = {
     checked: all.length,
     threshold,
+    preCollected, // 锁定前补采入库票数（0=无需/失败）
     locked: [],
     failed: [],
     skipped: hits.length - due.length, // 命中阈值但在冷却期内的项目数

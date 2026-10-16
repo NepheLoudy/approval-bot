@@ -44,6 +44,18 @@ function extractInvoiceContent(rawText) {
   // 列分隔截断：PDF 文本层列间多空格；行尾数量/金额（如「1 张」「3.97」）剥掉
   let name = m[2].split(/\s{2,}/)[0];
   name = name.replace(/\s*[0-9.]+\s*(张|个|台|件|只|枚|套|米|卷|次)?\s*$/, '').trim();
+  // 乱序文本流兜底（2026-10-17）：部分开票平台 PDF 把货品名按列拆行（行尾即折行截断）——
+  // 后续行仍为纯中文（无数字/字母/百分号等列数据特征）时逐行拼接，拼到列数据行/空行为止
+  const after = text.slice(m.index + m[0].length);
+  if (after.startsWith('\n')) {
+    for (const ln of after.slice(1).split('\n')) {
+      const seg = ln.trim();
+      if (!seg || /[0-9A-Za-z%¥￥]/.test(seg) || seg.length > 30) break;
+      name += seg.replace(/\s+/g, '');
+      if (name.length >= 60) break;
+    }
+  }
+  name = name.slice(0, 60);
   if (!m[1].trim() || !name) return null;
   return `*${m[1].trim()}*${name}`;
 }
@@ -238,37 +250,80 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
   if (isPdf) {
     const { result, error } = await tryPdfChannel(buffer).catch(err => ({ result: null, error: err.message }));
     if (result) return result;
+    // 渲染回落（2026-10-17 曼波定「所有发票都得识别抠二维码/抠文本」）：文本层失败的扫描版/
+    // 文本流损坏数电票 PDF → 页面渲染为图走图片通道（二维码/OCR，实测救回原判死的票）
+    try {
+      const pages = await renderPdfPages(buffer);
+      let lastFail = null;
+      for (const png of pages) {
+        const r = await recognizeFromImage(png, ocrFallback);
+        if (r.ok) {
+          return { ...r, warnings: [...(r.warnings || []), `PDF 文本层失败（${String(error || '').slice(0, 40)}），经页面渲染通道识别`] };
+        }
+        lastFail = r;
+      }
+      if (lastFail) {
+        return { ...lastFail, reason: `文本层识别失败（${String(error || '').slice(0, 40)}）；页面渲染后仍失败（${String(lastFail.reason || '').slice(0, 40)}）`, looksLikeInvoice: true };
+      }
+    } catch (renderErr) {
+      return { ok: false, source: 'pdfText', reason: `${error || 'PDF 识别失败'}（页面渲染回落亦失败：${String(renderErr.message).slice(0, 60)}）`, fields: {}, missing: [], warnings: [], looksLikeInvoice: true };
+    }
     // 文件消息按指引多为发票 PDF（无文本层扫描件/版式变体），失败一律打回不静默（复查 P1-2）
     return { ok: false, source: 'pdfText', reason: error || 'PDF 识别失败', fields: {}, missing: [], warnings: [], looksLikeInvoice: true };
   }
 
-  // 图片：先二维码，后 OCR。
-  // 2026-09-29 强化：发票 QR payload 只含票号/日期/金额，不含购买方——QR 命中而抬头
-  // 缺失时继续跑 OCR 补抬头字段（此前直接返回，抬头校验对纯 QR 票无料可校，全部误判
-  // 「抬头存疑」）；OCR 失败/仍无抬头则带 warning 降级，QR 三要素齐全照常收票
+  return recognizeFromImage(buffer, ocrFallback);
+}
+
+/** PDF 页面渲染为 PNG 列表（文本层失败 PDF 的兜底素材）。
+ *  复用 pdf-parse 的 getScreenshot（与 tryPdfChannel 同一 pdfjs 源，规避多版本工作线程冲突——
+ *  2026-10-17 实测：pdf-to-img 自带 pdfjs 6.x 与 pdf-parse 5.x 的 fake worker 打架）。
+ *  只渲染前 maxPages 页（发票附件一般 1 页）。 */
+async function renderPdfPages(buffer, maxPages = 3, scale = 2) {
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  try {
+    const shot = await parser.getScreenshot({ first: maxPages, scale });
+    return (shot.pages || []).map(p => p.data).filter(Boolean);
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
+}
+
+/**
+ * 图片（或 PDF 页面渲染图）识别：先二维码，后 OCR。
+ * 2026-09-29 强化：发票 QR payload 只含票号/日期/金额，不含购买方——QR 命中而抬头
+ * 缺失时继续跑 OCR 补抬头字段（此前直接返回，抬头校验对纯 QR 票无料可校，全部误判
+ * 「抬头存疑」）；OCR 失败/仍无抬头则带 warning 降级，QR 三要素齐全照常收票
+ */
+async function recognizeFromImage(buffer, ocrFallback) {
   const { result: qrResult, error: qrError } = await tryQrChannel(buffer);
   const qrOk = qrResult && qrResult.ok;
   const needBuyer = qrOk && !qrResult.fields.buyerName && !qrResult.fields.buyerTaxNo;
 
   if (qrOk && !needBuyer) return { source: 'qrcode', ...qrResult };
 
-  if (qrOk && needBuyer && typeof ocrFallback === 'function') {
-    try {
-      const segments = await ocrFallback(buffer);
-      const parsedInvoice = parseInvoiceText(segments.join('\n'));
-      const merged = { ...qrResult.fields };
-      // QR 精确要素优先，OCR 只补 QR 没有的字段（购买方/销售方/开票内容等）
-      for (const k of Object.keys(parsedInvoice.fields || {})) {
-        if (parsedInvoice.fields[k] && !merged[k]) merged[k] = parsedInvoice.fields[k];
+  if (qrOk && needBuyer) {
+    if (typeof ocrFallback === 'function') {
+      try {
+        const segments = await ocrFallback(buffer);
+        const parsedInvoice = parseInvoiceText(segments.join('\n'));
+        const merged = { ...qrResult.fields };
+        // QR 精确要素优先，OCR 只补 QR 没有的字段（购买方/销售方/开票内容等）
+        for (const k of Object.keys(parsedInvoice.fields || {})) {
+          if (parsedInvoice.fields[k] && !merged[k]) merged[k] = parsedInvoice.fields[k];
+        }
+        const warnings = [...(qrResult.warnings || [])];
+        const gotBuyer = Boolean(merged.buyerName || merged.buyerTaxNo);
+        if (!gotBuyer) warnings.push('二维码不含购买方信息，OCR 亦未识别到抬头——请对照票面人工核对抬头');
+        return { source: gotBuyer ? 'qrcode+ocr' : 'qrcode', ...qrResult, fields: merged, warnings };
+      } catch (err) {
+        // OCR 补抬头失败不拦票（三要素已齐）：warning 标注，checkBuyer 按「待人工」分流
+        return { source: 'qrcode', ...qrResult, warnings: [...(qrResult.warnings || []), `抬头补识别失败（${String(err.message).slice(0, 40)}），请人工核对票面抬头`] };
       }
-      const warnings = [...(qrResult.warnings || [])];
-      const gotBuyer = Boolean(merged.buyerName || merged.buyerTaxNo);
-      if (!gotBuyer) warnings.push('二维码不含购买方信息，OCR 亦未识别到抬头——请对照票面人工核对抬头');
-      return { source: gotBuyer ? 'qrcode+ocr' : 'qrcode', ...qrResult, fields: merged, warnings };
-    } catch (err) {
-      // OCR 补抬头失败不拦票（三要素已齐）：warning 标注，checkBuyer 按「待人工」分流
-      return { source: 'qrcode', ...qrResult, warnings: [...(qrResult.warnings || []), `抬头补识别失败（${String(err.message).slice(0, 40)}），请人工核对票面抬头`] };
     }
+    // 无 OCR 兜底（离线校验/测试环境）：QR 三要素齐全照常收票，抬头按「待人工」分流
+    // （2026-10-17：此前该组合会落到「未识别到二维码」的误导性失败——PDF 渲染路径实测撞上）
+    return { source: 'qrcode', ...qrResult, warnings: [...(qrResult.warnings || []), '二维码不含购买方且无 OCR 兜底，请人工核对票面抬头'] };
   }
 
   if (typeof ocrFallback === 'function') {

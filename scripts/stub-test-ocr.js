@@ -135,11 +135,13 @@ async function main() {
   await assert.rejects(() => ocrService.recognizeBuffer(FAKE_IMAGE), /99991672.*no permission|no permission.*99991672/s);
 
   // 空/超限图片前置拒绝（不发 OCR 请求）
+  // 2026-10-17 起超限图先走压缩链（shrinkForOcr）：压缩失败或压缩后仍超限才拒绝——
+  // 上限设 4 字节时任何图都过不了（FAKE_IMAGE 非合法图 → 压缩阶段即失败）
   const beforeRejected = ocrCalls.length;
   await assert.rejects(() => ocrService.recognizeBuffer(Buffer.alloc(0)), /图片内容为空/);
   const origMax = config.ocr.maxImageBytes;
   config.ocr.maxImageBytes = 4;
-  await assert.rejects(() => ocrService.recognizeBuffer(FAKE_IMAGE), /超过上限/);
+  await assert.rejects(() => ocrService.recognizeBuffer(FAKE_IMAGE));
   config.ocr.maxImageBytes = origMax;
   assert.equal(ocrCalls.length, beforeRejected, '被拒绝的图片不得发起 OCR 请求');
 

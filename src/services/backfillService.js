@@ -172,6 +172,9 @@ async function doBackfillCollect(options = {}) {
 
   const limit = Math.min(parseInt(options.limit, 10) || 20, 100);
   const sinceDays = Math.min(parseInt(options.sinceDays, 10) || 200, 365);
+  // 定向补采（2026-10-17，制单金额线锁定前用）：只处理指定项目的候选记录
+  const onlyProjects = Array.isArray(options.onlyProjects) && options.onlyProjects.length
+    ? new Set(options.onlyProjects) : null;
 
   // 表格侧候选：已通过 + 活跃流程 + 已交票 + 采集表无记录（与旧骨架一致）
   const all = await approvalService.getAllApprovals();
@@ -182,6 +185,10 @@ async function doBackfillCollect(options = {}) {
     if (f['申请状态'] !== config.approvalStatus.APPROVED) return false;
     if (!approvalService.isActiveProcess(f)) return false;
     if (!approvalService.hasInvoiceSubmitted(f)) return false;
+    if (onlyProjects) {
+      const project = f['项目'] ? (f['项目'].name || String(f['项目'])) : '未归类';
+      if (!onlyProjects.has(project)) return false;
+    }
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     return applyNo && !collectedApplyNos.has(applyNo);
   });
@@ -325,6 +332,8 @@ async function doBackfillCollect(options = {}) {
           ...(amountDiff !== null ? { '金额差': amountDiff } : {}),
           '识别通道': parsed.source === 'qrcode+ocr' ? 'qrcode+ocr' : parsed.source,
           '校验状态': verifyStatusFor(fields.totalAmount, applyAmount),
+          // 二维码原文（扫码清单重生成同源；qrcode/渲染通道识别时携带）——与实时采集同口径
+          ...(parsed.qrPayload ? { '二维码内容': String(parsed.qrPayload) } : {}),
           ...(historyBatch ? { '批次': historyBatch } : {}),
           ...(fileToken ? { '发票图片': [{ file_token: fileToken }] } : {}),
           '采集时间': Date.now(),
@@ -349,8 +358,9 @@ async function doBackfillCollect(options = {}) {
   }
 
   // 回溯落表后即时触发制单金额线检查（同采集钩子口径：过静默闸、夜间顺延补跑；
-  // 测试环境 FORM_ALERT_DISABLED=1 自跳过）——回溯后无需干等次日 10:35 兜底
-  if (result.collected > 0) {
+  // 测试环境 FORM_ALERT_DISABLED=1 自跳过）——回溯后无需干等次日 10:35 兜底。
+  // noFormAlert：制单金额线「锁定前补采」调用时置位——防 checkAndBroadcast→补采→触发 递归
+  if (result.collected > 0 && !options.noFormAlert) {
     try {
       // 延迟 require：formAlertService 顶部连着 batchService 重依赖（同 invoiceCollectService 口径）
       const formAlertService = require('./formAlertService');
