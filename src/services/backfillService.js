@@ -6,9 +6,17 @@
  *   拿它调 GET /approval/v4/instances/:id 报 1390003 instance code not found——
  *   表格 SourceID 不是审批 OpenAPI 的 instance_id，此路不通；
  * - 正确链路：APPROVAL_CODE（审批定义 code，飞书审批管理后台 → 流程详情获取，一次性配置）
- *   → GET /approval/v4/instances?approval_code&start_time&end_time 批量拉 instance_id
- *   → GET /approval/v4/instances/:id 实例详情（form 附件引用 + user_id + create_time）
- *   → 下载附件识别 → 「发起人 + 发起时间±3天窗 + 发票金额 vs 申请金额精确」匹配表格记录回填。
+ *   → POST /approval/v4/instances/query 批量拉实例（instance.code + instance.serial_id）
+ *   → GET /approval/v4/instances/:code 实例详情（form 附件引用 + user_id + start_time）
+ *   → 下载附件识别 → 优先「serial_id == 表格申请编号」精确回填，
+ *     未命中回落「发起人 + 发起时间±3天窗 + 发票金额 vs 申请金额精确」模糊匹配。
+ *
+ * 2026-10-17 枚举链校准（工单定义 code 实测，勿回退）：
+ *   - 旧实现 GET /approval/v4/instances 读 `instance_ids` + 秒级 start/end——实测响应字段
+ *     实为 instance_code_list、时间窗实为毫秒，三口径全错 → 枚举恒空，backfill 静默零处理；
+ *   - 换 POST /instances/query 后实测：时间参数 instance_start_time_from/to 毫秒、
+ *     单次跨度上限 30 天（31 天报 1390001）、分页 has_more + page_token、
+ *     实例摘要含 serial_id（审批编号 == 表格「申请编号」，如 202610160001）。
  *
  * 未配置 APPROVAL_CODE 时 backfill 返回清晰指引，不做任何写入。
  */
@@ -23,9 +31,48 @@ const { withRecordLock } = require('./invoiceCollectService');
 
 const DAY_MS = 24 * 3600 * 1000;
 
-/** 从实例详情 form 中递归抽取附件引用 [{file_id, name}]（控件 value 结构随版本有差异，宽容解析） */
+/** 从实例详情 form 中抽取发票附件引用。
+ *  实测结构（2026-10-17，采购流程实例 form 为控件数组 {id,name,type,ext,value}）：
+ *  发票控件 type=attachmentV2、name=发票、value=[免登下载直链]（internal-api-drive-stream
+ *  .../download/authcode?code=…，裸 GET 即得文件本体，实测 JPEG 313KB）；
+ *  「示意图」为 image 类型控件（非 attachmentV2），不抓。
+ *  旧假设的 file_id/file_code 对象结构保留为最末兜底（兼容其它流程/版本）。
+ * @returns {Array<{url?: string, fileId?: string, name: string}>}
+ */
 function extractAttachmentRefs(formValue) {
   const found = [];
+  let items = formValue;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch (e) { items = []; }
+  }
+
+  // 1) 发票附件控件直链（name/标题含「发票」）
+  if (Array.isArray(items)) {
+    for (const ctl of items) {
+      if (!ctl || typeof ctl !== 'object') continue;
+      const name = String(ctl.name || ctl.title || '');
+      if (String(ctl.type) === 'attachmentV2' && /发票/.test(name) && Array.isArray(ctl.value)) {
+        for (const u of ctl.value) {
+          if (typeof u === 'string' && /^https?:\/\//.test(u)) found.push({ url: u, name });
+        }
+      }
+    }
+  }
+  if (found.length) return found;
+
+  // 2) 宽松兜底：任意 attachmentV2 控件的直链（name 未命中「发票」时；image 控件不抓）
+  if (Array.isArray(items)) {
+    for (const ctl of items) {
+      if (ctl && String(ctl.type) === 'attachmentV2' && Array.isArray(ctl.value)) {
+        for (const u of ctl.value) {
+          if (typeof u === 'string' && /^https?:\/\//.test(u)) found.push({ url: u, name: String(ctl.name || '') });
+        }
+      }
+    }
+  }
+  if (found.length) return found;
+
+  // 3) file_id/file_code 对象递归（旧结构兜底）
   const visit = (node) => {
     if (Array.isArray(node)) {
       node.forEach(visit);
@@ -39,36 +86,60 @@ function extractAttachmentRefs(formValue) {
     }
     Object.values(node).forEach(visit);
   };
-  visit(formValue);
+  visit(items);
   return found;
 }
 
-/** 批量拉取审批实例 ID（时间窗自动分片翻页；接口要求 start/end 为秒且跨度受限） */
-async function listInstanceIds(approvalCode, sinceMs) {
-  const ids = [];
-  const CHUNK = 30 * DAY_MS / 1000; // 30 天一片（飞书限单次跨度）
-  let start = Math.floor(sinceMs / 1000);
-  const now = Math.floor(Date.now() / 1000);
+/** 附件直链下载（attachmentV2 value 的 authcode 免登直链，裸 GET 即得文件本体；20s 超时） */
+async function downloadByUrl(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    let msg = ct;
+    try {
+      const b = await res.json();
+      msg = `${b.code || res.status}: ${b.msg || ''}`;
+    } catch (e) { /* 非 JSON */ }
+    throw new Error(`直链返回 JSON（疑似失效/受限）: ${msg}`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** 批量拉取审批实例（code + 申请编号 serial_id）：毫秒时间窗 30 天分片、片内翻页。
+ *  接口口径见文件头「2026-10-17 枚举链校准」注释。 */
+async function listInstances(approvalCode, sinceMs) {
+  const out = [];
+  const CHUNK = 30 * DAY_MS; // 接口硬限制：单次查询跨度不得超过 30 天（1390001）
+  const now = Date.now();
+  let start = sinceMs;
   while (start < now) {
     const end = Math.min(start + CHUNK, now);
     let pageToken = '';
     do {
-      const q = new URLSearchParams({
-        approval_code: approvalCode,
-        start_time: String(start),
-        end_time: String(end),
-        page_size: '100',
-      });
-      if (pageToken) q.set('page_token', pageToken);
-      const res = await client.requestAPI('GET', `/approval/v4/instances?${q.toString()}`);
+      // page_token 必须走 query string（2026-10-17 实测：放 body 被忽略 → 恒返回第 1 页
+      // 且 has_more 恒 true，翻页死循环）
+      const res = await client.requestAPI(
+        'POST',
+        `/approval/v4/instances/query${pageToken ? `?page_token=${encodeURIComponent(pageToken)}` : ''}`,
+        {
+          approval_code: approvalCode,
+          instance_start_time_from: start,
+          instance_start_time_to: end,
+          page_size: 100,
+        }
+      );
       if (res.code === 1390002) throw new Error('approval code not found（APPROVAL_CODE 配置有误）');
-      if (res.code !== 0) throw new Error(`批量获取实例 ID 失败: ${res.msg} (code: ${res.code})`);
-      ids.push(...(res.data?.instance_ids || []));
+      if (res.code !== 0) throw new Error(`批量获取审批实例失败: ${res.msg} (code: ${res.code})`);
+      for (const item of res.data?.instance_list || []) {
+        const inst = item.instance || {};
+        if (inst.code) out.push({ code: String(inst.code), serialId: String(inst.serial_id || ''), status: inst.status || '' });
+      }
       pageToken = res.data?.has_more ? res.data.page_token : '';
     } while (pageToken);
     start = end;
   }
-  return ids;
+  return out;
 }
 
 /**
@@ -116,51 +187,68 @@ async function doBackfillCollect(options = {}) {
   });
   if (!candidates.length) return { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: ['没有待回填的表格记录'] };
 
-  const instanceIds = await listInstanceIds(approvalCode, Date.now() - sinceDays * DAY_MS);
-  const result = { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: [], totalInstances: instanceIds.length };
+  const instances = await listInstances(approvalCode, Date.now() - sinceDays * DAY_MS);
+  // serial_id（= 表格「申请编号」）→ 候选记录：编号精确匹配索引（2026-10-17 校准升级；
+  // 旧「同人 + 发起时间±3天窗 + 金额精确」保留为 fallback，兜 serial 缺失的实例）
+  const candByApplyNo = new Map();
+  for (const r of candidates) {
+    const applyNo = r.fields['申请编号'] ? (r.fields['申请编号'].text || String(r.fields['申请编号'])) : '';
+    if (applyNo) candByApplyNo.set(applyNo, r);
+  }
+  const result = { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: [], totalInstances: instances.length };
 
-  for (const instanceId of instanceIds) {
+  for (const inst of instances) {
+    const instanceId = inst.code;
     if (result.collected >= limit) break;
+    // 快速跳过：serial 已分配但不在候选（已采集/不在待办名单）的实例不拉详情——省配额
+    if (inst.serialId && !candByApplyNo.has(inst.serialId)) continue;
     result.scanned++;
 
-    let inst;
+    let detail;
     try {
-      inst = await client.getApprovalInstance(instanceId);
-      if (inst.code !== 0) throw new Error(`${inst.msg} (code: ${inst.code})`);
+      detail = await client.getApprovalInstance(instanceId);
+      if (detail.code !== 0) throw new Error(`${detail.msg} (code: ${detail.code})`);
     } catch (err) {
       result.failed++;
       result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: ${err.message.slice(0, 120)}`);
       continue;
     }
 
-    const userId = inst.data?.user_id || '';
-    const createTimeMs = (parseInt(inst.data?.start_time, 10) || 0) * 1000;
-    let forms = inst.data?.form;
+    const userId = detail.data?.user_id || '';
+    const createTimeMs = (parseInt(detail.data?.start_time, 10) || 0) * 1000;
+    let forms = detail.data?.form;
     if (typeof forms === 'string') {
       try { forms = JSON.parse(forms); } catch (err) { forms = []; }
     }
     const attachments = extractAttachmentRefs(forms);
     if (!attachments.length) continue;
 
-    // 匹配表格记录：同一发起人 + 发起时间 ±3 天窗内（实例 start_time vs 表格「发起时间」）。
-    // 时间缺失不再放宽为「同人全量」（复查 P2-11：宽匹配会把票错配到同人其他申请）——
-    // 任一侧时间缺失即跳过该实例转人工，绝不盲配
-    if (!createTimeMs) {
-      console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 实例缺发起时间，跳过转人工`);
-      continue;
-    }
-    const window = candidates.filter((r) => {
-      const f = r.fields || {};
-      const uid = Array.isArray(f['发起人']) ? f['发起人'][0]?.id : '';
-      if (userId && uid && uid !== userId) return false;
-      const launch = typeof f['发起时间'] === 'number' ? f['发起时间'] : parseInt(f['发起时间'], 10);
-      if (!launch) {
-        console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 候选记录 ${r.record_id} 缺「发起时间」，不参与匹配（转人工）`);
-        return false;
+    // 匹配表格记录（2026-10-17 校准升级）：优先 serial_id（审批编号 == 表格「申请编号」）
+    // 精确命中；未命中再回落旧链「同人 + 发起时间 ±3 天窗」模糊匹配。
+    // 时间缺失不放宽为「同人全量」（复查 P2-11：宽匹配会把票错配到同人其他申请）——
+    // serial 未命中且任一侧时间缺失即跳过该实例转人工，绝不盲配
+    const serialHit = inst.serialId ? candByApplyNo.get(inst.serialId) : null;
+    let window;
+    if (serialHit) {
+      window = [serialHit];
+    } else {
+      if (!createTimeMs) {
+        console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 实例缺发起时间，跳过转人工`);
+        continue;
       }
-      return Math.abs(launch - createTimeMs) <= 3 * DAY_MS;
-    });
-    if (!window.length) continue;
+      window = candidates.filter((r) => {
+        const f = r.fields || {};
+        const uid = Array.isArray(f['发起人']) ? f['发起人'][0]?.id : '';
+        if (userId && uid && uid !== userId) return false;
+        const launch = typeof f['发起时间'] === 'number' ? f['发起时间'] : parseInt(f['发起时间'], 10);
+        if (!launch) {
+          console.warn(`[回溯] 实例 ${String(instanceId).slice(0, 16)}…: 候选记录 ${r.record_id} 缺「发起时间」，不参与匹配（转人工）`);
+          return false;
+        }
+        return Math.abs(launch - createTimeMs) <= 3 * DAY_MS;
+      });
+      if (!window.length) continue;
+    }
 
     // 逐附件识别 → 发票金额在窗口内精确匹配唯一记录 → 回填（复用金额匹配语义）
     let matchedAny = false;
@@ -168,7 +256,9 @@ async function doBackfillCollect(options = {}) {
       if (result.collected >= limit) break;
       let buffer;
       try {
-        buffer = await client.downloadApprovalFile(instanceId, att.fileId);
+        buffer = att.url
+          ? await downloadByUrl(att.url) // attachmentV2 免登直链（URL 随取随用，无过期顾虑）
+          : await client.downloadApprovalFile(instanceId, att.fileId);
       } catch (err) {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 附件下载失败 - ${err.message.slice(0, 100)}`);
         continue;
@@ -179,20 +269,27 @@ async function doBackfillCollect(options = {}) {
         continue;
       }
       const fields = parsed.fields;
-      // 唯一匹配断言（对抗审查 P1-1：原 find 永取第一条，同人同额多申请会静默错配，
-      // 票随批次错报销）——命中数 ≠1 一律转人工，与 ledger ambiguous 口径对齐
-      const hits = window.filter((r) => {
-        const amt = typeof r.fields['总金额'] === 'number' ? r.fields['总金额'] : parseFloat(r.fields['总金额']);
-        return amt !== null && !Number.isNaN(amt) && Math.abs(amt - fields.totalAmount) < 0.01;
-      });
-      if (hits.length > 1) {
-        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内命中 ${hits.length} 条同额申请（ambiguous），转人工`);
-        continue;
-      }
-      const hit = hits[0];
-      if (!hit) {
-        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内无金额精确匹配的记录，转人工`);
-        continue;
+      let hit;
+      if (serialHit) {
+        // serial 精确命中：编号唯一即锚定，不要求票面金额与申请金额相等
+        // （差额经「金额差」字段入表可见，校验状态按容差判定）
+        hit = serialHit;
+      } else {
+        // 模糊链唯一匹配断言（对抗审查 P1-1：原 find 永取第一条，同人同额多申请会静默错配，
+        // 票随批次错报销）——命中数 ≠1 一律转人工，与 ledger ambiguous 口径对齐
+        const hits = window.filter((r) => {
+          const amt = typeof r.fields['总金额'] === 'number' ? r.fields['总金额'] : parseFloat(r.fields['总金额']);
+          return amt !== null && !Number.isNaN(amt) && Math.abs(amt - fields.totalAmount) < 0.01;
+        });
+        if (hits.length > 1) {
+          result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内命中 ${hits.length} 条同额申请（ambiguous），转人工`);
+          continue;
+        }
+        hit = hits[0];
+        if (!hit) {
+          result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票 ¥${fields.totalAmount} 在同人时间窗内无金额精确匹配的记录，转人工`);
+          continue;
+        }
       }
 
       // 查重双闸 + 落表整体按发票号加锁（复查 P2：与实时采集同双闸——backfill 与 hub
@@ -207,7 +304,9 @@ async function doBackfillCollect(options = {}) {
         if (dupExact.length) return { kind: 'dup_exact' };
         const dupSimilar = await collectStore.findBySimilarity({ issueDate: fields.issueDate, totalAmount: fields.totalAmount, sellerTaxNo: fields.sellerTaxNo });
         if (dupSimilar.length) return { kind: 'dup_similar' };
-        const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.pdf`).catch(() => null);
+        const magic = buffer.slice(0, 4);
+        const ext = magic.toString('latin1') === '%PDF' ? 'pdf' : (magic[0] === 0x89 && magic[1] === 0x50 ? 'png' : 'jpg');
+        const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.${ext}`).catch(() => null);
         await collectStore.createCollect({
           '发票号码': fields.invoiceNo,
           ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),
@@ -241,11 +340,24 @@ async function doBackfillCollect(options = {}) {
       }
       result.collected++;
       matchedAny = true;
-      // 从候选中移除已回填记录（防同一记录被多个实例重复回填）
+      // 从候选与编号索引移除已回填记录（防同一记录被多个实例/多附件重复回填）
       const idx = candidates.indexOf(hit);
       if (idx >= 0) candidates.splice(idx, 1);
+      if (inst.serialId) candByApplyNo.delete(inst.serialId);
     }
     if (!matchedAny) result.skipped++;
+  }
+
+  // 回溯落表后即时触发制单金额线检查（同采集钩子口径：过静默闸、夜间顺延补跑；
+  // 测试环境 FORM_ALERT_DISABLED=1 自跳过）——回溯后无需干等次日 10:35 兜底
+  if (result.collected > 0) {
+    try {
+      // 延迟 require：formAlertService 顶部连着 batchService 重依赖（同 invoiceCollectService 口径）
+      const formAlertService = require('./formAlertService');
+      formAlertService.triggerAfterCollect();
+    } catch (err) {
+      console.warn('[回溯] 制单金额线即时检查触发失败（不影响回溯结果）:', err.message);
+    }
   }
 
   return result;
@@ -258,4 +370,4 @@ function verifyStatusFor(invoiceAmount, applyAmount) {
   return diff > tol ? '金额不符' : '通过';
 }
 
-module.exports = { backfillCollect, extractAttachmentRefs, listInstanceIds };
+module.exports = { backfillCollect, extractAttachmentRefs, listInstances };

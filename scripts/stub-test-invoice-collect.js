@@ -463,20 +463,25 @@ async function main() {
     assert.equal(okRes.json.success, true);
 
     // backfill 端点：未配置 APPROVAL_CODE → 400 指引；配置后走桩链（实例列表空）→ 200
+    // 环境无关：暂存并清除 .env 可能已配置的真 code——否则本段会真调审批接口枚举
+    //（2026-10-17 事故：.env 配 code 后本段真跑 backfill，返回 200 打破 400 断言、白烧枚举配额）
+    const savedApprovalCode = process.env.APPROVAL_CODE;
+    delete process.env.APPROVAL_CODE;
     const bfNoCode = await send(port, 'POST', '/api/invoice/backfill', {}, authHeader);
     assert.equal(bfNoCode.status, 400, '未配置 APPROVAL_CODE 返回 400 指引');
     assert.match(bfNoCode.json.error, /APPROVAL_CODE/);
     process.env.APPROVAL_CODE = 'TESTCODE123';
     client.requestAPI = async (method, urlPath) => {
-      if (urlPath.startsWith('/approval/v4/instances?')) {
-        return { code: 0, data: { instance_ids: [], has_more: false } };
+      if (urlPath.startsWith('/approval/v4/instances/query')) {
+        return { code: 0, data: { instance_list: [], has_more: false } };
       }
       throw new Error(`测试未预期的飞书调用: ${urlPath}`);
     };
     const bf = await send(port, 'POST', '/api/invoice/backfill', { limit: 1 }, authHeader);
     assert.equal(bf.status, 200);
     assert.ok('scanned' in bf.json);
-    delete process.env.APPROVAL_CODE;
+    if (savedApprovalCode) process.env.APPROVAL_CODE = savedApprovalCode;
+    else delete process.env.APPROVAL_CODE;
 
     // OCR 503 开关只管 /api/ocr/*；采集主通道（QR/PDF）不依赖 OCR，不再被一刀切（复查修复）
     config.ocr.enabled = false;
