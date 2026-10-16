@@ -23,6 +23,10 @@ const RE_INVOICE_NO_8 = /(?:发票号码|号码)\s*[:：]?\s*(\d{8})(?!\d)/;
 const RE_ISSUE_DATE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/;
 // 价税合计(小写) 后的第一个金额；防止误抓「金额」「税额」列（不含税价）
 const RE_TOTAL = /价税合计[\s\S]{0,40}?[（(]\s*小写\s*[)）]\s*[:：]?\s*[¥￥]?\s*([0-9,]+\.[0-9]{2})/;
+// 乱序文本兜底（2026-10-17 采购表单回溯实测）：「价税合计（小写）」标签与数值分离的 PDF
+// 版式下防 RE_TOTAL_LOOSE 误抓「金额/税额」列——中文大写金额（柒圆柒角壹分/壹仟贰佰圆整）
+// 后随的小写金额是乱序流里最可靠锚点
+const RE_TOTAL_UPPER = /[零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{1,}[圆元][零壹贰叁肆伍陆柒捌玖拾佰仟万亿角分整正]{0,10}[\s\S]{0,12}?[¥￥]\s*([0-9,]+\.[0-9]{2})/;
 const RE_TOTAL_LOOSE = /[¥￥]\s*([0-9,]+\.[0-9]{2})/;
 const RE_CHECK_CODE = /(?:校验码|校验)\s*[:：]?\s*([0-9]{6,20})/;
 const RE_TAX_NO = /(?:统一社会信用代码|纳税人识别号)\s*[\/／]?\s*[:：]?\s*([0-9A-Z]{15,20})/;
@@ -95,6 +99,17 @@ function parseInvoiceText(rawText) {
     if (m8) fields.invoiceNo = m8[1];
     if (mCode && !m8) warnings.push('识别到发票代码但未识别到 8 位发票号码');
   }
+  // 兜底锚定（2026-10-17 采购表单批量回溯实测）：部分开票平台 PDF 文本流「标签先行、
+  // 数值堆尾」——「发票号码：」与 20 位号码在文本中分离，标签式正则抓不到。文本带发票
+  // 特征词且全文恰有唯一 20 位数字时锚定为发票号；多个 20 位数字不锚（保守转人工，
+  // 防误取校验码类字段）
+  if (!fields.invoiceNo) {
+    const all20 = text.match(/(?<!\d)\d{20}(?!\d)/g) || [];
+    if (all20.length === 1 && /发票号码|电子发票|价税合计|开票日期/.test(text)) {
+      fields.invoiceNo = all20[0];
+      warnings.push('发票号由全文唯一 20 位数字锚定（文本流乱序）');
+    }
+  }
 
   const mDate = text.match(RE_ISSUE_DATE);
   if (mDate) {
@@ -106,7 +121,7 @@ function parseInvoiceText(rawText) {
     }
   }
 
-  const mTotal = text.match(RE_TOTAL) || text.match(RE_TOTAL_LOOSE);
+  const mTotal = text.match(RE_TOTAL) || text.match(RE_TOTAL_UPPER) || text.match(RE_TOTAL_LOOSE);
   if (mTotal) {
     fields.totalAmount = parseFloat(mTotal[1].replace(/,/g, ''));
   } else {
