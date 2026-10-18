@@ -249,7 +249,21 @@ async function recognizeInvoice(buffer, hint = {}, ocrFallback) {
 
   if (isPdf) {
     const { result, error } = await tryPdfChannel(buffer).catch(err => ({ result: null, error: err.message }));
-    if (result) return result;
+    if (result) {
+      // 文本通道成功的 PDF 也补抠二维码（2026-10-19，曼波「所有发票都得抠二维码」）：
+      // 扫码清单需要二维码原文；pdfText 票的原图是 PDF 文件，清单端「回退解码原图」
+      // 解不出 PDF → 会判无效票。补码失败不影响文本识别结果。
+      if (result.ok && !result.qrPayload) {
+        try {
+          const pages = await renderPdfPages(buffer, 1);
+          for (const png of pages) {
+            const qr = await tryQrChannel(png);
+            if (qr.result && qr.result.qrPayload) { result.qrPayload = qr.result.qrPayload; break; }
+          }
+        } catch (qrBackfillErr) { /* 静默：文本结果已可用 */ }
+      }
+      return result;
+    }
     // 渲染回落（2026-10-17 曼波定「所有发票都得识别抠二维码/抠文本」）：文本层失败的扫描版/
     // 文本流损坏数电票 PDF → 页面渲染为图走图片通道（二维码/OCR，实测救回原判死的票）
     try {
@@ -366,6 +380,7 @@ module.exports = {
   parseQrPayload,
   tryQrChannel,
   tryPdfChannel,
+  renderPdfPages,
   looksLikeInvoiceText,
   recognizeInvoice,
   extractInvoiceContent,
