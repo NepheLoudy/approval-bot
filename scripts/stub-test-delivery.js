@@ -538,6 +538,9 @@ async function main() {
   await assert.rejects(() => batchService.markBatch('27中断退回批次', '已到账', ''), /终态，不可再流转/);
 
   // ---------- 项目名含 '/'：笔序按「项目」字段精确匹配（复查 P2，防摘要重复） ----------
+  // 2026-10-19：nextProjectOrdinal 起合并批次表已占用笔序（防未提交批次撞号）——
+  // 本场景专注「项目字段精确计数」的回落分支，先清空前序场景遗留的笔序占用
+  for (const row of batchRows) delete row.fields['笔序'];
   const slashProject = '对抗赛/飞镖';
   bitableApi.listAllRecords = async () => [
     { record_id: 'ap1', fields: { '申请编号': { text: 'AP1' }, '项目': { name: slashProject } } },

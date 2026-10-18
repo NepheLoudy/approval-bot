@@ -386,6 +386,19 @@ async function nextProjectOrdinal(primaryProject) {
         if (n > maxSeen) maxSeen = n;
       }
     }
+    // 2026-10-19 修（笔序撞车实案）：台账只在 submit/paid/reject 时写入——已锁定但未提交的
+    // 批次不在台账里，连续两单会算出同一笔序（自动-重装机器人-1017 / 自动-团队建设-1017 /
+    // 自动-重装机器人-1018 实案全为「第三十一笔」，将来台账回填按摘要匹配会撞行）。
+    // 合并批次表「笔序」列已占用值（含未提交批次）取 max。
+    try {
+      const batches = await collectStore.listBatches();
+      for (const b of batches) {
+        const n = Number(b.fields['笔序']);
+        if (Number.isFinite(n) && n > maxSeen) maxSeen = n;
+      }
+    } catch (batchErr) {
+      console.warn(`[批次] 批次表笔序读取失败（仅按台账+基数计算，注意撞号风险）: ${batchErr.message}`);
+    }
     if (maxSeen > 0 || config.batch.ordinalBase > 0) {
       // 基数=「台账之外的财务进度下限」（台账常滞后于实际制单——曼波口供 30 笔时台账仅录到 25）
       return Math.max(maxSeen, config.batch.ordinalBase || 0) + 1;
