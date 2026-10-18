@@ -114,11 +114,16 @@ function collectToItem(r, byApplyNo) {
     // 申请状态（对抗审查 P2-5：已撤回/已拒绝申请的票不得自动锁进可付款批次——
     // 人工拟批有肉眼兜底，自动锁定没有。未归类票（无关联申请）状态空，不过滤）
     approvalStatus: fieldText(af['申请状态']),
+    // 关联审批记录已制单（报销单非空，含历史人工单如「27对抗30步兵10」）——
+    // 2026-10-19 实案（申请 202609220001 被财务补标历史单号，其票仍在采集池）：
+    // 此类票再进池会被锁进新批次 → 学校系统扫码时重复入库。已制单的票不进池。
+    hasForm: fieldText(af['报销单']) !== '',
   };
 }
 
 /** 票池：已采集未归批，关联审批记录（物资/项目/型号），按采集时间升序（录入序）。
  *  「是否打印=是」的票不进池（财务已自行制单，与机器人制单能力去重）；
+ *  关联审批记录「报销单」非空（含历史人工单）的票不进池（已制单，防重复报销）；
  *  关联申请状态非「已通过」的票不进池（撤回/拒绝申请的票自动锁定会误入付款批次） */
 async function getPoolWithRecords() {
   const collects = await collectStore.listCollect();
@@ -128,6 +133,7 @@ async function getPoolWithRecords() {
     .filter(r => !r.fields['批次'])
     .map((r) => collectToItem(r, byApplyNo))
     .filter(p => !p.printed)
+    .filter(p => !p.hasForm)
     .filter(p => !p.approvalStatus || p.approvalStatus === config.approvalStatus.APPROVED)
     .sort((a, b) => a.collectedAt - b.collectedAt);
 }
