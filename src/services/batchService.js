@@ -585,9 +585,14 @@ async function addInvoiceToPdf(out, buf, index, item) {
     for (const p of pages) {
       if (index % 2 === 0) out.addPage([A4.width, A4.height]);
       const target = out.getPage(out.getPageCount() - 1);
-      const scale = Math.min(SLOT.width / p.getWidth(), SLOT.height / p.getHeight());
-      const w = p.getWidth() * scale, h = p.getHeight() * scale;
-      target.drawPage(p, { x: (A4.width - w) / 2, y: slotBottomY(index % 2 === 0, h), width: w, height: h });
+      // 2026-10-19 修（1018 实案）：pdf-lib 1.17 的 drawPage 只接受 PDFEmbeddedPage，
+      // 直接传复制页（PDFPage）会抛 "embeddedPage must be of type PDFEmbeddedPage, but
+      // was actually of type NaN" → 整份打印 PDF 生成失败（此前仅有图片票的批次未暴露）。
+      const embedded = await out.embedPage(p);
+      const pw = embedded.width, ph = embedded.height;
+      const scale = Math.min(SLOT.width / pw, SLOT.height / ph);
+      const w = pw * scale, h = ph * scale;
+      target.drawPage(embedded, { x: (A4.width - w) / 2, y: slotBottomY(index % 2 === 0, h), width: w, height: h });
       index++;
     }
     return index;
@@ -862,14 +867,25 @@ async function uploadBatchDocx(batchNo, items) {
       continue;
     }
     for (const token of item.fileTokens) {
-      const buf = await downloadMediaSafe(token);
+      let buf = await downloadMediaSafe(token);
       if (!buf) {
         children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件下载失败，请财务手工补', color: 'FF0000' })] }));
         continue;
       }
       if (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF') {
-        children.push(new Paragraph({ children: [new TextRun({ text: '（该票为 PDF 原件，版面见打印件 PDF 版）', color: '888888' })] }));
-        continue;
+        // 2026-10-19（1018 实案）：PDF 票面渲染为图嵌入——此前只写「版面见打印件 PDF 版」，
+        // 而 PDF 版生成失败时整份打印件就没内容。渲染失败才回落说明行。
+        let rendered = null;
+        try {
+          const invoiceParser = require('./invoiceParser');
+          const pages = await invoiceParser.renderPdfPages(buf, 1);
+          rendered = pages[0] || null;
+        } catch (renderErr) { /* 回落说明行 */ }
+        if (!rendered) {
+          children.push(new Paragraph({ children: [new TextRun({ text: '（该票为 PDF 原件，版面见打印件 PDF 版）', color: '888888' })] }));
+          continue;
+        }
+        buf = rendered;
       }
       let width = 1000, height = 700;
       try {
