@@ -295,12 +295,17 @@ async function lockBatch(batchNo, project, options = {}) {
         const no = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
         if (no) recordByApplyNo.set(no, r);
       }
+      // 报销单号按财务手工命名规则（2026-10-19 曼波定）：兵种 27对抗31重装6 / 非兵种 27团队建设4
+      const projectSeq = await nextProjectSeq(primaryProject, approvals);
+      const reimburseNo = formatReimbursementNo({
+        season: config.batch.season, purpose, ordinal, project: primaryProject, projectSeq,
+      });
       for (const p of pool) {
         if (!p.applyNo) continue;
         const hit = recordByApplyNo.get(p.applyNo);
         if (!hit) continue;
         try {
-          await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': batchNo, '是否打印': '是' });
+          await bitableApi.updateRecord(config.bitable.approvalTableId, hit.record_id, { '报销单': reimburseNo, '是否打印': '是' });
           approvalWritten++;
         } catch (err) {
           console.error(`[批次] 回写审批表报销单栏失败（${p.applyNo}）:`, err.message);
@@ -421,6 +426,52 @@ async function nextProjectOrdinal(primaryProject) {
     ? batches.filter(b => String(b.fields['项目'] || '') === primaryProject).length
     : batches.filter(b => String(b.fields['项目'] || '').split('/').includes(primaryProject)).length;
   return count + 1 + (config.batch.ordinalBase || 0);
+}
+
+// ---------- 报销单号命名（对齐财务手工历史格式，2026-10-19 曼波定） ----------
+// 人工历史值规律（33 种值解析）：
+//   兵种类：{赛季}{用途简称}{全局笔序}{兵种简称}{项目内笔序}  实样：27对抗23重装4 / 27备赛15步兵4
+//   非兵种：{赛季}{项目名}{项目内笔序}                       实样：27团队建设1 / 27实验室建设4 / 27crtc1
+// 兵种=项目分组（曼波口径：重装/步兵/工程/英雄/飞镖/无人机/雷达，简称去「机器人」后缀）；
+// 项目内笔序 = 审批表该项目报销单历史值（人工值+机器人生成值）末位数字 max+1。
+
+const BINGZHONG_SHORT = {
+  '重装机器人': '重装',
+  '步兵机器人': '步兵',
+  '工程机器人': '工程',
+  '英雄机器人': '英雄',
+  '飞镖': '飞镖',
+  '无人机': '无人机',
+  '雷达': '雷达',
+};
+
+/** 项目内笔序：解析审批表该项目的报销单历史值末位数字取 max+1。
+ *  跳过旧版机器值（自动- 前缀，其尾数 1017/1018 会污染计数）与「无需报销」等非编号值。 */
+async function nextProjectSeq(project, approvals) {
+  const label = BINGZHONG_SHORT[project] || project;
+  let max = 0;
+  for (const r of approvals) {
+    const v = fieldText(r.fields['报销单']);
+    if (!v || /^自动-/.test(String(v)) || !String(v).includes(label)) continue;
+    const m = String(v).match(/(\d+)\s*$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > 0 && n <= 200 && n > max) max = n; // 上限护栏：防历史脏值（年份/批次号尾数）污染
+    }
+  }
+  return max + 1;
+}
+
+/** 报销单号拼装（兵种带用途简称；非兵种不带） */
+function formatReimbursementNo({ season, purpose, ordinal, project, projectSeq }) {
+  // BATCH_SEASON 实配「27赛季」（摘要用全值），命名按人工格式取纯赛季号「27」
+  const seasonStr = String(season || '').replace(/赛季$/, '');
+  const short = BINGZHONG_SHORT[project];
+  if (short) {
+    const purposeShort = String(purpose || '').replace(/赛$/, ''); // 对抗赛→对抗 / 备赛→备赛
+    return `${seasonStr}${purposeShort}${ordinal}${short}${projectSeq}`;
+  }
+  return `${seasonStr}${project}${projectSeq}`;
 }
 
 /** 摘要拼装（照财务实样段序：机甲大师实验室-27赛季-对抗赛-飞镖机器人-材料费-第二十四笔——
@@ -1402,6 +1453,8 @@ module.exports = {
   markConfirmReminded,
   claimBatch,
   nextProjectOrdinal,
+  nextProjectSeq,
+  formatReimbursementNo,
   composeSummary,
   buildArchiveFolderName,
   fmtDateMs,

@@ -566,7 +566,9 @@ async function main() {
   assert.equal(slashA.ordinal, 1, '斜杠项目首批笔序 1');
   assert.equal(slashA.projects.join('/'), slashProject);
   assert.equal(slashA.approvalWritten, 1, '带申请编号的票回写审批表报销单栏');
-  assert.deepEqual(approvalWrites[0].fields, { '报销单': '27斜杠批次1', '是否打印': '是' }, '报销单栏+是否打印标记一并回写');
+  // 报销单号按财务手工命名规则回写（2026-10-19 曼波定）：非兵种项目 = 赛季+项目名+项目内序
+  assert.match(String(approvalWrites[0].fields['报销单']), /^(?:27)?对抗赛\/飞镖1$/, '报销单栏按项目命名规则回写');
+  assert.equal(approvalWrites[0].fields['是否打印'], '是', '报销单栏+是否打印标记一并回写');
   collectStore.listCollect = async () => [slashCollects[1]];
   const slashB = await batchService.lockBatch('27斜杠批次2', '', {});
   assert.equal(slashB.ordinal, 2, '斜杠项目第二批笔序 2（旧 split 逻辑恒 1 → 摘要重复）');
