@@ -175,6 +175,9 @@ async function doBackfillCollect(options = {}) {
   // 定向补采（2026-10-17，制单金额线锁定前用）：只处理指定项目的候选记录
   const onlyProjects = Array.isArray(options.onlyProjects) && options.onlyProjects.length
     ? new Set(options.onlyProjects) : null;
+  // 指定申请补收（2026-10-20 漏票修复用）：允许「已采集过」的申请重新参与候选——
+  // 一申请多张票时此前只收到部分，补收时按发票号查重跳过已收，只补缺失附件
+  const includeApplyNos = new Set(Array.isArray(options.includeApplyNos) ? options.includeApplyNos : []);
 
   // 表格侧候选：已通过 + 活跃流程 + 已交票 + 采集表无记录（与旧骨架一致）
   const all = await approvalService.getAllApprovals();
@@ -190,7 +193,7 @@ async function doBackfillCollect(options = {}) {
       if (!onlyProjects.has(project)) return false;
     }
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    return applyNo && !collectedApplyNos.has(applyNo);
+    return applyNo && (!collectedApplyNos.has(applyNo) || includeApplyNos.has(applyNo));
   });
   if (!candidates.length) return { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: ['没有待回填的表格记录'] };
 
@@ -259,7 +262,9 @@ async function doBackfillCollect(options = {}) {
 
     // 逐附件识别 → 发票金额在窗口内精确匹配唯一记录 → 回填（复用金额匹配语义）
     let matchedAny = false;
-    for (const att of attachments.slice(0, 3)) {
+    // 全量附件（2026-10-20 实案：一申请挂 8 张发票，原 slice(0,3) 只处理前 3 个 → 漏票；
+    // 重装 1017 四申请共 11 张只收 4 张）。上限 20 防异常大附件列表。
+    for (const att of attachments.slice(0, 20)) {
       if (result.collected >= limit) break;
       let buffer;
       try {
@@ -354,6 +359,18 @@ async function doBackfillCollect(options = {}) {
       if (idx >= 0) candidates.splice(idx, 1);
       if (inst.serialId) candByApplyNo.delete(inst.serialId);
     }
+    // 多票同申请聚合校验（2026-10-20 实案：一申请挂 8 张票，单票 vs 申请金额必「金额不符」）：
+    // 该实例全部附件处理完后，按「该申请下采集票票面合计 vs 申请金额」统一回写校验状态
+    if (matchedAny && serialHit) {
+      const hf2 = serialHit.fields || {};
+      const applyNo2 = hf2['申请编号'] ? (hf2['申请编号'].text || String(hf2['申请编号'])) : String(inst.serialId || '');
+      const applyAmount2 = typeof hf2['总金额'] === 'number' ? hf2['总金额'] : (parseFloat(String(hf2['总金额'] ?? '').replace(/,/g, '')) || null);
+      try {
+        await reconcileApplyAmount(applyNo2, applyAmount2);
+      } catch (aggErr) {
+        console.warn(`[回溯] 多票聚合校验失败（${applyNo2}）:`, aggErr.message);
+      }
+    }
     if (!matchedAny) result.skipped++;
   }
 
@@ -371,6 +388,27 @@ async function doBackfillCollect(options = {}) {
   }
 
   return result;
+}
+
+/** 多票同申请聚合校验：该申请下全部采集票票面合计在容差内 → 各票校验状态=通过
+ *  （否则金额不符）。一申请多张票时单票金额必然 ≠ 申请金额，逐票判定会全部误标异常
+ *  （2026-10-20 实案：202610050001 挂 8 张票合计 188.82，单票 53.43 被判金额不符）。 */
+async function reconcileApplyAmount(applyNo, applyAmount) {
+  if (!applyNo || applyAmount === null || applyAmount === undefined || Number.isNaN(applyAmount)) return;
+  const list = await collectStore.listCollect();
+  const rows = list.filter(r => String(r.fields['关联申请编号'] || '') === String(applyNo));
+  if (rows.length < 2) return; // 单票申请走落表时点判定
+  let sum = 0;
+  for (const r of rows) {
+    const v = parseFloat(String(r.fields['价税合计'] ?? '').replace(/,/g, ''));
+    if (!Number.isNaN(v)) sum += v;
+  }
+  const status = verifyStatusFor(sum, applyAmount);
+  for (const r of rows) {
+    if (String(r.fields['校验状态'] || '') !== status) {
+      await collectStore.updateCollect(r.record_id, { '校验状态': status });
+    }
+  }
 }
 
 function verifyStatusFor(invoiceAmount, applyAmount) {
