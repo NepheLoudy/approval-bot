@@ -739,15 +739,17 @@ const SONG = { name: '宋体', family: 3, charset: 134 };
 
 async function uploadBatchMaterialList(batchNo, items, meta = {}) {
   const purpose = String(meta.purpose || '').trim();
+  // 采购类型（2026-10-19 曼波定恢复为最后一列，取值「机器人零件」/「耗材」——
+  // 批次维一值，来自批次表「采购类型」元数据，lock 可 采购类型=耗材 覆盖）
+  const purchaseType = String(meta.purchaseType || '').trim() || config.batch.purchaseType;
   const preparer = config.batch.preparer || config.batch.reporterName;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Sheet1');
-  // 列宽/合并照模板：A 序号窄、B 项目宽、C 金额、D 用途
-  //（采购类型列已删——2026-10-12 曼波定，学校模板不需要）
-  ws.columns = [{ width: 6 }, { width: 58 }, { width: 12 }, { width: 20 }];
+  // 列宽/合并照模板：A 序号、B 项目、C 金额、D 用途、E 采购类型
+  ws.columns = [{ width: 6 }, { width: 58 }, { width: 12 }, { width: 20 }, { width: 14 }];
 
-  // 标题行（模板 A1:D1 合中）
-  ws.mergeCells('A1:D1');
+  // 标题行（模板 A1:E1 合中）
+  ws.mergeCells('A1:E1');
   const title = ws.getCell('A1');
   title.value = '物料清单';
   title.font = { ...SONG, size: 9 };
@@ -755,7 +757,7 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
 
   // 表头行
   const header = ws.getRow(2);
-  ['序号', '项目', '金额', '用途'].forEach((h, i) => {
+  ['序号', '项目', '金额', '用途', '采购类型'].forEach((h, i) => {
     const c = header.getCell(i + 1);
     c.value = h;
     c.font = { ...SONG, size: 9 };
@@ -774,6 +776,7 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
       String(item.invoiceContent || '').trim() || String(item.material || '').trim(),
       item.totalAmount,
       String(item.project || '').trim() || purpose,
+      purchaseType,
     ];
     const missingContent = !(values[1]);
     values.forEach((v, col) => {

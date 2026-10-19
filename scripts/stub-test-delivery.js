@@ -135,16 +135,16 @@ async function main() {
   const ws1 = wb1.getWorksheet('Sheet1');
   assert.ok(ws1, '工作表名 Sheet1（同模板）');
   assert.equal(ws1.getCell('A1').value, '物料清单', 'A1 标题');
-  assert.deepEqual(ws1.model.merges.map(String), ['A1:D1'], '标题 A1:D1 合并（采购类型列已删 2026-10-12）');
+  assert.deepEqual(ws1.model.merges.map(String), ['A1:E1'], '标题 A1:E1 合并（采购类型列 2026-10-19 恢复为末列）');
   assert.deepEqual(
     ws1.getRow(2).values.slice(1),
-    ['序号', '项目', '金额', '用途'],
-    '表头严格照模板（无采购类型列）'
+    ['序号', '项目', '金额', '用途', '采购类型'],
+    '表头严格照模板（采购类型为最后一列）'
   );
   assert.deepEqual(
     ws1.getRow(3).values.slice(1),
-    [1, '*电子元件*存储器', 52.93, '步兵机器人'],
-    '数据行：项目列=开票内容、用途=审批项目分类（非批次用途）'
+    [1, '*电子元件*存储器', 52.93, '步兵机器人', '机器人零件'],
+    '数据行：项目列=开票内容、用途=审批项目分类、采购类型=批次元数据（机器人零件/耗材）'
   );
   const qrcodeCell = ws1.getRow(4).getCell(2);
   assert.equal(qrcodeCell.value, '自封袋', 'qrcode 票无开票内容 → 项目列回落审批「购买物资名称」');
