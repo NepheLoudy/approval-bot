@@ -673,14 +673,24 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
  */
 async function sendDeliveryCard(cardData) {
   const qrImages = [];
+  const candidates = (cardData.scanItems || []).filter(q => q.valid && q.png);
+  // 并行上传（2026-10-20，曼波「分批生成延迟发送」）：confirm 全链须压进 hub 60s 转发超时，
+  // 逐张串行上传大批次必超——分批并行（每批 4 张）+ 失败单张降级（同原逐张口径）
+  const uploaded = new Map();
+  const CHUNK = 4;
+  for (let i = 0; i < candidates.length; i += CHUNK) {
+    await Promise.all(candidates.slice(i, i + CHUNK).map(async (q) => {
+      try {
+        uploaded.set(q, await client.uploadImageToIM(q.png));
+      } catch (err) {
+        console.warn(`[交付卡] 二维码 #${q.seq} 上传失败（${err.message}），该码降级为扫码清单附件扫码`);
+      }
+    }));
+  }
   for (const q of cardData.scanItems || []) {
     if (!q.valid || !q.png) continue;
-    try {
-      const imageKey = await client.uploadImageToIM(q.png);
-      qrImages.push({ ...q, imageKey });
-    } catch (err) {
-      console.warn(`[交付卡] 二维码 #${q.seq} 上传失败（${err.message}），该码降级为扫码清单附件扫码`);
-    }
+    const imageKey = uploaded.get(q);
+    if (imageKey) qrImages.push({ ...q, imageKey });
   }
   // 走 exports 引用而非模块内直引（对抗审查补漏：直引绕过测试对 exports.sendMessage
   // 的桩，交付卡会真发到生产 webhook——tryQrChannel 同款陷阱）

@@ -205,6 +205,16 @@ async function doBackfillCollect(options = {}) {
     const applyNo = r.fields['申请编号'] ? (r.fields['申请编号'].text || String(r.fields['申请编号'])) : '';
     if (applyNo) candByApplyNo.set(applyNo, r);
   }
+  // 报销单号 → 批次映射（2026-10-20 迟到票归属）：以批次表「报销单号」列为准
+  const formNoToBatch = new Map();
+  try {
+    for (const b of await collectStore.listBatches()) {
+      const no = String((b.fields || {})['报销单号'] || '');
+      if (no) formNoToBatch.set(no, { batchNo: String(b.fields['批次号'] || ''), confirmed: Number(b.fields['交付确认时间'] || 0) > 0 });
+    }
+  } catch (mapErr) {
+    console.warn('[回溯] 批次表报销单号映射读取失败（迟到票按历史标签处理）:', mapErr.message);
+  }
   const result = { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: [], totalInstances: instances.length };
 
   for (const inst of instances) {
@@ -310,7 +320,15 @@ async function doBackfillCollect(options = {}) {
       const applyNo = hf['申请编号'] ? (hf['申请编号'].text || String(hf['申请编号'])) : hit.record_id;
       const applyAmount = typeof hf['总金额'] === 'number' ? hf['总金额'] : (parseFloat(hf['总金额']) || null);
       const amountDiff = applyAmount !== null ? Math.round((fields.totalAmount - applyAmount) * 100) / 100 : null;
-      const historyBatch = hf['报销单'] ? String(hf['报销单']) : '';
+      // 迟到票归属（2026-10-20）：报销单值命中批次表「报销单号」→ 机器人批次——
+      // 未确认批次（交付件未生成，可安全追加）批次列直接写批次号并入该批；
+      // 已确认批次 → 批次留空进池走下一批；人工历史标签 → 保持原值（历史批次标记=出池）
+      const historyBatchRaw = hf['报销单'] ? String(hf['报销单']) : '';
+      let historyBatch = historyBatchRaw;
+      if (historyBatchRaw) {
+        const mapped = formNoToBatch.get(historyBatchRaw);
+        if (mapped) historyBatch = mapped.confirmed ? '' : mapped.batchNo;
+      }
       const outcome = await withRecordLock(`inv_${fields.invoiceNo}`, async () => {
         const dupExact = await collectStore.findByInvoiceNo(fields.invoiceNo);
         if (dupExact.length) return { kind: 'dup_exact' };

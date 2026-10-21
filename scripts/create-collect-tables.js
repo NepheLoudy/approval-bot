@@ -51,6 +51,7 @@ const BATCH_FIELDS = [
   { field_name: '摘要', type: FIELD_TYPES.TEXT }, // 投递单摘要（机甲大师实验室-27赛季-项目-用途-材料费-第N笔）
   { field_name: '用途', type: FIELD_TYPES.TEXT }, // 物料清单「用途」列（lock 用途= 覆盖，默认=项目）
   { field_name: '笔序', type: FIELD_TYPES.NUMBER, property: { formatter: '0' } }, // 同项目第N笔（摘要/归档名共用）
+  { field_name: '报销单号', type: FIELD_TYPES.TEXT }, // 回写审批表「报销单」的值（如 27对抗31重装6）——审批表值↔批次号映射，补收迟到票自动归属用（2026-10-20）
   { field_name: '费用项', type: FIELD_TYPES.TEXT }, // 投递单费用项（lock 费用项= 覆盖，默认 实验室用品）
   { field_name: '采购类型', type: FIELD_TYPES.TEXT }, // 批次元数据（lock 采购类型= 覆盖；物料清单采购类型列已删 2026-10-12）
   { field_name: '接取人', type: FIELD_TYPES.TEXT }, // 审批群回复「接取」的领取人

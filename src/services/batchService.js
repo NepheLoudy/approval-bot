@@ -117,6 +117,9 @@ function collectToItem(r, byApplyNo) {
     // 关联审批记录已制单（报销单非空，含历史人工单如「27对抗30步兵10」）——
     // 2026-10-19 实案（申请 202609220001 被财务补标历史单号，其票仍在采集池）：
     // 此类票再进池会被锁进新批次 → 学校系统扫码时重复入库。已制单的票不进池。
+    // 2026-10-20：formNo 同时用于区分「人工历史标签」（出池）与「机器人批次标签」
+    // （迟到票可进池/归属批次，见 getPoolWithRecords 与 backfill 落表映射）
+    formNo: fieldText(af['报销单']),
     hasForm: fieldText(af['报销单']) !== '',
   };
 }
@@ -128,12 +131,21 @@ function collectToItem(r, byApplyNo) {
 async function getPoolWithRecords() {
   const collects = await collectStore.listCollect();
   const byApplyNo = await approvalFieldsByApplyNo();
+  // 机器人批次的「报销单号」集合：审批记录带机器人批次标签的票仍可进池（迟到票进下一批）；
+  // 人工历史标签（不在集合内）→ 出池防重复报销（2026-10-19/20 实案）
+  let robotFormNos = new Set();
+  try {
+    const batches = await collectStore.listBatches();
+    robotFormNos = new Set(batches.map(b => String(b.fields['报销单号'] || '')).filter(Boolean));
+  } catch (err) {
+    console.warn('[批次] 批次表报销单号读取失败（票池按无机器人标签处理）:', err.message);
+  }
 
   return collects
     .filter(r => !r.fields['批次'])
     .map((r) => collectToItem(r, byApplyNo))
     .filter(p => !p.printed)
-    .filter(p => !p.hasForm)
+    .filter(p => !p.formNo || robotFormNos.has(p.formNo))
     .filter(p => !p.approvalStatus || p.approvalStatus === config.approvalStatus.APPROVED)
     .sort((a, b) => a.collectedAt - b.collectedAt);
 }
@@ -300,6 +312,12 @@ async function lockBatch(batchNo, project, options = {}) {
       const reimburseNo = formatReimbursementNo({
         season: config.batch.season, purpose, ordinal, project: primaryProject, projectSeq,
       });
+      // 报销单号落批次表（审批表值↔批次号映射：补收迟到票自动归属到未确认批次用，2026-10-20）
+      try {
+        await collectStore.updateBatch(batchRecord.record_id, { '报销单号': reimburseNo });
+      } catch (err) {
+        console.warn('[批次] 报销单号落批次表失败（不影响锁定）:', err.message);
+      }
       for (const p of pool) {
         if (!p.applyNo) continue;
         const hit = recordByApplyNo.get(p.applyNo);
@@ -531,6 +549,19 @@ async function doRegenerateBatchFiles(batchNo) {
     .map((r) => collectToItem(r, byApplyNo))
     .sort((a, b) => a.collectedAt - b.collectedAt);
 
+  // 附件下载缓存 + 分批并行预热（2026-10-20，曼波「分批生成延迟发送，保证一次性发送」）：
+  // 同一票面此前在 打印PDF/docx/扫码清单 三处各下载一次（16 票=48 次串行下载，confirm 总时长
+  // 超 hub 60s 转发超时 → 群里先出「服务暂不可用」兜底错、卡延后到——本次缓存+并行一次下完，
+  // 全链压进 60s，回复与交付卡一次性完整发出）
+  const dlCache = new Map();
+  const allTokens = [...new Set(items.flatMap(i => i.fileTokens))];
+  const CHUNK = 5;
+  for (let i = 0; i < allTokens.length; i += CHUNK) {
+    await Promise.all(allTokens.slice(i, i + CHUNK).map(async (token) => {
+      dlCache.set(token, await downloadMediaSafe(token));
+    }));
+  }
+
   // 元数据（旧批次可能没有摘要/用途/笔序列 → 回落重算，不炸）
   const bf = batch.fields;
   const primaryProject = String(bf['项目'] || '').split('/')[0] || '未归类';
@@ -552,11 +583,11 @@ async function doRegenerateBatchFiles(batchNo) {
     : null;
 
   let pdfToken = null, docxToken = null, bomToken = null, mlToken = null, specialPdfToken = null, specialDocxToken = null, ssToken = null, scanItems = [];
-  try { pdfToken = await uploadBatchPdf(batchNo, items); } catch (err) { console.error('[批次] 打印 PDF 重生成失败:', err.message); }
-  try { docxToken = await uploadBatchDocx(batchNo, items); } catch (err) { console.error('[批次] 打印件 docx 重生成失败:', err.message); }
+  try { pdfToken = await uploadBatchPdf(batchNo, items, { dlCache }); } catch (err) { console.error('[批次] 打印 PDF 重生成失败:', err.message); }
+  try { docxToken = await uploadBatchDocx(batchNo, items, { dlCache }); } catch (err) { console.error('[批次] 打印件 docx 重生成失败:', err.message); }
   try { bomToken = await uploadBatchBom(batchNo, items); } catch (err) { console.error('[批次] BOM 重生成失败:', err.message); }
   try { mlToken = await uploadBatchMaterialList(batchNo, items, meta); } catch (err) { console.error('[批次] 物料清单重生成失败:', err.message); }
-  try { ({ token: ssToken, scanItems } = await uploadBatchScanSheetDocx(batchNo, items)); } catch (err) { console.error('[批次] 扫码清单重生成失败:', err.message); }
+  try { ({ token: ssToken, scanItems } = await uploadBatchScanSheetDocx(batchNo, items, { dlCache })); } catch (err) { console.error('[批次] 扫码清单重生成失败:', err.message); }
   const specials = items.filter(isSpecialItem);
   if (specials.length) {
     try { specialPdfToken = await uploadBatchSpecialSheetPdf(batchNo, specials); } catch (err) { console.error('[批次] 特殊事项附页 PDF 重生成失败:', err.message); }
@@ -591,16 +622,21 @@ async function doRegenerateBatchFiles(batchNo) {
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
 
-async function downloadMediaSafe(fileToken) {
+async function downloadMediaSafe(fileToken, dlCache = null) {
+  if (dlCache && dlCache.has(fileToken)) return dlCache.get(fileToken);
   try {
-    return await client.downloadMedia(fileToken);
+    const buf = await client.downloadMedia(fileToken);
+    if (dlCache) dlCache.set(fileToken, buf);
+    return buf;
   } catch (err) {
     console.warn(`[批次] 附件下载失败（${String(fileToken).slice(0, 12)}…）: ${err.message}`);
+    if (dlCache) dlCache.set(fileToken, null);
     return null;
   }
 }
 
-async function uploadBatchPdf(batchNo, items) {
+async function uploadBatchPdf(batchNo, items, opts = {}) {
+  const dlCache = opts.dlCache || null;
   const out = await PDFDocument.create();
   let index = 0;
   for (const item of items) {
@@ -610,7 +646,7 @@ async function uploadBatchPdf(batchNo, items) {
       continue;
     }
     for (const token of item.fileTokens) {
-      const buf = await downloadMediaSafe(token);
+      const buf = await downloadMediaSafe(token, dlCache);
       if (!buf) {
         addPlaceholderPage(out, index, item, '票面原件下载失败，请财务手工补');
         index++;
@@ -917,7 +953,8 @@ async function uploadBatchSpecialSheetDocx(batchNo, specials) {
 }
 
 /** 打印件 docx 可编辑版：发票图片按录入序纵向排入 Word（财务可调可删后直接打印；PDF 原件票标注见 PDF 版） */
-async function uploadBatchDocx(batchNo, items) {
+async function uploadBatchDocx(batchNo, items, opts = {}) {
+  const dlCache = opts.dlCache || null;
   const children = [new Paragraph({ children: [new TextRun({ text: `报销打印件 · 批次 ${batchNo}（${items.length} 张，按录入顺序）`, bold: true, size: 26 })] })];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -927,7 +964,7 @@ async function uploadBatchDocx(batchNo, items) {
       continue;
     }
     for (const token of item.fileTokens) {
-      let buf = await downloadMediaSafe(token);
+      let buf = await downloadMediaSafe(token, dlCache);
       if (!buf) {
         children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件下载失败，请财务手工补', color: 'FF0000' })] }));
         continue;
@@ -971,7 +1008,8 @@ async function uploadBatchDocx(batchNo, items) {
 // → 回退解码「发票图片」原件 → 仍失败 = 无效票（清单标注请扫纸质原件，交付卡不放它的码）。
 
 /** 批次各票二维码图（扫码清单 docx 与交付卡内嵌图共用一份，保证两边顺序/内容一致） */
-async function buildBatchQrImages(items) {
+async function buildBatchQrImages(items, opts = {}) {
+  const dlCache = opts.dlCache || null;
   const out = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -986,7 +1024,7 @@ async function buildBatchQrImages(items) {
     let payload = item.qrPayload || '';
     if (!payload && item.fileTokens.length) {
       for (const token of item.fileTokens) {
-        const buf = await downloadMediaSafe(token);
+        const buf = await downloadMediaSafe(token, dlCache);
         if (!buf || (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF')) continue;
         try {
           const { result } = await invoiceParser.tryQrChannel(buf);
@@ -1016,8 +1054,8 @@ async function buildBatchQrImages(items) {
 /** 扫码清单 docx：两列格排（序号+金额+尾号+二维码图），无效票红字标注占位不跳号。
  *  篇幅紧凑（2026-10-12 曼波）：二维码 120px、边距 60——一页可排 6 票（原 150px 约 4 票/页，
  *  多票批次纸张翻倍）；120px @96dpi≈3.2cm 打印件扫码可靠 */
-async function uploadBatchScanSheetDocx(batchNo, items) {
-  const qrImages = await buildBatchQrImages(items);
+async function uploadBatchScanSheetDocx(batchNo, items, opts = {}) {
+  const qrImages = await buildBatchQrImages(items, opts);
   const cellOf = (q) => new TableCell({
     width: { size: 50, type: WidthType.PERCENTAGE },
     margins: { top: 60, bottom: 60, left: 80, right: 80 },
