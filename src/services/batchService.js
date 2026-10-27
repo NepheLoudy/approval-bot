@@ -1025,11 +1025,27 @@ async function buildBatchQrImages(items, opts = {}) {
     if (!payload && item.fileTokens.length) {
       for (const token of item.fileTokens) {
         const buf = await downloadMediaSafe(token, dlCache);
-        if (!buf || (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF')) continue;
+        if (!buf) continue;
         try {
-          const { result } = await invoiceParser.tryQrChannel(buf);
-          if (result && result.ok && result.qrPayload) { payload = result.qrPayload; break; }
+          if (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF') {
+            // PDF 原件：渲染后解码（2026-10-27 补——此前直接跳过 PDF，缺「二维码内容」的
+            // 票在交付卡/清单永远无码；scale 3 起解，2 档对部分票面过小）
+            for (const scale of [3, 2]) {
+              let pages;
+              try { pages = await invoiceParser.renderPdfPages(buf, 1, scale); } catch (err) { continue; }
+              let decoded = false;
+              for (const png of pages) {
+                const { result } = await invoiceParser.tryQrChannel(png);
+                if (result && result.ok && result.qrPayload) { payload = result.qrPayload; decoded = true; break; }
+              }
+              if (decoded) break;
+            }
+          } else {
+            const { result } = await invoiceParser.tryQrChannel(buf);
+            if (result && result.ok && result.qrPayload) payload = result.qrPayload;
+          }
         } catch (err) { /* 单附件解码失败，试下一张 */ }
+        if (payload) break;
       }
     }
     if (!payload) {
