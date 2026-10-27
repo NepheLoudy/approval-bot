@@ -40,6 +40,25 @@ function hasInvoiceSubmitted(fields) {
 }
 
 /**
+ * 项目归属统一解析（所有读「项目」栏的地方共用，防口径漂移）。
+ * 2026-10-27 审批结构更新（曼波定）：「是否参与集中采购？」变为「是否为教师垫付」，
+ * 教师垫付类记录的「项目」栏为空 → **单独算人名项目**（项目=发起人姓名）：
+ * 报销单号走非兵种格式 27{人名}{序}，摘要/物料清单用途同源；
+ * 无教师垫付标记且项目为空的仍归「未归类」。
+ * 「是否为教师垫付」列由审批同步自动建立（旧表暂无此列时恒 undefined，回落未归类）。
+ */
+function resolveProject(fields) {
+  const p = fields['项目'];
+  const name = typeof p === 'string' ? p.trim() : (p && typeof p === 'object' ? String(p.name || '').trim() : '');
+  if (name) return name;
+  if (fieldText(fields['是否为教师垫付']) === '是') {
+    const person = (Array.isArray(fields['发起人']) && fields['发起人'][0]?.name) || '';
+    if (person) return person;
+  }
+  return '未归类';
+}
+
+/**
  * 已采集台账的申请编号集合（fail-open：采集表未配置/查询失败时返回空集，
  * 退回两栏判断——本地开发与采集表未建的部署不崩）。
  * 口径：机器人采集成功即视为已交票（采集表为真源，补交发票栏是镜像）。
@@ -114,10 +133,10 @@ async function getApprovalStats() {
   const APPROVED = config.approvalStatus.APPROVED;
   const REJECTED = config.approvalStatus.REJECTED;
 
-  // 本周明细按「项目」分组（周报统计展示用）
+  // 本周明细按「项目」分组（周报统计展示用；教师垫付类项目栏空 → 人名项目，2026-10-27）
   const weekProjects = { new: {}, approved: {}, rejected: {} };
   const bumpProject = (bucket, fields) => {
-    const project = fieldText(fields['项目'], '未填写');
+    const project = resolveProject(fields);
     bucket[project] = (bucket[project] || 0) + 1;
   };
 
@@ -253,5 +272,6 @@ module.exports = {
   getOverdueInvoices,
   isActiveProcess,
   hasInvoiceSubmitted,
+  resolveProject,
   getCollectedApplyNoSet,
 };

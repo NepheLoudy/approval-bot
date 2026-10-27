@@ -91,7 +91,8 @@ function collectToItem(r, byApplyNo) {
     applyNo,
     material: af['购买物资名称'] || '',
     model: af['型号规格参数'] || '',
-    project: af['项目'] ? (af['项目'].name || String(af['项目'])) : '未归类',
+    // 项目解析走 approvalService.resolveProject（2026-10-27 教师垫付=人名项目口径同源）
+    project: approvalService.resolveProject(af),
     applicant: Array.isArray(af['发起人']) ? af['发起人'].map(u => u.name).join(',') : '',
     fileTokens: Array.isArray(f['发票图片']) ? f['发票图片'].map(a => a.file_token).filter(Boolean) : [],
     verifyStatus: f['校验状态'] || '',
@@ -214,7 +215,8 @@ async function getUnbatchedInvoicedByProject() {
     const raw = f['总金额'];
     const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
     if (!(amount > 0)) continue;
-    const project = f['项目'] ? (f['项目'].name || String(f['项目'])) : '未归类';
+    // 教师垫付类（项目栏空）按人名项目归组——与票池/命名口径同源（2026-10-27）
+    const project = approvalService.resolveProject(f);
     const agg = byProject.get(project) || { count: 0, amount: 0 };
     agg.count++;
     agg.amount = Math.round((agg.amount + amount) * 100) / 100;
