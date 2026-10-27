@@ -223,6 +223,36 @@ async function getUnbatchedInvoicedByProject() {
   return byProject;
 }
 
+/** 「已开发票且未制单」按发起人汇总（2026-10-27 曼波定：制单金额线分组维度从项目改人名
+ *  ——个人满 500 锁一批归档）。过滤口径与按项目版完全一致，仅聚合键换成发起人姓名。
+ * @returns {Map<personName, {count, amount}>}
+ */
+async function getUnbatchedInvoicedByPerson() {
+  const all = await approvalService.getAllApprovals();
+  const collectedNos = await approvalService.getCollectedApplyNoSet();
+  const byPerson = new Map();
+  for (const record of all) {
+    const f = record.fields || {};
+    if (f['申请状态'] !== config.approvalStatus.APPROVED) continue;
+    if (!approvalService.isActiveProcess(f)) continue;
+    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+    if (applyNo && collectedNos.has(applyNo)) continue;
+    if (!approvalService.hasInvoiceSubmitted(f)) continue;
+    const form = f['报销单'];
+    if (form !== null && form !== undefined && form !== '') continue;
+    if (fieldText(f['是否打印']) === '是') continue;
+    const raw = f['总金额'];
+    const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
+    if (!(amount > 0)) continue;
+    const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '未知发起人';
+    const agg = byPerson.get(person) || { count: 0, amount: 0 };
+    agg.count++;
+    agg.amount = Math.round((agg.amount + amount) * 100) / 100;
+    byPerson.set(person, agg);
+  }
+  return byPerson;
+}
+
 // ---------- 批次锁定 ----------
 
 /**
@@ -245,6 +275,9 @@ async function lockBatch(batchNo, project, options = {}) {
 
     let pool = await getPoolWithRecords();
     if (project) pool = pool.filter(p => p.project === project);
+    // 按发起人过滤（2026-10-27 曼波定：制单金额线分组维度从项目改人名——个人已开票
+    // 未制单满 500 锁一批）。applicant 为多人逗号拼接，任一命中即算
+    if (options.person) pool = pool.filter(p => String(p.applicant || '').split(',').map(s => s.trim()).includes(options.person));
     if (!pool.length) throw new Error('票池中没有可锁定的发票（已全部归批或项目无票）');
 
     const amount = Math.round(pool.reduce((s, p) => s + p.totalAmount, 0) * 100) / 100;
@@ -1489,6 +1522,7 @@ module.exports = {
   getPoolWithRecords,
   previewBatch,
   getUnbatchedInvoicedByProject,
+  getUnbatchedInvoicedByPerson,
   lockBatch,
   isSpecialItem,
   markBatch,

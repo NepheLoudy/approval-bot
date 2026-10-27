@@ -1,9 +1,9 @@
 /**
- * 制单金额线自动锁定（2026-09-29 曼波定，两阶段流程）。
+ * 制单金额线自动锁定（2026-09-29 曼波定，两阶段流程；2026-10-27 分组维度从项目改发起人）。
  *
  * 模式（曼波拍板）：财务同学不再主动干活，听机器人发布报销单——
- * 项目维度「已开发票且未制单」（=票池，已剔除「是否打印=是」的人工线票）金额合计
- * 满 config.formAlert.amount（默认 500）→ **自动锁定批次**：生成报销单号（自动-<项目>-<MMDD>）、
+ * 发起人维度「已开发票且未制单」（=票池，已剔除「是否打印=是」的人工线票）金额合计
+ * 满 config.formAlert.amount（默认 500）→ **自动锁定批次**：生成报销单号（自动-<人名>-<MMDD>）、
  * 回写审批表「报销单」栏与「是否打印=是」标记、群里发**详情卡等待确认**（第一阶段，本服务）；
  * 财务回复 /approval-batch confirm 后才生成交付件（发票排版文件/物料清单/扫码清单）并下发
  * 二维码卡开始工作（第二阶段，chatService.confirmDelivery）；确认后再过 12h（避开夜间）
@@ -97,32 +97,43 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   const threshold = config.formAlert.amount;
   const cooldownMs = config.formAlert.cooldownHours * 60 * 60 * 1000;
 
-  /** 项目维度金额汇总（票池 + 票池外补充合并）——补采后重算复用 */
-  const computeProjectAmounts = async () => {
+  /** 发起人维度金额汇总（票池 + 票池外补充合并）——补采后重算复用。
+   *  2026-10-27 曼波定：分组维度从项目改人名（个人已开票未制单满 500 锁一批归档）；
+   *  已生成的项目批次保持不变。state.projects 的键随之从项目名变人名（同一 JSON 结构）。 */
+  const computeGroupAmounts = async () => {
     // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
     // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
-    const { suggestions } = await batchService.previewBatch();
-    const byProject = new Map(suggestions.map(s => [s.project, { ...s, unCollected: 0, poolCount: s.count }]));
-    const supplement = await batchService.getUnbatchedInvoicedByProject();
-    for (const [project, agg] of supplement) {
-      const cur = byProject.get(project) || { project, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
+    const pool = await batchService.getPoolWithRecords();
+    const byPerson = new Map();
+    for (const p of pool) {
+      const person = String(p.applicant || '').split(',').map(s => s.trim()).filter(Boolean)[0] || '';
+      if (!person) continue; // 无发起人的票不自动锁批（无主批次）
+      const cur = byPerson.get(person) || { group: person, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
+      cur.count++;
+      cur.amount = Math.round((cur.amount + p.totalAmount) * 100) / 100;
+      if (p.verifyStatus !== '通过' || p.amountInvalid) cur.warningCount++;
+      cur.poolCount++;
+      byPerson.set(person, cur);
+    }
+    const supplement = await batchService.getUnbatchedInvoicedByPerson();
+    for (const [person, agg] of supplement) {
+      const cur = byPerson.get(person) || { group: person, count: 0, amount: 0, warningCount: 0, unCollected: 0, poolCount: 0 };
       cur.count += agg.count;
       cur.amount = Math.round((cur.amount + agg.amount) * 100) / 100;
-      cur.unCollected = agg.count; // 该项目未采集笔数（详情卡提示 + 锁定前补采判定）
-      byProject.set(project, cur);
+      cur.unCollected += agg.count; // 该人未采集笔数（详情卡提示 + 锁定前补采判定）
+      byPerson.set(person, cur);
     }
-    // 未归类票不自动锁批（对抗审查：票池「未归类」项目金额满线会自动锁出无主批次——
-    // 这些票需财务人工归类后才能制单）；补充口径-only 项目（票池 0 张）不触发
-    //（lockBatch 必抛「票池无票」且失败不写冷却 → 无限重试，对抗审查 P3-1）
-    return [...byProject.values()]
-      .filter(s => s.project !== '未归类' && s.poolCount > 0)
+    // 补充口径-only 人（票池 0 张）不触发——lockBatch 必抛「票池无票」且失败不写冷却
+    // → 无限重试（对抗审查 P3-1 同款）
+    return [...byPerson.values()]
+      .filter(s => s.poolCount > 0)
       .map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
   };
 
-  let all = await computeProjectAmounts();
+  let all = await computeGroupAmounts();
   let hits = all.filter(s => s.amount >= threshold);
 
-  // 「锁定前补采」（2026-10-17 曼波定「一个单子做完」）：待锁项目若仍有已交未采集的票
+  // 「锁定前补采」（2026-10-17 曼波定「一个单子做完」）：待锁人若仍有已交未采集的票
   // （unCollected>0），先定点回溯把票收进采集池再锁——防「判定满额时票未进池 → 批次只锁
   // 到一部分、其余进下批」的拆单（重装 1017 实案）。补采失败/收不全不拦锁：按现票池锁定，
   // 未入库票由详情卡如实提示。noFormAlert 防 checkAndBroadcast→补采→触发 递归；dryRun 只查不采
@@ -130,18 +141,18 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
   if (!dryRun) {
     const now0 = Date.now();
     const dueNow = hits.filter(s => {
-      const st = state.projects[s.project];
+      const st = state.projects[s.group];
       return !st || now0 - (st.ts || 0) >= cooldownMs;
     });
-    const needCollect = dueNow.filter(s => (s.unCollected || 0) > 0).map(s => s.project);
+    const needCollect = dueNow.filter(s => (s.unCollected || 0) > 0).map(s => s.group);
     if (needCollect.length) {
       try {
         const backfillService = require('./backfillService');
-        const bf = await backfillService.backfillCollect({ limit: 100, sinceDays: 200, noFormAlert: true, onlyProjects: needCollect });
+        const bf = await backfillService.backfillCollect({ limit: 100, sinceDays: 200, noFormAlert: true, onlyPersons: needCollect });
         preCollected = bf.collected || 0;
         console.log(`[制单金额线] 锁定前补采（${needCollect.join('/')}）：收 ${bf.collected} 张 / 处理 ${bf.scanned} 条候选（枚举 ${bf.totalInstances || 0} 实例）`);
         if (preCollected > 0) {
-          all = await computeProjectAmounts();
+          all = await computeGroupAmounts();
           hits = all.filter(s => s.amount >= threshold);
         }
       } catch (err) {
@@ -152,7 +163,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
 
   const now = Date.now();
   const due = hits.filter(s => {
-    const st = state.projects[s.project];
+    const st = state.projects[s.group];
     return !st || now - (st.ts || 0) >= cooldownMs;
   });
 
@@ -162,25 +173,26 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
     preCollected, // 锁定前补采入库票数（0=无需/失败）
     locked: [],
     failed: [],
-    skipped: hits.length - due.length, // 命中阈值但在冷却期内的项目数
+    skipped: hits.length - due.length, // 命中阈值但在冷却期内的人数
   };
   if (!due.length) return result;
 
   for (const s of due) {
     if (dryRun) {
-      result.locked.push({ project: s.project, count: s.count, amount: s.amount, dryRun: true });
+      result.locked.push({ project: s.group, count: s.count, amount: s.amount, dryRun: true });
       continue;
     }
     try {
-      const batchNo = await nextAutoBatchNo(s.project);
+      const batchNo = await nextAutoBatchNo(s.group);
       // 两阶段流程（2026-09-29 曼波定）：锁定只生成报销单号+打标+发详情卡（deferDelivery
-      // 不生成交付件），财务群里 confirm 后才由 chatService.confirmDelivery 生成交付件+发二维码卡
-      const r = await batchService.lockBatch(batchNo, s.project, { operator: '机器人自动锁定', deferDelivery: true });
+      // 不生成交付件），财务群里 confirm 后才由 chatService.confirmDelivery 生成交付件+发二维码卡。
+      // 2026-10-27 起分组维度=人名：批次号 自动-<人名>-<MMDD>，按发起人过滤票池锁定
+      const r = await batchService.lockBatch(batchNo, '', { person: s.group, operator: '机器人自动锁定', deferDelivery: true });
       // 详情卡（无二维码，带 confirm/reject 指引）。发送失败不回滚锁定（批次已建、票已出池），
       // 财务仍可从报销批次表看到该批并用 confirm 指令继续
       try {
         await bot.sendMessage(bot.buildAutoLockNoticeCard({
-          batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
+          batchNo: r.batchNo, project: `${s.group}（${r.projects.join('/')}）`, count: r.count, amount: r.amount,
           summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
           unCollected: s.unCollected || 0,
           abnormalItems: r.abnormalItems || [],
@@ -188,12 +200,12 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
       } catch (err) {
         console.error(`[制单金额线] 自动批次 ${r.batchNo} 详情卡发送失败（批次已锁定，可 confirm 继续）:`, err.message);
       }
-      state.projects[s.project] = { batchNo: r.batchNo, amount: s.amount, count: s.count, ts: now };
-      result.locked.push({ project: s.project, batchNo: r.batchNo, count: r.count, amount: r.amount });
-      console.log(`[制单金额线] 自动锁定（${trigger}）：${s.project} 满额 ¥${s.amount.toFixed(2)} → 批次 ${r.batchNo}（${r.count} 张，待确认）；冷却内跳过 ${result.skipped} 项`);
+      state.projects[s.group] = { batchNo: r.batchNo, amount: s.amount, count: s.count, ts: now };
+      result.locked.push({ project: s.group, batchNo: r.batchNo, count: r.count, amount: r.amount });
+      console.log(`[制单金额线] 自动锁定（${trigger}）：${s.group} 满额 ¥${s.amount.toFixed(2)} → 批次 ${r.batchNo}（${r.count} 张，待确认）；冷却内跳过 ${result.skipped} 项`);
     } catch (err) {
-      console.error(`[制单金额线] 自动锁定失败（${s.project}，冷却后自动重试）:`, err.message);
-      result.failed.push({ project: s.project, error: err.message });
+      console.error(`[制单金额线] 自动锁定失败（${s.group}，冷却后自动重试）:`, err.message);
+      result.failed.push({ project: s.group, error: err.message });
     }
   }
   if (result.locked.some(l => !l.dryRun)) save();

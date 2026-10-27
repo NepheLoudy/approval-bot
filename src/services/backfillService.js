@@ -175,6 +175,9 @@ async function doBackfillCollect(options = {}) {
   // 定向补采（2026-10-17，制单金额线锁定前用）：只处理指定项目的候选记录
   const onlyProjects = Array.isArray(options.onlyProjects) && options.onlyProjects.length
     ? new Set(options.onlyProjects) : null;
+  // 按发起人定向补采（2026-10-27 分组维度改人名）：匹配审批记录「发起人」第一人姓名
+  const onlyPersons = Array.isArray(options.onlyPersons) && options.onlyPersons.length
+    ? new Set(options.onlyPersons) : null;
   // 指定申请补收（2026-10-20 漏票修复用）：允许「已采集过」的申请重新参与候选——
   // 一申请多张票时此前只收到部分，补收时按发票号查重跳过已收，只补缺失附件
   const includeApplyNos = new Set(Array.isArray(options.includeApplyNos) ? options.includeApplyNos : []);
@@ -191,6 +194,10 @@ async function doBackfillCollect(options = {}) {
     if (onlyProjects) {
       const project = f['项目'] ? (f['项目'].name || String(f['项目'])) : '未归类';
       if (!onlyProjects.has(project)) return false;
+    }
+    if (onlyPersons) {
+      const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '';
+      if (!person || !onlyPersons.has(person)) return false;
     }
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     return applyNo && (!collectedApplyNos.has(applyNo) || includeApplyNos.has(applyNo));

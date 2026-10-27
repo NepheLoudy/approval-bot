@@ -416,6 +416,20 @@ async function handleBatchCommand(args = [], ctx = {}) {
     if (r.amountDrift) {
       lines.push(`· ⚠️ regen 后金额合计 ¥${r.amountDrift.current.toFixed(2)} 与批次锁定值 ¥${r.amountDrift.recorded.toFixed(2)} 不一致，请核对台账与采集表`);
     }
+    // 重发交付卡（2026-10-27 曼波反馈：regen 补票/修文件后群里的旧卡二维码数量/内容已过期——
+    // 新卡按最新 scanItems 重发，财务不用翻表格）。发送失败不遮蔽 regen 成果，回执提示即可
+    try {
+      await sendDeliveryCard({
+        batchNo: r.batchNo, project: r.project || '', count: r.count, amount: r.amount || 0,
+        summary: r.summary || '', warningCount: 0, missingContent: 0,
+        generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
+        specialCount: r.specialCount, scanItems: r.scanItems || [], abnormalItems: r.abnormalItems || [],
+      });
+      lines.push('· 📦 最新交付卡已重发群（二维码按当前票面重建）');
+    } catch (err) {
+      console.error('[对话服务] regen 后交付卡重发失败:', err.message);
+      lines.push(`· ⚠️ 交付卡重发失败（${err.message.slice(0, 40)}），请从批次表附件取用`);
+    }
     return lines.join('\n');
   }
 
