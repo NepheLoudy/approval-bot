@@ -119,6 +119,10 @@ const quietTaskRunners = {
   daily_reminder: () => withRetry('daily_reminder', () => runReminder()),
   invoice_urge: () => withRetry('invoice_urge', () => runInvoiceUrge()).then((r) => announceTodayUrged(r)),
   form_alert: () => withRetry('form_alert', () => formAlertService.runDailyCheck()),
+  // 采集落库即时触发（formAlertService.triggerAfterCollect）落 'form_alert_live' 积压——
+  // 此前未注册冲刷执行器，夜间采集触发的自动锁定补跑必失败被丢弃（2026-10-30 审查批 P1）；
+  // 冲刷重算最新票池，与每日兜底同链（fireKey 按任务名+分钟戳，与 form_alert 不冲突）
+  form_alert_live: () => withRetry('form_alert_live', () => formAlertService.runDailyCheck({ trigger: 'quiet_flush' })),
   print_ask: () => withRetry('print_ask', () => askPendingPrintConfirm()),
   confirm_remind: () => withRetry('confirm_remind', () => remindUnconfirmedBatches()),
 };
@@ -437,6 +441,7 @@ async function runFormAlertOnce(options = {}) {
 module.exports = {
   startCronJobs,
   stopCronJobs,
+  quietTaskRunners, // 透出供 stub 断言（2026-10-30 审查批：form_alert_live 此前漏注册致夜间积压必失败）
   runBroadcast,
   runReminder,
   runInvoiceUrgeOnce,

@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v89**（2026-10-28，审批结构更新预迁移：resolveProject 统一项目归属+教师垫付人名项目）。上一版 v88（2026-10-27，制单金额线分组维度从项目改发起人+regen 后自动重发交付卡）。更早 v87~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记；头部指针曾停留 v73，2026-10-30 维护批补正）。
+当前最新：**v90**（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。上一版 v89（2026-10-28，审批结构更新预迁移：resolveProject 统一项目归属+教师垫付人名项目）。更早 v88~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -703,3 +703,18 @@
 - `approvalService.js` 新增 `resolveProject` 统一项目归属：票池、金额线补充、周报统计同源取值；表单「是否参与集中采购？」演进为「是否为教师垫付」口径——**是**且「项目」栏为空 → 项目=发起人姓名（人名项目），此类记录报销单号非兵种格式 `27{人名}{序}`，摘要/物料清单用途同源。
 - 新表单列未同步前安全回落「未归类」，不影响现网流程；旧「集中采购」两列留存历史数据（代码零引用）。
 - `batchService.js` 金额线补充接入同源；AGENTS.md 职能段同步教师垫付口径。
+
+## v90 · 2026-10-30 · 随本提交落地 · fix
+
+**全量审查修复批（子代理只读审查 + 主会话修复，测试全绿）**
+
+- **P1 · form_alert_live 冲刷执行器注册**：`triggerAfterCollect` 以 `form_alert_live` 落晚间静默积压，但 cron 的 `quietTaskRunners` 漏注册该键——夜间采集触发的自动锁定补跑必失败被丢弃（`FORM_ALERT_SCHEDULE` 留空组合下永久丢失，与 formAlertService 头注「窗口结束补跑」承诺不符）。修复=cron/index.js 注册同名 runner（冲刷重算最新票池，与每日兜底同链；fireKey 按任务名隔离不冲突）；`quietTaskRunners` 透出 exports，新增 `stub-test-form-alert-live.js` 4 断言。
+- **P2 · 回执诚实性**：lock/confirm/regen 三处交付卡发送接住返回值——`sendMessage` 被播报熔断静默返回 null 时回执如实说「暂缓」，不再谎报「已发群」（同 cron 先例口径）。
+- **P2 · /approval-urge 撞轮**：`runInvoiceUrge` 返回 skipped（already_running）时回「上一轮催办仍在执行中」而非误报「本次无私聊」。
+- **P2 · ledger 子指令挂资金白名单**：`/approval-batch ledger submit|paid|reject` 写的是台账真账，补挂 `fundOperatorDenied`（此前绕过 lock/submit/paid/reject 的操作人口径）。
+- **P2 · 内存锁泄漏**：`invoiceCollectService.withRecordLock` 照 batchService.withLock 同款 wrapped-delete 模式补清理（此前只增不删，长期运行缓慢爬升）。
+- **P2 · 时区统一**：`bot.js` 的 fmtTime/fmtDayShort 改走 utils/time（新增 shanghaiYmdDash），原服务器本地时区在部署机 TZ≠Asia/Shanghai 时跨日倒退一天。
+- **P2 · 消毒补网**：fmtNoMarkdown 的申请编号（表格人工可写）过 stripCardInjection 再拼 markdown 链接（唯此一处漏网 truncate 全覆盖面）。
+- **P2 · .env.example 补 17 键**：制单金额线/批次询问/播报配额/静默窗口/回复轮询五段按 config.js 默认值回填（2026-09-29 后新增特性整批未回填的欠账）。
+- 已知偏离（待确认未修）：print_ask/confirm_remind 每小时任务静默窗口内各积压一条、09:00 冲刷重跑 7 次（幂等无害，白烧 API）——按全局口径应整轮跳过，涉 cron 触发语义改动待曼波裁定。
+- 全量桩测试全绿（含新套）。

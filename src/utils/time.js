@@ -18,10 +18,16 @@ function shanghaiMdDash(ms) {
   return `${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
 }
 
+/** 毫秒 → 'YYYY-MM-DD'（卡片日期，0 填充；fmtTime 同格式随本批改走上海时区） */
+function shanghaiYmdDash(ms) {
+  const d = new Date((ms || Date.now()) + TZ_OFFSET_MS);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
 /** 毫秒 → 'MMDD'（自动批次号用） */
 function shanghaiMmdd(ms) {
   const d = new Date((ms || Date.now()) + TZ_OFFSET_MS);
   return `${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-module.exports = { shanghaiYmdSlash, shanghaiMdDash, shanghaiMmdd };
+module.exports = { shanghaiYmdSlash, shanghaiMdDash, shanghaiYmdDash, shanghaiMmdd };

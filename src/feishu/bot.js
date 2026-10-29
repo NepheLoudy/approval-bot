@@ -2,6 +2,7 @@ const config = require('../config');
 const client = require('./client');
 const { requestAPI } = client;
 const { fieldText } = require('../utils/fields');
+const { shanghaiYmdDash, shanghaiMdDash } = require('../utils/time');
 const quota = require('../utils/broadcastQuota');
 
 // ============================================================
@@ -181,14 +182,12 @@ function firstUserName(value) {
   return getUsers(value)[0]?.name || '未知';
 }
 
-/** DateTime 字段（毫秒时间戳）→ 可读时间 */
+/** DateTime 字段（毫秒时间戳）→ 可读时间（2026-10-30 审查批：改走上海时区，原服务器本地时区跨日倒退） */
 function fmtTime(value) {
   if (!value) return '未知';
   const ms = typeof value === 'number' ? value : parseInt(value, 10);
   if (Number.isNaN(ms)) return String(value);
-  const d = new Date(ms);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return shanghaiYmdDash(ms);
 }
 
 /** 总金额 + 币种 */
@@ -211,7 +210,8 @@ function truncate(text, max = 40) {
 /** 申请编号 → markdown 超链接（Url 字段的 link 即审批实例链接，财务可点击直达审批详情页） */
 function fmtNoMarkdown(fields, recordId) {
   const raw = fields['申请编号'];
-  const no = fieldText(raw) || recordId;
+  // 编号是表格人工可写文本，过消毒再拼链接（2026-10-30 审查批：唯此一处漏网 truncate 覆盖面）
+  const no = stripCardInjection(fieldText(raw)) || recordId;
   const link = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.link : '';
   return link ? `[${no}](${link})` : no;
 }
@@ -233,9 +233,7 @@ function invoiceStatusBadge(state) {
 }
 
 function fmtDayShort(ms) {
-  const d = new Date(ms);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getMonth() + 1}-${d.getDate()}`;
+  return shanghaiMdDash(ms);
 }
 
 /** 催办条目通用行（单号带审批链接；urgeStates 提供时未交票行带状态徽标） */

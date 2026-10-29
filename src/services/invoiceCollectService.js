@@ -21,12 +21,18 @@ const invoiceParser = require('./invoiceParser');
 let formAlertService = null;
 
 // 查重/回写附件的按记录串行锁（附件字段整列覆盖，并发读改写会互相丢图）
+// 完成后清理 entry（照 batchService.withLock 同款模式）：此前只增不删，长期运行缓慢爬升
 const recordLocks = new Map();
 async function withRecordLock(key, fn) {
   const prev = recordLocks.get(key) || Promise.resolve();
   const run = prev.then(fn, fn);
-  recordLocks.set(key, run.catch(() => {}));
-  return run;
+  const wrapped = run.catch(() => {});
+  recordLocks.set(key, wrapped);
+  try {
+    return await run;
+  } finally {
+    if (recordLocks.get(key) === wrapped) recordLocks.delete(key);
+  }
 }
 
 const MISSING_LABELS = { invoiceNo: '发票号码', issueDate: '开票日期', totalAmount: '价税合计' };
