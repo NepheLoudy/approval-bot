@@ -30,4 +30,20 @@ function shanghaiMmdd(ms) {
   return `${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-module.exports = { shanghaiYmdSlash, shanghaiMdDash, shanghaiYmdDash, shanghaiMmdd };
+/** 发票开票日期文本（'YYYY-MM-DD'）→ 上海时区当日零点毫秒；非法返回 null。
+ *  两道闸（2026-11-03 审查 P2）：①解析 NaN（13 月等语法非法）→ null；
+ *  ②回读比对——V8 对「语法合法但日历不存在」的日期（2026-02-30）不报错而是
+ *  静默滚动到 2026-03-02，回读与原文不一致同样拒绝。落库前必须走本函数：
+ *  NaN/滚动毫秒写进「开票日期」列要么整条报错、要么日期漂移，都会让三元组
+ *  近似查重对该票失效。 */
+function issueDateToMs(issueDate) {
+  if (!issueDate) return null;
+  const s = String(issueDate).trim();
+  const ms = Math.floor(new Date(`${s}T00:00:00+08:00`).getTime());
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms + TZ_OFFSET_MS);
+  const round = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return round === s ? ms : null;
+}
+
+module.exports = { shanghaiYmdSlash, shanghaiMdDash, shanghaiYmdDash, shanghaiMmdd, issueDateToMs };

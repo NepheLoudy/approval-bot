@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v90**（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。上一版 v89（2026-10-28，审批结构更新预迁移：resolveProject 统一项目归属+教师垫付人名项目）。更早 v88~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
+当前最新：**v91**（2026-11-05，宣运物资组别线+全量审查 P1 收口（buyer_alert 接线）+11-03 遗留批合并入库，十套全绿）。上一版 v90（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。上一版 v89（2026-10-28，审批结构更新预迁移：resolveProject 统一项目归属+教师垫付人名项目）。更早 v88~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -718,3 +718,12 @@
 - **P2 · .env.example 补 17 键**：制单金额线/批次询问/播报配额/静默窗口/回复轮询五段按 config.js 默认值回填（2026-09-29 后新增特性整批未回填的欠账）。
 - 已知偏离（待确认未修）：print_ask/confirm_remind 每小时任务静默窗口内各积压一条、09:00 冲刷重跑 7 次（幂等无害，白烧 API）——按全局口径应整轮跳过，涉 cron 触发语义改动待曼波裁定。
 - 全量桩测试全绿（含新套）。
+## v91 · 2026-11-05 · 随本提交落地 · feat/fix
+
+**11-03 宣运物资批 + 全量审查 P1 收口（合并入库批：11-03 并行会话遗留 22 文件 + 2026-11-04 深夜全量审查 approval 域 P1）**
+
+- **宣运物资组别独立警戒线（2026-11-03 曼波定）**：审批新组别「宣运物资」的记录不按人名 500 线——全组跨发起人共用 config.formAlert.xuanYunAmount 独立线（线值待财务定暂沿用 500），满线锁「自动-宣运物资-<MMDD>」整批；补采分流按 onlyProjects 定向（组别名不是人名）；新增 stub-test-xuanyun-group（组别识别/独立线/锁定路由/物料清单用途列/日期 NaN 安全）与 stub-test-xuanyun-purchase-type（实物图嵌入/缓存魔数过滤）两套。
+- **P1 invoice_buyer_alert 死接线修复（src/services/invoiceCollectService.js）**：2026-11-03 静默改造只做了接收端（cron 注册 payloadHandler），发送端抬头警戒红卡仍直发——静默窗口内采集的警报绕闸。修：发送点接 quietHours.gatePayload('invoice_buyer_alert', card)，与 notifyReviewers 同范式，夜间载荷积压 09:00 补发。
+- **P1 两口径双计审查裁定（formAlertService 注释成文）**：实测票池与补充口径互斥已由 applyNo 链路保证（采集表为真源带关联申请编号，补充口径按 getCollectedApplyNoSet 排除已采集记录）；残留边缘=采集条目申请编号为空（OCR 缺失）时一次双计，注释如实成文+人工核对兜底，暂不做发票号级模糊匹配。
+- **11-03 审查修复同批**：quietHours 冲刷重试 3→8 次×60s（09:00 飞书抖动超 2 分钟周报条目不再被放弃）+ registerPayloadHandler 一次性载荷补发基建；time.js parseInvoiceDate 两道闸（NaN 拒绝+日历滚动回读比对，2026-02-30 类静默漂移入不了库）。
+- **测试**：npm test 全绿（form-alert-live/xuanyun×2/quiet-flush 等十套）。

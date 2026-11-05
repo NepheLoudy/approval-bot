@@ -149,9 +149,14 @@ module.exports = {
   // 触发点：发票采集落库后即时 + schedule 每日兜底（防存量满额无人触发）；
   // 同一项目冷却时间内不重复触发（锁定失败防循环）
   formAlert: {
-    // 留空 = 不启用每日兜底（采集落库后的即时触发不受此开关影响）
-    schedule: process.env.FORM_ALERT_SCHEDULE || '0 35 10 * * *',
+    // 留空 = 不启用每日兜底（采集落库后的即时触发不受此开关影响）。
+    // 2026-11-03 审查 P2：原 `||` 写法把显式空串也吞成默认值，「留空禁用」从未生效
+    // （cron 的未启用分支不可达）——改 `??`（未配置才回落默认）
+    schedule: process.env.FORM_ALERT_SCHEDULE ?? '0 35 10 * * *',
     amount: parseFloat(process.env.FORM_ALERT_AMOUNT) || 500,
+    // 宣运物资组别警戒线（2026-11-03 曼波定：审批新组别「宣运物资」不按人名 500 线，
+    // 全组共用一条独立线——组内任意人交票都往一条线上累；线值待财务定，暂沿用 500 兜底）
+    xuanYunAmount: parseFloat(process.env.FORM_ALERT_XUANYUN_AMOUNT) || 500,
     cooldownHours: parseInt(process.env.FORM_ALERT_COOLDOWN_HOURS, 10) || 24,
     // 状态文件：部署目标的 SFTP 部署会清空项目目录，生产应配到项目目录之外
     stateFile: process.env.FORM_ALERT_STATE_FILE || '',

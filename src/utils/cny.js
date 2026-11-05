@@ -86,7 +86,7 @@ function cnOrdinalToNum(s) {
   for (const ch of str) {
     const d = Math.max(CN_LO.indexOf(ch), CN_DIGITS.indexOf(ch)); // 简繁大写都容错
     if (d > 0) { current = d; seen = true; }
-    else if (ch === '十') { section += (current || 1) * 10; current = 0; seen = true; }
+    else if (ch === '十' || ch === '拾') { section += (current || 1) * 10; current = 0; seen = true; } // 拾=十的大写（2026-11-03 审查 P3：「第贰拾叁笔」此前解析为 0）
     else if (ch === '百' || ch === '佰') { section += (current || 1) * 100; current = 0; seen = true; }
     else if (ch === '千' || ch === '仟') { section += (current || 1) * 1000; current = 0; seen = true; }
     else if (ch === '零') continue;

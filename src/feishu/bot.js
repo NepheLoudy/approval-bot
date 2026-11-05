@@ -213,7 +213,9 @@ function fmtNoMarkdown(fields, recordId) {
   // 编号是表格人工可写文本，过消毒再拼链接（2026-10-30 审查批：唯此一处漏网 truncate 覆盖面）
   const no = stripCardInjection(fieldText(raw)) || recordId;
   const link = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.link : '';
-  return link ? `[${no}](${link})` : no;
+  // 链接与编号同源（表格可写字段）——只放行 https，防钓鱼/http 混入财务群
+  //（2026-11-03 审查 P2，与 abnormalItemLines 的 applyLink 白名单同口径）
+  return link && /^https:\/\//i.test(String(link)) ? `[${no}](${link})` : no;
 }
 
 /** 催发票状态徽标（无法提交 / 已退队 / 延期中 / 已催次数），供周报展示给财务 */
@@ -281,7 +283,7 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     : '';
   elements.push({
     tag: 'markdown',
-    content: `**🧾 财务催办周报**\n${date || new Date().toLocaleDateString('zh-CN')}\n${mentionLine}以下为「已通过」申请的后续财务环节待办：`,
+    content: `**🧾 财务催办周报**\n${date || shanghaiYmdDash(Date.now())}\n${mentionLine}以下为「已通过」申请的后续财务环节待办：`,
   });
 
   // 1. 未交发票 → 催发票（单号带审批链接 + 私聊状态徽标：无法提交/已延期/已催N次）
@@ -326,7 +328,7 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     for (const b of ob.slice(0, 8)) {
       const safeNo = stripCardInjection(b.batchNo);
       const safeProj = stripCardInjection(b.project);
-      obLines.push(`- ${safeNo}（${safeProj}）：${b.count} 张 ¥${Number(b.amount).toFixed(2)}【${b.status}】锁定于 ${new Date(b.lockedAt).toLocaleDateString('zh-CN')}${b.taker ? ` 接取:${stripCardInjection(b.taker)}` : ''}`);
+      obLines.push(`- ${safeNo}（${safeProj}）：${b.count} 张 ¥${Number(b.amount).toFixed(2)}【${b.status}】锁定于 ${shanghaiYmdDash(b.lockedAt)}${b.taker ? ` 接取:${stripCardInjection(b.taker)}` : ''}`);
     }
     if (ob.length > 8) obLines.push(`- …另有 ${ob.length - 8} 批超期（详见报销批次表）`);
     elements.push({ tag: 'hr' });
@@ -395,7 +397,7 @@ function buildReminderCard(pendingList, fallbackMentionIds = []) {
   const elements = [
     {
       tag: 'markdown',
-      content: `**⏳ 每日待审批提醒**（${new Date().toLocaleDateString('zh-CN')}）`,
+      content: `**⏳ 每日待审批提醒**（${shanghaiYmdDash(Date.now())}）`,
     },
     { tag: 'hr' },
     {
@@ -435,7 +437,7 @@ function buildTodayUrgedCard({ urgedRecords = [], attention = [], statusCounts =
   elements.push({
     tag: 'markdown',
     content:
-      `**🔔 今日已催**（${date || new Date().toLocaleDateString('zh-CN')}）\n` +
+      `**🔔 今日已催**（${date || shanghaiYmdDash(Date.now())}）\n` +
       `今日已私聊催交 **${urgedRecords.length} 条**未开票记录，申请人回复将自动识别` +
       `（「延期」可带时长，如「延期 7 天」「延期两周」，默认 ${config.invoiceUrge.deferDays} 天内免催 /「无法提交」停催转财务）：`,
   });
@@ -492,7 +494,7 @@ function buildUrgeCard({ missingForm = [], missingTransfer = [], mentionIds = []
   const mentionLine = (mentionIds || []).filter(Boolean).map(buildAtTag).join(' ');
   elements.push({
     tag: 'markdown',
-    content: `**🔔 财务催办**（手动触发 ${new Date().toLocaleDateString('zh-CN')}）\n${mentionLine}${mentionLine ? '\n' : ''}以下为「已通过」申请的待催办环节：`,
+    content: `**🔔 财务催办**（手动触发 ${shanghaiYmdDash(Date.now())}）\n${mentionLine}${mentionLine ? '\n' : ''}以下为「已通过」申请的待催办环节：`,
   });
 
   renderSection(elements, {

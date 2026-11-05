@@ -13,8 +13,8 @@ const crypto = require('crypto');
 //     时点逻辑都以实际补发时刻为准（「挤压要为挤压之后的事情负责」）。
 //
 // 积压持久化到项目根 .quiet-backlog.json：重启不丢。启动时已过 end 整点则
-// 立即补冲刷，否则调度到 end 整点。冲刷失败的单条保留重试（至多 3 次尝试），
-// 超限丢弃并打错误日志。
+// 立即补冲刷，否则调度到 end 整点。冲刷失败的单条保留重试（至多 8 次尝试、
+// 每次间隔 60s ≈ 8 分钟容忍），超限丢弃并打错误日志。
 //
 // 不受限：对话/指令回复与人工当下主动触发（/api/bot/test-* 等手动接口，
 // 含 dryRun）——操作者明确要求立即执行。
@@ -25,7 +25,9 @@ const BACKLOG_FILE = process.env.QUIET_BACKLOG_FILE || path.join(__dirname, '..'
 // 项目外的数据目录无人预建，加载时确保存在
 try { fs.mkdirSync(path.dirname(BACKLOG_FILE), { recursive: true }); } catch { /* 写入失败时 saveBacklog 自会 warn */ }
 const TZ_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Shanghai 无夏令时，固定 UTC+8
-const MAX_ATTEMPTS = 3;
+// 8 次 × 60s ≈ 8 分钟容错（2026-11-03 审查 P2：原 3 次≈2 分钟——09:00 冲刷时
+// 飞书抖动超 2 分钟，周报条目被放弃要再等一周；上限受 FLUSH_ROUNDS=10 兜底防死循环）
+const MAX_ATTEMPTS = 8;
 const FLUSH_ROUNDS = 10;
 const RETRY_DELAY_MS = 60 * 1000;
 
@@ -124,6 +126,11 @@ function registerTask(name, fn) {
   runners.set(name, fn);
 }
 
+/** 一次性载荷补发处理器注册（cron 装配时调用；gatePayload 落盘的载荷冲刷时经此回放） */
+function registerPayloadHandler(name, fn) {
+  payloadHandlers[name] = fn;
+}
+
 /**
  * 定时任务静默闸门：非静默直接执行；静默窗口内登记积压，冲刷时重跑整个 run。
  * @returns {Promise<{deferred: boolean}>} 实际结果或积压登记信息
@@ -194,8 +201,16 @@ function scheduleFlush(delayMs) {
 }
 
 function scheduleFlushFromGate() {
-  if (flushTimer) return; // 已有调度在等待，沿用
-  scheduleFlush(Math.max(nextQuietEnd().getTime() - Date.now(), 1000));
+  const endMs = nextQuietEnd().getTime();
+  if (flushTimer) {
+    // 窗口内存活的重试 timer 会把新 gate 条目提前冲刷直发（2026-11-03 审查 P3：
+    // 违反「窗口内不直接发送」契约）——统一推迟到窗口结束（失败重试条目顺延无害）
+    if (inQuietHours() && nextFlushAt && new Date(nextFlushAt).getTime() < endMs) {
+      scheduleFlush(Math.max(endMs - Date.now(), 1000));
+    }
+    return; // 已有调度在等待，沿用
+  }
+  scheduleFlush(Math.max(endMs - Date.now(), 1000));
 }
 
 async function runFlush() {
@@ -267,7 +282,7 @@ async function runFlush() {
 function initQuietHoursFlush() {
   const items = loadBacklog();
   if (!settings.enabled) {
-    console.log('[晚间静默] 已通过 QUIET_HOURS_DISABLED=1 关闭');
+    console.log(`[晚间静默] 已通过 QUIET_HOURS_DISABLED=1 关闭${items.length ? `（⚠️ 存在 ${items.length} 条积压未冲刷，如不再需要请清理 ${BACKLOG_FILE}` : ''}）`);
     return;
   }
   if (items.length === 0) {
@@ -302,6 +317,8 @@ module.exports = {
   gateTask,
   gatePayload,
   registerTask,
+  registerPayloadHandler,
+  payloadHandlers, // 透出供 stub 断言（gatePayload 落盘的载荷必须有注册处理器，否则冲刷时被丢）
   initQuietHoursFlush,
   getStatus,
   runFlush, // 显式冲刷入口（桩测试/运维手动触发用；生产路径走 scheduleFlush）

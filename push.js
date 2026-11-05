@@ -113,7 +113,16 @@ function execCode(cmd) {
   });
 }
 
+// 2026-11-05 tearingDown 守卫（全量审查 P2）：conn.end() 主动收尾后服务端 RST 回包会把成功部署
+// 误报成失败退出码 1——主动收尾后的连接错误按已知误报忽略，不再自证失败
+let tearingDown = false;
+const _connEnd = conn.end.bind(conn);
+conn.end = (...args) => { tearingDown = true; return _connEnd(...args); };
 conn.on('error', (err) => {
+  if (tearingDown) {
+    console.log('SSH 收尾连接已关闭（' + err.message + '）——部署流程已正常走完，按已知误报忽略');
+    process.exit(0);
+  }
   console.error('SSH 连接失败:', err.message);
   process.exit(1);
 });
