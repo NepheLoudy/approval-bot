@@ -27,10 +27,12 @@ function init(file) {
 function load() {
   try {
     const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-    return { date: parsed.date || '', counts: parsed.counts || {} };
+    // alerts 一并恢复（2026-11-03 审查 P2：pm2 重启后告警卡「每天限 1 张」防重丢失，
+    // 失控+重启循环场景下告警卡会反复发群）
+    return { date: parsed.date || '', counts: parsed.counts || {}, alerts: parsed.alerts || {} };
   } catch (err) {
     if (err.code !== 'ENOENT') console.warn(`[播报熔断] 状态读取失败（按空计数继续）: ${err.message}`);
-    return { date: '', counts: {} };
+    return { date: '', counts: {}, alerts: {} };
   }
 }
 

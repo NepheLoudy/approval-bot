@@ -258,7 +258,8 @@ app.post('/api/chat/command', requireApiToken, async (req, res) => {
 // ---------- 飞书事件接收（feishu-gateway 转发 / 独立长连接 HTTP 回调） ----------
 
 app.post('/api/feishu/event', async (req, res) => {
-  const { type, challenge, token, header, event } = req.body;
+  // body 守卫（2026-11-03 审查 P3）：非 JSON content-type 时 req.body 为 undefined，直接解构会 500
+  const { type, challenge, token, header, event } = req.body || {};
 
   if (config.feishuEvent.verificationToken && token !== config.feishuEvent.verificationToken) {
     return res.status(403).json({ error: 'Invalid verification token' });

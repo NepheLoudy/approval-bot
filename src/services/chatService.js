@@ -319,10 +319,10 @@ async function handleBatchCommand(args = [], ctx = {}) {
     if (r.missingContent) lines.push(`· ⚠️ ${r.missingContent} 张缺「开票内容」（底单已标黄），录入时现场补填`);
     // 交付卡（人工锁定触发的直接回路，即时发群；卡内按序内嵌全部有效发票二维码——
     // 2026-09-29 曼波定；失败不阻断锁定）。sendMessage 被播报熔断时静默返回 null——
-    // 如实回执「暂缓」而非谎报已发（2026-10-30 审查批，同 cron 先例）
-    let sent = null;
+    // 如实回执「暂缓」而非谎报已发（2026-10-30 审查批，同 cron 先例）。
+    // 2026-11-03 审查 P2：异常与熔断分路（此前 catch 后 sent 仍 null，回执双条矛盾提示）
     try {
-      sent = await sendDeliveryCard({
+      const sent = await sendDeliveryCard({
         batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
         summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
@@ -330,14 +330,14 @@ async function handleBatchCommand(args = [], ctx = {}) {
         scanItems: r.scanItems || [],
         abnormalItems: r.abnormalItems || [],
       });
+      if (sent) {
+        lines.push(`· 📦 交付卡已发本群，@机器人 回复「接取」领取后录入小翼Plus；完成后：/approval-batch submit ${r.batchNo}`);
+      } else {
+        lines.push('· ⚠️ 交付卡被播报熔断暂缓（今日卡片额度已满），稍后重试或从报销批次表附件取用');
+      }
     } catch (err) {
       console.error('[对话服务] 交付卡发送失败:', err.message);
       lines.push('· ⚠️ 交付卡发送失败（文件已在报销批次表附件，不影响使用）');
-    }
-    if (sent === null) {
-      lines.push('· ⚠️ 交付卡被播报熔断暂缓（今日卡片额度已满），稍后重试或从报销批次表附件取用');
-    } else if (sent) {
-      lines.push(`· 📦 交付卡已发本群，@机器人 回复「接取」领取后录入小翼Plus；完成后：/approval-batch submit ${r.batchNo}`);
     }
     return lines.join('\n');
   }
@@ -432,21 +432,20 @@ async function handleBatchCommand(args = [], ctx = {}) {
     }
     // 重发交付卡（2026-10-27 曼波反馈：regen 补票/修文件后群里的旧卡二维码数量/内容已过期——
     // 新卡按最新 scanItems 重发，财务不用翻表格）。发送失败不遮蔽 regen 成果，回执提示即可；
-    // 熔断返回 null 时如实说「暂缓」（2026-10-30 审查批）
-    let sent = null;
+    // 熔断返回 null 时如实说「暂缓」（2026-10-30 审查批）。异常与熔断分路（2026-11-03 审查 P2）
     try {
-      sent = await sendDeliveryCard({
+      const sent = await sendDeliveryCard({
         batchNo: r.batchNo, project: r.project || '', count: r.count, amount: r.amount || 0,
         summary: r.summary || '', warningCount: 0, missingContent: 0,
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
         specialCount: r.specialCount, scanItems: r.scanItems || [], abnormalItems: r.abnormalItems || [],
       });
       if (sent) lines.push('· 📦 最新交付卡已重发群（二维码按当前票面重建）');
+      else lines.push('· ⚠️ 交付卡重发被播报熔断暂缓（今日卡片额度已满），稍后重试或从批次表附件取用');
     } catch (err) {
       console.error('[对话服务] regen 后交付卡重发失败:', err.message);
       lines.push(`· ⚠️ 交付卡重发失败（${err.message.slice(0, 40)}），请从批次表附件取用`);
     }
-    if (sent === null) lines.push('· ⚠️ 交付卡重发被播报熔断暂缓（今日卡片额度已满），稍后重试或从批次表附件取用');
     return lines.join('\n');
   }
 
@@ -569,6 +568,9 @@ async function handleTakeCommand(args = [], ctx = {}) {
  * @returns {Promise<string|null>} 未匹配指令返回 null
  */
 async function executeCommand(command, args = [], ctx = {}) {
+  // args 形态守卫（2026-11-03 审查 P3）：契约传数组；传字符串时 args[0] 会取到首字符、
+  // lock 分支 for-of 迭代字符——统一归一成数组
+  if (!Array.isArray(args)) args = args ? [String(args)] : [];
   // 审批群内 /help 即为财务帮助
   if (command === '/help') command = '/approval-help';
   const handler = commandHandlers[command];

@@ -127,18 +127,23 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
     if (hitRows.length > 1) return { action: 'ambiguous', rows: hitRows.length }; // 多行同摘要转人工
     const existRow = hitRows[0] || 0;
     if (existRow) {
-      // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动
-      const existing = grid[existRow - 1] || [];
-      if (deliveryNo && String(existing[1] ?? '').trim() === '') {
-        await writeRange(sheetId, `B${existRow}:B${existRow}`, [[/^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo]]);
-        return { action: 'appended', rowIndex: existRow, updated: 'deliveryNo' };
-      }
+    // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动。
+    // action='exists'（2026-11-03 审查 P3：此前误标 'appended'，chatService 的
+    // updated==='deliveryNo' 判定只认 exists，补填场景永远播报成「已同步：第 X 行」）
+    const existing = grid[existRow - 1] || [];
+    if (deliveryNo && String(existing[1] ?? '').trim() === '') {
+      await writeRange(sheetId, `B${existRow}:B${existRow}`, [[/^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo]]);
+      return { action: 'exists', rowIndex: existRow, updated: 'deliveryNo' };
+    }
       return { action: 'exists', rowIndex: existRow };
     }
 
     const next = lastNonEmptyRow(grid) + 1;
     if (next > rowCount) throw new Error(`台账表行数已满（${rowCount} 行），请人工插入行后重试`);
-    const seq = next >= 3 ? Number(grid[next - 2]?.[0]) + 1 || next - 2 : next - 2; // 序号=上一行序号+1
+    // 序号=上一行序号+1（2026-11-03 审查 P3：`Number()+1 || next-2` 在上一行序号为空时
+    // Number('')+1=1 恒真值，回退分支永不生效 → 新行序号撞首行；改显式 >0 判定）
+    const prevSeq = next >= 3 ? Number(grid[next - 2]?.[0]) : 0;
+    const seq = prevSeq > 0 ? prevSeq + 1 : next - 2;
     const payee = String(f['收款方'] || '').trim() || config.batch.reporterName;
     const payeeAccount = String(f['收款账号'] || '').trim() || config.batch.bankCardNo;
     const operator = String(f['接取人'] || '').trim() || config.batch.reporterName;

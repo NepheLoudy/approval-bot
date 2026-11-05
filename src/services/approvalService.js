@@ -14,6 +14,10 @@ const { fieldText } = require('../utils/fields');
 // 完成后 N 个月仍未转账才开始提醒
 const TRANSFER_GRACE_MONTHS = 3;
 
+// 宣运物资组别（2026-11-03 曼波定：审批新加的组别，走独立警戒线+物料清单特殊口径，
+// 不参与按人名 500 金额线）
+const XUANYUN_GROUP = '宣运物资';
+
 /** 拉取全部审批记录 */
 async function fetchAllApprovals() {
   return bitableApi.listAllRecords(config.bitable.approvalTableId);
@@ -45,17 +49,24 @@ function hasInvoiceSubmitted(fields) {
  * 教师垫付类记录的「项目」栏为空 → **单独算人名项目**（项目=发起人姓名）：
  * 报销单号走非兵种格式 27{人名}{序}，摘要/物料清单用途同源；
  * 无教师垫付标记且项目为空的仍归「未归类」。
- * 「是否为教师垫付」列由审批同步自动建立（旧表暂无此列时恒 undefined，回落未归类）。
+ * 2026-11-03 实查审批表（206 条）：同步列真名是「是否是教师垫付？」（v89 误写成
+ * 「是否为教师垫付」，恒 undefined → 教师垫付人名项目判定失效回落未归类），两个列名都认。
  */
 function resolveProject(fields) {
   const p = fields['项目'];
   const name = typeof p === 'string' ? p.trim() : (p && typeof p === 'object' ? String(p.name || '').trim() : '');
   if (name) return name;
-  if (fieldText(fields['是否为教师垫付']) === '是') {
+  if (fieldText(fields['是否为教师垫付']) === '是' || fieldText(fields['是否是教师垫付？']) === '是') {
     const person = (Array.isArray(fields['发起人']) && fields['发起人'][0]?.name) || '';
     if (person) return person;
   }
   return '未归类';
+}
+
+/** 是否宣运物资组别（2026-11-03 曼波定：独立警戒线/物料清单用途列特殊口径的判定入口，
+ *  走 resolveProject 同源——项目栏=宣运物资 即命中） */
+function isXuanYunGroup(fields) {
+  return resolveProject(fields) === XUANYUN_GROUP;
 }
 
 /**
@@ -273,5 +284,7 @@ module.exports = {
   isActiveProcess,
   hasInvoiceSubmitted,
   resolveProject,
+  isXuanYunGroup,
+  XUANYUN_GROUP,
   getCollectedApplyNoSet,
 };

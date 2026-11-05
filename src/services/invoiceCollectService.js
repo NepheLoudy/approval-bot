@@ -16,6 +16,8 @@ const approvalService = require('./approvalService');
 const collectStore = require('./collectStore');
 const ocrService = require('./ocrService');
 const invoiceParser = require('./invoiceParser');
+const { issueDateToMs } = require('../utils/time');
+const quietHours = require('../utils/quietHours');
 // 延迟使用（函数体内 require）：formAlertService 顶部连着 batchService 重依赖
 // （pdf-lib/exceljs/sharp），采集链路不常驻加载
 let formAlertService = null;
@@ -153,7 +155,8 @@ async function collectFromMessage(payload) {
   // 3b. 打回闸：识别不完整
   if (!result.ok) {
     const text = buildRejectText(result);
-    await bot.sendTextToUser(openId, text).catch(() => {});
+    // 打回回执失败要留痕（2026-11-03 审查 P3：纯静默 catch——队员不知道票被拒、日志无痕）
+    await bot.sendTextToUser(openId, text).catch((err) => console.error('[发票采集] 打回回执发送失败:', err.message));
     return { ok: false, action: 'rejected', reason: result.reason, missing: result.missing };
   }
 
@@ -208,7 +211,9 @@ async function collectFromMessage(payload) {
       '发票号码': f.invoiceNo,
       ...(f.invoiceCode ? { '发票代码': f.invoiceCode } : {}),
       '票种': result.invoiceType || 'unknown',
-      ...(f.issueDate ? { '开票日期': Math.floor(new Date(f.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
+      // NaN 安全（2026-11-03 审查 P2）：非法日期（2/30、13 月等）返回 null 不写该列，
+      // 防「开票日期」空列让三元组查重对这条票永久失效
+      ...(f.issueDate ? { '开票日期': issueDateToMs(f.issueDate) } : {}),
       '价税合计': f.totalAmount,
       ...(f.buyerName ? { '购买方名称': f.buyerName } : {}),
       ...(f.buyerTaxNo ? { '购买方税号': f.buyerTaxNo } : {}),
@@ -276,22 +281,30 @@ async function collectFromMessage(payload) {
     // 抬头/姓名来自外部（发票票面 OCR/队员），卡片 markdown 统一走 stripCardInjection
     //（对抗审查 P2-2：esc 只滤换行不滤 md 语法，钓鱼链接可穿透）
     const esc = (s) => bot.stripCardInjection(String(s)).replace(/[\r\n]/g, ' ').slice(0, 60);
-    try {
-      await bot.sendMessage({
-        config: { wide_screen_mode: true },
-        header: { template: 'red', title: { tag: 'plain_text', content: '🚨 非重大抬头发票已拦截' } },
-        elements: [{
-          tag: 'markdown',
-          content: [
-            `· 提交人：${esc(resolvedName || openId)}`,
-            `· 发票：尾号 ${esc(String(f.invoiceNo).slice(-6))} ¥${f.totalAmount.toFixed(2)}（${esc(result.invoiceType || '发票')}）`,
-            `· 识别抬头：${esc(f.buyerName)}`,
-            `· 已打回提交人核实换票；如属特殊情况请财务在采集表人工登记`,
-          ].join('\n'),
-        }],
-      });
-    } catch (err) {
-      console.error('[发票采集] 抬头警报群播失败:', err.message);
+    const card = {
+      config: { wide_screen_mode: true },
+      header: { template: 'red', title: { tag: 'plain_text', content: '🚨 非重大抬头发票已拦截' } },
+      elements: [{
+        tag: 'markdown',
+        content: [
+          `· 提交人：${esc(resolvedName || openId)}`,
+          `· 发票：尾号 ${esc(String(f.invoiceNo).slice(-6))} ¥${f.totalAmount.toFixed(2)}（${esc(result.invoiceType || '发票')}）`,
+          `· 识别抬头：${esc(f.buyerName)}`,
+          `· 已打回提交人核实换票；如属特殊情况请财务在采集表人工登记`,
+        ].join('\n'),
+      }],
+    };
+    // 静默闸（2026-11-03 审查 P2：此前全仓唯一绕闸的自动群播——夜间队员交错票，
+    // 凌晨红色警报直达财务群）。窗口内落盘积压，09:00 原样补发（一次性事件通知
+    // 语义）；补发处理器在 cron 装配时注册（invoice_buyer_alert）
+    if (quietHours.gatePayload('invoice_buyer_alert', card, '非重大抬头发票警报')) {
+      // 已积压顺延，不直接发送
+    } else {
+      try {
+        await bot.sendMessage(card);
+      } catch (err) {
+        console.error('[发票采集] 抬头警报群播失败:', err.message);
+      }
     }
   }
 

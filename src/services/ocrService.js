@@ -190,7 +190,11 @@ function loadFieldRules() {
 function saveFieldRules(rules) {
   const file = fieldsFilePath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(rules, null, 2), 'utf8');
+  // 原子写（2026-11-03 审查 P3，同 urgeStateStore 口径）：写入中途崩溃留半个 JSON
+  // → 下次加载校验失败回退默认规则，运营台热改的字段规则就丢了
+  const tmpFile = `${file}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(rules, null, 2), 'utf8');
+  fs.renameSync(tmpFile, file);
 }
 
 function getFieldRules() {

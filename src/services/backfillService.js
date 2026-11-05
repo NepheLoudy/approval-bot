@@ -172,7 +172,10 @@ async function doBackfillCollect(options = {}) {
 
   const limit = Math.min(parseInt(options.limit, 10) || 20, 100);
   const sinceDays = Math.min(parseInt(options.sinceDays, 10) || 200, 365);
-  // 定向补采（2026-10-17，制单金额线锁定前用）：只处理指定项目的候选记录
+  // 定向补采（2026-10-17，制单金额线锁定前用）：只处理指定项目的候选记录。
+  // 项目归属走 resolveProject（2026-11-03 对齐统一口径：教师垫付人名项目也能定向；
+  // 宣运物资组别补采传 onlyProjects=['宣运物资']）。两集合同传时按「或」匹配
+  // （金额线补采一次可能同时带人名组与宣运物资组，AND 语义会互相打架）
   const onlyProjects = Array.isArray(options.onlyProjects) && options.onlyProjects.length
     ? new Set(options.onlyProjects) : null;
   // 按发起人定向补采（2026-10-27 分组维度改人名）：匹配审批记录「发起人」第一人姓名
@@ -191,18 +194,33 @@ async function doBackfillCollect(options = {}) {
     if (f['申请状态'] !== config.approvalStatus.APPROVED) return false;
     if (!approvalService.isActiveProcess(f)) return false;
     if (!approvalService.hasInvoiceSubmitted(f)) return false;
-    if (onlyProjects) {
-      const project = f['项目'] ? (f['项目'].name || String(f['项目'])) : '未归类';
-      if (!onlyProjects.has(project)) return false;
-    }
-    if (onlyPersons) {
+    if (onlyProjects && onlyPersons) {
+      // 双定向（或语义，2026-11-03）：命中任一集合即放行
+      const project = approvalService.resolveProject(f);
+      const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '';
+      if (!onlyProjects.has(project) && !(person && onlyPersons.has(person))) return false;
+    } else if (onlyProjects) {
+      if (!onlyProjects.has(approvalService.resolveProject(f))) return false;
+    } else if (onlyPersons) {
       const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '';
       if (!person || !onlyPersons.has(person)) return false;
     }
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     return applyNo && (!collectedApplyNos.has(applyNo) || includeApplyNos.has(applyNo));
   });
-  if (!candidates.length) return { scanned: 0, collected: 0, skipped: 0, failed: 0, errors: ['没有待回填的表格记录'] };
+  if (!candidates.length) {
+    // 定向补采零命中要把定向值带回给调用方（2026-11-03 审查 P2：此前静默零处理，
+    // 定向值写错——如往 onlyPersons 传组别名——看起来像"跑完了"实际一张没扫）
+    const directed = [];
+    if (onlyProjects) directed.push(`onlyProjects=[${[...onlyProjects].join('/')}]`);
+    if (onlyPersons) directed.push(`onlyPersons=[${[...onlyPersons].join('/')}]`);
+    return {
+      scanned: 0, collected: 0, skipped: 0, failed: 0,
+      errors: [directed.length
+        ? `没有待回填的表格记录（定向 ${directed.join('，')}，请核对定向值与表格「项目/发起人」字段值是否一致）`
+        : '没有待回填的表格记录'],
+    };
+  }
 
   const instances = await listInstances(approvalCode, Date.now() - sinceDays * DAY_MS);
   // serial_id（= 表格「申请编号」）→ 候选记录：编号精确匹配索引（2026-10-17 校准升级；
@@ -348,7 +366,8 @@ async function doBackfillCollect(options = {}) {
           '发票号码': fields.invoiceNo,
           ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),
           '票种': parsed.invoiceType || 'unknown',
-          ...(fields.issueDate ? { '开票日期': Math.floor(new Date(fields.issueDate + 'T00:00:00+08:00').getTime()) } : {}),
+          // NaN 安全（2026-11-03 审查 P2）：非法日期返回 null 不写该列，防查重闸失效
+          ...(fields.issueDate ? { '开票日期': require('../utils/time').issueDateToMs(fields.issueDate) } : {}),
           '价税合计': fields.totalAmount,
           ...(fields.buyerName ? { '购买方名称': fields.buyerName } : {}),
           ...(fields.buyerTaxNo ? { '购买方税号': fields.buyerTaxNo } : {}),

@@ -9,7 +9,7 @@ const batchService = require('../services/batchService');
 const bot = require('../feishu/bot');
 
 // ============================================================
-// 定时任务（共四个）：
+// 定时任务（共七个）：
 //   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 //   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,
@@ -20,10 +20,11 @@ const bot = require('../feishu/bot');
 //      私聊后群播「今日已催」卡（今日明细 + 需财务关注 + 未私聊汇总，与周报分开），
 //      当天无私聊催交且无当日状态变化则不发卡)
 //   4. 制单金额线兜底    FORM_ALERT_SCHEDULE               (0 35 10 * * *, 每天10:35,
-//      项目「已开发票且未制单」金额满 FORM_ALERT_AMOUNT（默认500）→ 自动锁定批次发详情卡
-//      （两阶段：confirm 后才生成交付件+二维码卡）；
+//      发起人「已开发票且未制单」金额满 FORM_ALERT_AMOUNT（默认500）→ 自动锁定批次发详情卡
+//      （两阶段：confirm 后才生成交付件+二维码卡）；宣运物资组别走独立线
+//      FORM_ALERT_XUANYUN_AMOUNT 锁 自动-宣运物资-<MMDD>（2026-11-03）；
 //      主触发是发票采集落库后的即时检查（formAlertService.triggerAfterCollect），
-//      本任务兜底防存量满额后无新票、永不触发的漏网；同一项目 24h 冷却不重触发）
+//      本任务兜底防存量满额后无新票、永不触发的漏网；同一分组 24h 冷却不重触发）
 //   5. 打印情况询问      BATCH_PRINT_ASK_SCHEDULE          (0 15 * * * *, 每小时15分,
 //      交付确认超 BATCH_PRINT_ASK_DELAY_HOURS（默认12h）未回复打印完成的批次 → 群发询问卡
 //      引导 /approval-batch printed <批次号>；每批只自动问一次；发送过晚间静默闸顺延）
@@ -126,6 +127,11 @@ const quietTaskRunners = {
   print_ask: () => withRetry('print_ask', () => askPendingPrintConfirm()),
   confirm_remind: () => withRetry('confirm_remind', () => remindUnconfirmedBatches()),
 };
+
+// 一次性载荷补发处理器（2026-11-03 审查 P2）：抬头警报卡此前是全仓唯一绕静默闸的
+// 自动群播（夜间队员交错票 → 凌晨红色警报直达财务群）；改为 gatePayload 落盘积压、
+// 窗口结束原样补发（一次性事件通知语义）。模块加载即注册（幂等，stub 可断言）
+quietHours.registerPayloadHandler('invoice_buyer_alert', async (card) => { await bot.sendMessage(card); });
 
 /**
  * 打印情况询问（2026-09-29 曼波定两阶段流程收尾）：确认交付超 12h 未回复打印完成的
@@ -396,6 +402,7 @@ function getCronStatus() {
       formAlert: !!formAlertTask,
       printAsk: !!printAskTask,
       replyPoll: !!replyPollTask,
+      confirmRemind: !!confirmRemindTask, // 2026-11-03 审查 P3 补齐（schedules/nextExecution 均有独缺它）
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,

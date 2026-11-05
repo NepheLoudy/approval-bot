@@ -106,9 +106,16 @@ function collectToItem(r, byApplyNo) {
     applyLink: af['申请编号'] && typeof af['申请编号'] === 'object' ? String(af['申请编号'].link || '') : '',
     remark: String(f['备注'] || ''),
     // 特殊事项触发源（2026-09-27 曼波反馈：公私属性不分明/大额票要单独排纸——
-    // 表单字段名自带触发规则，非空即命中；值为审批管理员预览链接 {link,text}）
-    payRecord: af['支付记录（大于800元或宣传材料需要）'] || null,
+    // 表单字段名自带触发规则，非空即命中；值为审批管理员预览链接 {link,text}。
+    // 2026-11-03 实查：表单列已改名「支付记录（大于500元或公私属性不分明及宣传材料需要）」，
+    // 旧名「大于800元…」恒 undefined → 支付记录触发失效；新名优先、旧名兜底）
+    payRecord: af['支付记录（大于500元或公私属性不分明及宣传材料需要）']
+      || af['支付记录（大于800元或宣传材料需要）']
+      || null,
     evidencePhoto: af['实物佐证照片（公私属性不分明或宣传材料需要）-副本'] || null,
+    // 审批「说明购买理由和用途」原文（2026-11-03 曼波定：宣运物资批次的物料清单
+    // 用途列 = 该栏文本一一对应；实查该列 206 条全有值）
+    usage: fieldText(af['说明购买理由和用途']),
     // 人机制单去重标记（2026-09-29 曼波定）：审批表「是否打印=是」= 财务自行制单打印，
     // 该票不进票池/不参与机器人制单；regen 侧不受此过滤（已归批票照常重生成附件）
     printed: fieldText(af['是否打印']) === '是',
@@ -227,7 +234,9 @@ async function getUnbatchedInvoicedByProject() {
 
 /** 「已开发票且未制单」按发起人汇总（2026-10-27 曼波定：制单金额线分组维度从项目改人名
  *  ——个人满 500 锁一批归档）。过滤口径与按项目版完全一致，仅聚合键换成发起人姓名。
- * @returns {Map<personName, {count, amount}>}
+ *  例外（2026-11-03 曼波定）：宣运物资组别记录不按人记 500 线，统一并入「宣运物资」
+ *  组键，由 formAlertService 按独立警戒线（FORM_ALERT_XUANYUN_AMOUNT）判定。
+ * @returns {Map<personName|'宣运物资', {count, amount}>}
  */
 async function getUnbatchedInvoicedByPerson() {
   const all = await approvalService.getAllApprovals();
@@ -241,16 +250,18 @@ async function getUnbatchedInvoicedByPerson() {
     if (applyNo && collectedNos.has(applyNo)) continue;
     if (!approvalService.hasInvoiceSubmitted(f)) continue;
     const form = f['报销单'];
-    if (form !== null && form !== undefined && form !== '') continue;
+    if (form !== null && form !== undefined && form !== '') continue; // 已制单
     if (fieldText(f['是否打印']) === '是') continue;
     const raw = f['总金额'];
     const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
     if (!(amount > 0)) continue;
     const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '未知发起人';
-    const agg = byPerson.get(person) || { count: 0, amount: 0 };
+    // 宣运物资组记录不占发起人名下的 500 线额度，归入组键走独立线
+    const group = approvalService.isXuanYunGroup(f) ? approvalService.XUANYUN_GROUP : person;
+    const agg = byPerson.get(group) || { count: 0, amount: 0 };
     agg.count++;
     agg.amount = Math.round((agg.amount + amount) * 100) / 100;
-    byPerson.set(person, agg);
+    byPerson.set(group, agg);
   }
   return byPerson;
 }
@@ -808,6 +819,94 @@ async function uploadBatchBom(batchNo, items) {
 const YELLOW_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
 const SONG = { name: '宋体', family: 3, charset: 134 };
 
+// ---------- 宣运物资实物图（2026-11-03 曼波定：采购类型列改嵌实物图） ----------
+// 实证链路（勿回退到表格「示意图」列）：审批表没有「实物图」附件列；「示意图」列是
+// Url 形态，存的是飞书管理端 previewAttachment 链接——服务端裸抓回来是 HTML 登录壳
+// （实测 HTTP 200 text/html），不可用。可用链路=审批实例 OpenAPI：
+//   APPROVAL_CODE → POST /approval/v4/instances/query（serial_id==申请编号）取 instance code
+//   → GET /approval/v4/instances/:code → form 控件「示意图」（type=image）
+//   → value = 签名 CDN 直链数组（实测 image/jpg 裸 GET 可达，多图记录一条挂 6 张全 200）。
+// 直链带 x-expires（实测约 20h 效期）→ **锁定批次当下即时拉图嵌入**，不能存链接复用；
+// instance code / 签名链接都按申请编号做进程内缓存（confirm/regen 重生成时实例查询不重打）。
+
+const physicalPhotoCache = new Map(); // applyNo -> Buffer[]（已下载的实物图）
+const instanceCodeCache = new Map();  // applyNo -> 审批实例 code
+
+/** 审批实例 code 查找（serial_id == 申请编号；带缓存，找不到缓存 null 防重复扫全窗） */
+async function findInstanceCodeByApplyNo(applyNo) {
+  if (instanceCodeCache.has(applyNo)) return instanceCodeCache.get(applyNo);
+  const approvalCode = process.env.APPROVAL_CODE || '';
+  let result = null;
+  if (approvalCode) {
+    try {
+      const backfillService = require('./backfillService');
+      // 30 天分片往回扫（接口硬限，1390001）；宣运物资申请都是近期票，200 天窗足够
+      const instances = await backfillService.listInstances(approvalCode, Date.now() - 200 * 24 * 3600 * 1000);
+      const hit = instances.find(inst => inst.serialId === String(applyNo));
+      result = hit ? hit.code : null;
+    } catch (err) {
+      console.warn(`[批次] 审批实例查找失败（${applyNo}，实物图列将留空）:`, err.message);
+    }
+  } else {
+    console.warn('[批次] 未配置 APPROVAL_CODE，无法拉取审批实例示意图（实物图列将留空）');
+  }
+  instanceCodeCache.set(applyNo, result);
+  return result;
+}
+
+/** 单条申请的实物图 buffers（审批实例「示意图」image 控件的签名 CDN 直链即时下载；
+ *  失败返回 [] 不阻断清单生成——缺图行在「采购类型」列如实标注） */
+async function fetchPhysicalPhotos(applyNo) {
+  if (!applyNo) return [];
+  if (physicalPhotoCache.has(applyNo)) return physicalPhotoCache.get(applyNo);
+  const photos = [];
+  try {
+    const instanceCode = await findInstanceCodeByApplyNo(applyNo);
+    if (instanceCode) {
+      const client = require('../feishu/client');
+      const detail = await client.getApprovalInstance(instanceCode);
+      if (detail.code === 0) {
+        let form = detail.data?.form;
+        if (typeof form === 'string') { try { form = JSON.parse(form); } catch { form = []; } }
+        const photoCtl = (Array.isArray(form) ? form : []).find(c => String(c.name || '').trim() === '示意图');
+        const urls = photoCtl && Array.isArray(photoCtl.value) ? photoCtl.value.filter(u => /^https:\/\//.test(String(u))) : [];
+        for (const url of urls.slice(0, 10)) { // 上限护栏：异常大附件列表不全拉
+          const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
+          const ct = resp.headers.get('content-type') || '';
+          const buf = Buffer.from(await resp.arrayBuffer());
+          // 拿回来必须是图（签名过期/受限会 200 返回 HTML 壳——按魔数验）
+          if (resp.ok && /^image\//.test(ct) && buf.length > 100
+            && ((buf[0] === 0xFF && buf[1] === 0xD8) || (buf[0] === 0x89 && buf[1] === 0x50))) {
+            photos.push(buf);
+          } else {
+            console.warn(`[批次] 实物图下载异常（${applyNo}）: HTTP ${resp.status} ${ct} ${buf.length}B（跳过该张）`);
+          }
+        }
+      } else {
+        console.warn(`[批次] 审批实例详情读取失败（${applyNo}）: ${detail.msg} (code: ${detail.code})`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[批次] 实物图拉取失败（${applyNo}，清单该行采购类型列标注缺图）:`, err.message);
+  }
+  physicalPhotoCache.set(applyNo, photos);
+  return photos;
+}
+
+/** 批内所有宣运物资票的实物图并行预热（lock/confirm 主链不串行等单张下载） */
+async function prefetchPhysicalPhotos(items) {
+  const xyItems = items.filter(i => String(i.project || '').trim() === approvalService.XUANYUN_GROUP && i.applyNo);
+  await Promise.all(xyItems.map(i => fetchPhysicalPhotos(i.applyNo)));
+}
+
+/** 缓存预算上限（200 实例码 + 200 条申请的图 buffers；超限整体清空——低频路径不精细管理） */
+function trimPhysicalPhotoCache() {
+  if (instanceCodeCache.size > 200 || physicalPhotoCache.size > 200) {
+    instanceCodeCache.clear();
+    physicalPhotoCache.clear();
+  }
+}
+
 async function uploadBatchMaterialList(batchNo, items, meta = {}) {
   const purpose = String(meta.purpose || '').trim();
   // 采购类型（2026-10-19 曼波定恢复为最后一列，取值「机器人零件」/「耗材」——
@@ -835,18 +934,32 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
     c.alignment = { vertical: 'middle' };
   });
 
+  // 实物图预热（2026-11-03 曼波定：宣运物资批次的「采购类型」列=每条记录的实物图
+  // 一一对应嵌入。并行预热在写行前完成，签名 CDN 直链即时拉图——链接约 20h 过期，
+  // 不能存链接复用；失败行如实标注，不阻断清单生成）
+  const isXuanYunBatch = items.some(i => String(i.project || '').trim() === approvalService.XUANYUN_GROUP);
+  if (isXuanYunBatch) {
+    await prefetchPhysicalPhotos(items);
+    trimPhysicalPhotoCache();
+  }
+
   // 数据行：项目列 = 开票内容（票面货物文本，多货品发票取第一个货品——曼波 2026-10-12 口径）；
   // qrcode 通道的票二维码里没有票面文本、开票内容必然为空 → 回落审批表「购买物资名称」
   // （队员申报必填，与货品语义同源）；两者都无才标黄留空现场补。
-  // 用途列 = 该票审批记录的「项目」分类（2026-10-12 曼波：用途应从审批的项目分类来，
-  // 如「步兵机器人」而非批次用途「对抗赛」），无审批关联才回落批次用途
+  // 用途列（2026-10-12 曼波口径）= 该票审批记录的「项目」分类（如「步兵机器人」），
+  // 无审批关联才回落批次用途；
+  // 例外（2026-11-03 曼波定）：宣运物资组别的票用途列 = 审批「说明购买理由和用途」
+  // 栏原文一一对应（该组每条记录的用途就是清单要的用途，不再套项目分类），
+  // 该栏为空才回落原口径
   items.forEach((item, i) => {
     const row = ws.getRow(3 + i);
+    const isXuanYun = String(item.project || '').trim() === approvalService.XUANYUN_GROUP;
+    const purposeFallback = String(item.project || '').trim() || purpose;
     const values = [
       i + 1,
       String(item.invoiceContent || '').trim() || String(item.material || '').trim(),
       item.totalAmount,
-      String(item.project || '').trim() || purpose,
+      isXuanYun ? (String(item.usage || '').trim() || purposeFallback) : purposeFallback,
       purchaseType,
     ];
     const missingContent = !(values[1]);
@@ -857,6 +970,34 @@ async function uploadBatchMaterialList(batchNo, items, meta = {}) {
       c.alignment = { vertical: 'middle' };
       if (col === 1 && missingContent) c.fill = YELLOW_FILL;
     });
+
+    // 采购类型列例外（2026-11-03 曼波定）：宣运物资批次该列 = 每条记录的实物图
+    // 一一对应嵌入（数据源=审批实例「示意图」image 控件签名直链，锁定当下即时拉取）。
+    // 首图嵌单元格，多图纵向铺在行内补高行高；拿不到图的行标注「缺实物图」供现场核对
+    if (isXuanYun) {
+      const cell = row.getCell(5);
+      cell.value = null;
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      const photos = item.applyNo ? (physicalPhotoCache.get(String(item.applyNo)) || []) : [];
+      if (!photos.length) {
+        cell.value = item.applyNo ? '缺实物图' : '无关联申请';
+        cell.font = { ...SONG, size: 9 };
+        cell.fill = YELLOW_FILL;
+      } else {
+        const imgRowHeight = Math.max(row.height || 14, photos.length * 84 + 6);
+        row.height = imgRowHeight;
+        photos.forEach((png, k) => {
+          // extn 匹配魔数：jpg = FFD8 / png = 8950（审批示意图实测 image/jpg）
+          const isPng = png.length > 1 && png[0] === 0x89 && png[1] === 0x50;
+          const imgId = wb.addImage({ buffer: png, extension: isPng ? 'png' : 'jpeg' });
+          // 图片浮层锚在 E 列本行，逐张纵向偏移（每张 80px 高、缩放保比例）
+          ws.addImage(imgId, {
+            tl: { col: 4.05, row: 2 + i + k * (80 / imgRowHeight) },
+            ext: { width: 80, height: 80 },
+          });
+        });
+      }
+    }
   });
 
   // 总金额行（模板：B 列标签右对齐 + C 列 SUM 公式）
@@ -1403,17 +1544,21 @@ async function confirmDelivery(batchNo, operator = '') {
 
 /** 打印完成标记（12h 询问流程的收尾）：财务回复后更新打印确认留痕 */
 async function markPrinted(batchNo, operator = '') {
-  const batch = await collectStore.findBatchByName(batchNo);
-  if (!batch) throw new Error(`批次不存在：${batchNo}`);
-  const status = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
-  if (status !== collectStore.BATCH_STATUS.LOCKED && status !== collectStore.BATCH_STATUS.SUBMITTED) {
-    throw new Error(`批次 ${batchNo} 状态【${status}】不可标记打印完成`);
-  }
-  await collectStore.updateBatch(batch.record_id, {
-    '打印确认人': operator || '财务确认',
-    '打印确认时间': Date.now(),
+  // 按批次号加锁（2026-11-03 审查 P3：与 lock/mark/claim/confirm 全锁口径对齐，
+  // findBatchByName→updateBatch 之间有 await 点）
+  return withLock(`batch_${batchNo}`, async () => {
+    const batch = await collectStore.findBatchByName(batchNo);
+    if (!batch) throw new Error(`批次不存在：${batchNo}`);
+    const status = batch.fields['状态'] || collectStore.BATCH_STATUS.LOCKED;
+    if (status !== collectStore.BATCH_STATUS.LOCKED && status !== collectStore.BATCH_STATUS.SUBMITTED) {
+      throw new Error(`批次 ${batchNo} 状态【${status}】不可标记打印完成`);
+    }
+    await collectStore.updateBatch(batch.record_id, {
+      '打印确认人': operator || '财务确认',
+      '打印确认时间': Date.now(),
+    });
+    return { batchNo };
   });
-  return { batchNo };
 }
 
 /**
@@ -1538,6 +1683,7 @@ module.exports = {
   uploadBatchMaterialList,
   uploadBatchScanSheetDocx,
   buildBatchQrImages,
+  fetchPhysicalPhotos, // 宣运物资实物图（stub 测试与缺图核对用；主链内部走 prefetch）
   confirmDelivery,
   markPrinted,
   getPrintAskTargets,
