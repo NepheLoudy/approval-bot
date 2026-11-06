@@ -238,8 +238,9 @@ const commandHandlers = {
 
 /**
  * 资金指令白名单闸（2026-09-27 对抗审查 P1）：APPROVAL_FUND_OPERATOR_IDS 配置后，
- * lock/submit/paid/reject 仅限名单内 open_id（以 hub 透传的 senderId 为准，
- * 自报 senderName 不可信）；未配置 = 维持现状不限（回执仍显示操作人校验状态）。
+ * lock/submit/paid/reject/printed 仅限名单内 open_id（以 hub 透传的 senderId 为准，
+ * 自报 senderName 不可信；printed 2026-11-06 曼波批入列——它写台账真账）；未配置 = 维持现状
+ * 不限（回执仍显示操作人校验状态）。
  * 放行返回空串；拦截返回错误文案（executeCommand 直接回群，不抛错）。
  */
 function fundOperatorDenied(ctx = {}) {
@@ -247,7 +248,7 @@ function fundOperatorDenied(ctx = {}) {
   if (!allowed.length) return '';
   const senderId = ctx.senderId || '';
   if (senderId && allowed.includes(senderId)) return '';
-  return '❌ 未获资金指令权限：lock/submit/paid/reject 已启用操作人白名单（APPROVAL_FUND_OPERATOR_IDS），请联系管理员把你的 open_id 加入名单';
+  return '❌ 未获资金指令权限：lock/submit/paid/reject/printed 已启用操作人白名单（APPROVAL_FUND_OPERATOR_IDS），请联系管理员把你的 open_id 加入名单';
 }
 
 /**
@@ -476,8 +477,11 @@ async function handleBatchCommand(args = [], ctx = {}) {
 
   if (sub === 'printed') {
     // 打印完成标记（2026-09-29 两阶段流程收尾）：12h 询问后财务回复确认。
-    // 2026-11-06 曼波定：打印回执即记账——标记完成的同时台账自动预登记（行不存在才追加）
+    // 2026-11-06 曼波定：打印回执即记账——标记完成的同时台账自动预登记（行不存在才追加）；
+    // 同批挂资金指令白名单（printed 会写台账真账，与 lock/submit/paid/reject/ledger 同口径）
     if (!args[1]) return '❌ 用法：/approval-batch printed <批次号>（标记该批发票已打印完成，同时台账自动预登记）';
+    const denied = fundOperatorDenied(ctx);
+    if (denied) return denied;
     const { operator } = await resolveOperator(ctx);
     await batchService.markPrinted(args[1], operator);
     const lines = [`🖨️ 批次 ${args[1]} 已标记打印完成（${operator || '财务确认'}）。`];

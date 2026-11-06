@@ -589,6 +589,8 @@ async function main() {
   assert.match(denyLock, /未获资金指令权限/, '白名单外 lock 被拒');
   const denyPaid = await chatServiceFresh.executeCommand('/approval-batch', ['paid', '27并发状态批次'], { senderId: 'ou_other' });
   assert.match(denyPaid, /未获资金指令权限/, '白名单外 paid 被拒');
+  const denyPrinted = await chatServiceFresh.executeCommand('/approval-batch', ['printed', '27白名单批次'], { senderId: 'ou_other' });
+  assert.match(denyPrinted, /未获资金指令权限/, '白名单外 printed 被拒（写台账真账同挂资金名单，2026-11-06）');
   // 放行路径：名单内 open_id 正常锁定（给票池补一张可锁的票）
   collectStore.listCollect = async () => [{ record_id: 'wl1', fields: { '发票号码': 'WL1', '价税合计': 5, '采集时间': 600 } }];
   const allowLock = await chatServiceFresh.executeCommand('/approval-batch', ['lock', '27白名单内批次'], { senderId: 'ou_hh', senderName: '贺韵洁' });

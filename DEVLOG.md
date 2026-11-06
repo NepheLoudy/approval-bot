@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v92**（2026-11-06，发票下载修复（bitable 高级权限 extra 鉴权）+台账 printed 预登记（打印回执即记账），全套桩测试全绿）。上一版 v91（2026-11-05，宣运物资组别线+全量审查 P1 收口（buyer_alert 接线）+11-03 遗留批合并入库）。上一版 v90（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。更早 v89~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
+当前最新：**v93**（2026-11-06，printed 挂资金白名单+财务协作指南补「指令优先」段（曼波批「都做」），全套桩测试全绿）。上一版 v92（2026-11-06，发票下载修复（bitable 高级权限 extra 鉴权）+台账 printed 预登记）。上一版 v91（2026-11-05，宣运物资组别线+全量审查 P1 收口（buyer_alert 接线）+11-03 遗留批合并入库）。上一版 v90（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。更早 v89~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -738,3 +738,12 @@
 - **采集链加固（排查副产物）**：backfill `downloadByUrl` 拒收空响应/text/html（登录壳/失效跳转不再被静默上传成坏 token）；采集/backfill 两处 `uploadMediaToBitable().catch(()=>null)` 补显式报错日志。
 - **测试**：stub-test-ledger 新增 printed 预登记 4 断言（落行格式/幂等/submit 三列补填/全齐无写入）；顺带修正写表桩潜伏缺陷（无视列字母一律从 A 列落——部分列写入实际落错列，新用例首次回读网格暴露）。全套桩测试全绿。
 - **遗留提醒**：duty-bot 等仓的 bitable base 若同样被开高级权限，附件下载会以同症状 400（本修复模式可平移）；printed 不在资金白名单（lock/submit/paid/reject/ledger 挂），现在它写台账了是否纳入名单待曼波裁定。
+
+## v93 · 2026-11-06 · 随本提交落地 · fix/docs
+
+**printed 挂资金白名单 + 财务协作指南「指令优先」段（曼波批 v92 遗留两裁决点「都做」）**
+
+- **printed 入资金白名单**：fundOperatorDenied 指令清单 lock/submit/paid/reject → lock/printed/submit/paid/reject/ledger（printed 自 v92 起写台账真账，与 ledger 子指令同口径）；chatService printed 分支在 resolveOperator 前挂闸（照 submit 分支先例）；拒绝文案同步更新。贺韵洁本就在名单（10-27 有 submit 留痕），无操作断点。
+- **财务协作指南补段**：第 2 步尾加 printed 步骤（打印完成即发）；第 3 步台账同步描述改「printed 预登记 → submit 补齐 → paid/reject 回填」三段式；新增 ⚠️ 提醒块「到账/退回请发指令别手填表」（手填绕过队员到账私聊闭环）+ 手填行兼容说明（机器人按摘要只补空格不重复加行）；FAQ 新增 Q8（到账手填行不行→尽量 paid，已手填补 paid 也不冲突）；台账与周报段、操作留痕段同步白名单六指令口径。
+- **AGENTS.md 口径同步**：资金指令段补 v93 白名单清单；printed 流程段补台账预登记口径。
+- **测试**：stub-test-delivery 白名单段新增 printed 拒绝断言（名单外 printed 被拒）；全套桩测试全绿。
