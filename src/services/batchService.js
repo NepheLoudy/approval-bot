@@ -95,6 +95,12 @@ function collectToItem(r, byApplyNo) {
     project: approvalService.resolveProject(af),
     applicant: Array.isArray(af['发起人']) ? af['发起人'].map(u => u.name).join(',') : '',
     fileTokens: Array.isArray(f['发票图片']) ? f['发票图片'].map(a => a.file_token).filter(Boolean) : [],
+    // 预鉴权下载 url（token → url）：高级权限 base 的附件下载接口要求带 extra 参数鉴权
+    // （2026-11-06 鄢政批次实案——裸 token 下载全体 400，官方口径见素材概述-extra 参数说明），
+    // 记录接口对附件字段自带烤好 extra 的 url；无高级权限的 base 无该字段，回落裸 token 下载
+    fileUrls: Array.isArray(f['发票图片'])
+      ? Object.fromEntries(f['发票图片'].filter(a => a && a.file_token && a.url).map(a => [a.file_token, a.url]))
+      : {},
     verifyStatus: f['校验状态'] || '',
     invoiceCode: String(f['发票代码'] || ''),
     invoiceType: String(f['票种'] || ''),
@@ -600,11 +606,12 @@ async function doRegenerateBatchFiles(batchNo) {
   // 超 hub 60s 转发超时 → 群里先出「服务暂不可用」兜底错、卡延后到——本次缓存+并行一次下完，
   // 全链压进 60s，回复与交付卡一次性完整发出）
   const dlCache = new Map();
+  const urlByToken = Object.assign({}, ...items.map(i => i.fileUrls || {}));
   const allTokens = [...new Set(items.flatMap(i => i.fileTokens))];
   const CHUNK = 5;
   for (let i = 0; i < allTokens.length; i += CHUNK) {
     await Promise.all(allTokens.slice(i, i + CHUNK).map(async (token) => {
-      dlCache.set(token, await downloadMediaSafe(token));
+      dlCache.set(token, await downloadMediaSafe(token, null, urlByToken));
     }));
   }
 
@@ -668,10 +675,18 @@ async function doRegenerateBatchFiles(batchNo) {
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
 
-async function downloadMediaSafe(fileToken, dlCache = null) {
+async function downloadMediaSafe(fileToken, dlCache = null, urlByToken = null) {
   if (dlCache && dlCache.has(fileToken)) return dlCache.get(fileToken);
   try {
-    const buf = await client.downloadMedia(fileToken);
+    // 高级权限 base：优先走记录接口的预鉴权 url（含 extra 鉴权参数）；失败回落裸 token
+    // （低级权限 base 无 url，裸 token 直下；两类 base 同一入口兼容）
+    const url = urlByToken && urlByToken[fileToken];
+    const buf = url
+      ? await client.downloadMediaByUrl(url).catch(async (err) => {
+          console.warn(`[批次] 预鉴权 url 下载失败（${String(fileToken).slice(0, 12)}…）: ${err.message}，回落裸 token`);
+          return client.downloadMedia(fileToken);
+        })
+      : await client.downloadMedia(fileToken);
     if (dlCache) dlCache.set(fileToken, buf);
     return buf;
   } catch (err) {
@@ -692,7 +707,7 @@ async function uploadBatchPdf(batchNo, items, opts = {}) {
       continue;
     }
     for (const token of item.fileTokens) {
-      const buf = await downloadMediaSafe(token, dlCache);
+      const buf = await downloadMediaSafe(token, dlCache, item.fileUrls);
       if (!buf) {
         addPlaceholderPage(out, index, item, '票面原件下载失败，请财务手工补');
         index++;
@@ -1140,7 +1155,7 @@ async function uploadBatchDocx(batchNo, items, opts = {}) {
       continue;
     }
     for (const token of item.fileTokens) {
-      let buf = await downloadMediaSafe(token, dlCache);
+      let buf = await downloadMediaSafe(token, dlCache, item.fileUrls);
       if (!buf) {
         children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件下载失败，请财务手工补', color: 'FF0000' })] }));
         continue;
@@ -1200,7 +1215,7 @@ async function buildBatchQrImages(items, opts = {}) {
     let payload = item.qrPayload || '';
     if (!payload && item.fileTokens.length) {
       for (const token of item.fileTokens) {
-        const buf = await downloadMediaSafe(token, dlCache);
+        const buf = await downloadMediaSafe(token, dlCache, item.fileUrls);
         if (!buf) continue;
         try {
           if (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF') {

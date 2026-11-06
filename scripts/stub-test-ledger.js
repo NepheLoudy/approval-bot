@@ -40,10 +40,14 @@ client.requestAPI = async (method, urlPath, body) => {
     const m = String(vr.range).match(/shTest!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
     assert.ok(m, `写入 range 形如 shTest!A5:M5（实际 ${vr.range}）`);
     const startRow = Number(m[2]);
+    // 列字母 → 0 基列号（B→1/K→10/M→12）：此前无视列字母一律从 A 列写，部分列写入
+    // （L6:M6/B9:B9 等）实际落错列——2026-11-06 printed 补填用例首次回读网格才暴露
+    const colIdx = (s) => { let c = 0; for (const ch of s) c = c * 26 + (ch.charCodeAt(0) - 64); return c - 1; };
+    const startCol = colIdx(m[1]);
     writes.push({ range: vr.range, values: vr.values });
     vr.values.forEach((row, i) => {
       const target = grid[startRow - 1 + i] || (grid[startRow - 1 + i] = Z());
-      row.forEach((v, col) => { target[col] = v; });
+      row.forEach((v, j) => { target[startCol + j] = v; });
     });
     return { code: 0, data: {} };
   }
@@ -228,6 +232,47 @@ async function main() {
   const ambReply = await chatService.executeCommand('/approval-batch', ['ledger', 'paid', '27对抗赛无人机26']);
   assert.match(ambReply, /台账存在多行同摘要，请人工处理/, 'ambiguous 回执提示人工处理');
   grid.pop();
+
+  // ==================== 2026-11-06 printed 预登记批（曼波定：打印回执即记账） ====================
+
+  // ---------- printed：追加预登记行（投递日期/状态留空，格式照历史台账人工行） ----------
+  batches['27对抗赛预登记28'] = { record_id: 'bat28', fields: {
+    '批次号': '27对抗赛预登记28', '摘要': '机甲大师实验室-27赛季-对抗赛-步兵-材料费-第二十八笔',
+    '金额合计': 77.7, '锁定时间': new Date('2026-11-06T10:35:00+08:00').getTime(),
+    '接取人': '贺韵洁', '收款方': '', '收款账号': '',
+  } };
+  writes = [];
+  const p1 = await ledgerSheetService.syncOnSubmit('27对抗赛预登记28', '', { stage: 'printed' });
+  assert.equal(p1.action, 'appended', 'printed 追加预登记行');
+  assert.equal(p1.rowIndex, 9, '并发测试后首个空行');
+  assert.equal(writes[0].range, 'shTest!A9:M9');
+  assert.equal(p1.row[9], '2026/11/6', '申请日期=锁定日（人工填写风格）');
+  assert.equal(p1.row[10], '', '投递日期留空（未提交学校不撒谎）');
+  assert.equal(p1.row[12], '', '状态留空（历史台账人工行同款口径）');
+
+  // ---------- printed：幂等（行已在即跳过，不写表） ----------
+  writes = [];
+  const p2 = await ledgerSheetService.syncOnSubmit('27对抗赛预登记28', '', { stage: 'printed' });
+  assert.equal(p2.action, 'exists', 'printed 幂等：行已在');
+  assert.equal(writes.length, 0, 'printed 幂等不写表');
+
+  // ---------- submit 补填：printed 预登记行 + submit（带单号）→ 补 B/K/M 三空列，L 不碰 ----------
+  writes = [];
+  const p3 = await ledgerSheetService.syncOnSubmit('27对抗赛预登记28', '8472331');
+  assert.equal(p3.action, 'exists', 'submit 命中预登记行');
+  assert.equal(p3.updated, 'deliveryNo,deliverDate,status', '三空列全补');
+  assert.equal(writes.length, 3, '三处补填各一次写入');
+  const byRange = Object.fromEntries(writes.map(w => [w.range, w.values[0][0]]));
+  assert.equal(byRange['shTest!B9:B9'], 8472331, '补投递单号（纯数字写数值）');
+  assert.match(byRange['shTest!K9:K9'], /^\d{4}\/\d{1,2}\/\d{1,2}$/, '补投递日期');
+  assert.equal(byRange['shTest!M9:M9'], '已提交至中心', '补状态');
+
+  // ---------- submit 幂等收尾：三列已齐 → 再 submit 无写入 ----------
+  writes = [];
+  const p4 = await ledgerSheetService.syncOnSubmit('27对抗赛预登记28', '8472331');
+  assert.equal(p4.action, 'exists');
+  assert.equal(p4.updated, undefined, '无空列可补时不带 updated');
+  assert.equal(writes.length, 0, '全部已齐不写表');
 }
 
 (async () => {

@@ -206,7 +206,10 @@ async function collectFromMessage(payload) {
 
     // 7. 发票原件转存附件 + 落采集表（真源）
     const ext = msgType === 'file' ? 'pdf' : 'jpg';
-    const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${f.invoiceNo}.${ext}`).catch(() => null);
+    const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${f.invoiceNo}.${ext}`).catch((err) => {
+      console.error(`[发票采集] 发票原件上传失败（尾号 ${String(f.invoiceNo).slice(-6)}，将落无附件记录）: ${err.message}`);
+      return null;
+    });
     const collectFields = {
       '发票号码': f.invoiceNo,
       ...(f.invoiceCode ? { '发票代码': f.invoiceCode } : {}),

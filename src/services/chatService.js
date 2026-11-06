@@ -83,7 +83,7 @@ async function handleHelpCommand() {
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
     '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
     '                    submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
-    '                    （confirm=确认自动批次明细后才生成交付件与二维码；printed=标记打印完成；submit/paid/reject 自动同步《报销台账》）',
+    '                    （confirm=确认自动批次明细后才生成交付件与二维码；printed=标记打印完成并自动预登记《报销台账》；submit/paid/reject 自动同步《报销台账》）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
@@ -475,11 +475,15 @@ async function handleBatchCommand(args = [], ctx = {}) {
   }
 
   if (sub === 'printed') {
-    // 打印完成标记（2026-09-29 两阶段流程收尾）：12h 询问后财务回复确认
-    if (!args[1]) return '❌ 用法：/approval-batch printed <批次号>（标记该批发票已打印完成）';
+    // 打印完成标记（2026-09-29 两阶段流程收尾）：12h 询问后财务回复确认。
+    // 2026-11-06 曼波定：打印回执即记账——标记完成的同时台账自动预登记（行不存在才追加）
+    if (!args[1]) return '❌ 用法：/approval-batch printed <批次号>（标记该批发票已打印完成，同时台账自动预登记）';
     const { operator } = await resolveOperator(ctx);
     await batchService.markPrinted(args[1], operator);
-    return `🖨️ 批次 ${args[1]} 已标记打印完成（${operator || '财务确认'}）。接下来照常 submit/paid 走资金流转。`;
+    const lines = [`🖨️ 批次 ${args[1]} 已标记打印完成（${operator || '财务确认'}）。`];
+    lines.push(await syncLedgerQuietly('printed', args[1]));
+    lines.push('接下来照常 submit/paid 走资金流转。');
+    return lines.filter(Boolean).join('\n');
   }
 
   return '❌ 子指令不支持。用法：/approval-batch [preview] | lock <批次号> [项目] [用途=xx] | status | submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]';
@@ -493,10 +497,25 @@ async function handleBatchCommand(args = [], ctx = {}) {
 async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
   try {
     const ledger = require('./ledgerSheetService');
+    if (sub === 'printed') {
+      // 打印回执即记账（2026-11-06 曼波定）：台账自动预登记，写失败不影响打印标记
+      const ls = await ledger.syncOnSubmit(batchNo, '', { stage: 'printed' });
+      if (ls.action === 'appended') return `· 📗 台账已预登记：第 ${ls.rowIndex} 行（提交后 ${deliveryNo ? 'submit 补投递单号/日期/状态' : 'submit 会补投递单号/日期/状态'}）`;
+      if (ls.action === 'exists') return `· 📗 台账已有该批次行（第 ${ls.rowIndex} 行），未重复登记`;
+      if (ls.action === 'no_summary') return '· ⚠️ 台账未登记：该批次无摘要（旧批次），请人工登记';
+      if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未追加、未改动）';
+      if (ls.action === 'disabled') return '· ⚠️ 未配置台账表（LEDGER_SPREADSHEET_TOKEN），同步关闭';
+      return '';
+    }
     if (sub === 'submit') {
       const ls = await ledger.syncOnSubmit(batchNo, deliveryNo);
       if (ls.action === 'appended') return `· 📗 台账已同步：第 ${ls.rowIndex} 行（投递单号${deliveryNo ? '已填' : '留空，可在表内补'}）`;
-      if (ls.action === 'exists') return `· 📗 台账已有该批次行（第 ${ls.rowIndex} 行），未重复添加${ls.updated === 'deliveryNo' ? '，已补填投递单号' : ''}`;
+      if (ls.action === 'exists') {
+        const filledText = ls.updated
+          ? `，已补填${ls.updated.split(',').map(s => ({ deliveryNo: '投递单号', deliverDate: '投递日期', status: '状态' }[s] || s)).join('/')}`
+          : '';
+        return `· 📗 台账已有该批次行（第 ${ls.rowIndex} 行）${filledText}，未重复添加`;
+      }
       if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次），请人工登记';
       if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未追加、未改动）';
       return '';

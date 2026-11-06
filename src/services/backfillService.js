@@ -90,7 +90,9 @@ function extractAttachmentRefs(formValue) {
   return found;
 }
 
-/** 附件直链下载（attachmentV2 value 的 authcode 免登直链，裸 GET 即得文件本体；20s 超时） */
+/** 附件直链下载（attachmentV2 value 的 authcode 免登直链，裸 GET 即得文件本体；20s 超时）。
+ *  2026-11-06 加固：空响应/text/html（登录壳、失效跳转页）一律拒收——此前空壳字节会被
+ *  静默上传成坏 token（渲染时占位页「下载失败」，排查时难分采集坏与下载坏）。 */
 async function downloadByUrl(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -103,7 +105,10 @@ async function downloadByUrl(url) {
     } catch (e) { /* 非 JSON */ }
     throw new Error(`直链返回 JSON（疑似失效/受限）: ${msg}`);
   }
-  return Buffer.from(await res.arrayBuffer());
+  if (ct.includes('text/html')) throw new Error('直链返回 HTML（疑似登录壳/失效跳转）');
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('直链返回空响应');
+  return buf;
 }
 
 /** 批量拉取审批实例（code + 申请编号 serial_id）：毫秒时间窗 30 天分片、片内翻页。
@@ -361,7 +366,10 @@ async function doBackfillCollect(options = {}) {
         if (dupSimilar.length) return { kind: 'dup_similar' };
         const magic = buffer.slice(0, 4);
         const ext = magic.toString('latin1') === '%PDF' ? 'pdf' : (magic[0] === 0x89 && magic[1] === 0x50 ? 'png' : 'jpg');
-        const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.${ext}`).catch(() => null);
+        const fileToken = await client.uploadMediaToBitable(buffer, `invoice_${fields.invoiceNo}.${ext}`).catch((err) => {
+          console.error(`[backfill] 发票原件上传失败（尾号 ${String(fields.invoiceNo).slice(-6)}，将落无附件记录）: ${err.message}`);
+          return null;
+        });
         await collectStore.createCollect({
           '发票号码': fields.invoiceNo,
           ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),

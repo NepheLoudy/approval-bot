@@ -3,8 +3,12 @@
  *
  * 口径（照财务实表列结构：序号/投递单号/报销摘要/报销金额/项目编号/支付方式/收款方/
  * 收款账号/经办人/申请日期/投递日期/入账日期/状态，数据自第 3 行起，首行为合并标题）：
- *  - submit → 追加一行：摘要/金额/项目编号/支付方式/收款方/收款账号/经办人（=接取人）自动填，
- *    投递单号可带参数、不带留空给财务补；状态沿用财务词表「已提交至中心」；
+ *  - printed（2026-11-06 曼波定：打印回执即记账）→ 追加「预登记」行：摘要/金额/项目编号/
+ *    支付方式/收款方/收款账号/经办人（=接取人）自动填，投递单号/投递日期/状态留空
+ *    （尚未提交学校不撒谎，历史台账人工行同款口径）；幂等，行已在则跳过；
+ *  - submit → 行已在（printed 预登记/财务手先行）：补填 B 投递单号/K 投递日期/M 状态 中的空列
+ *    （L 入账日期归 paid 管辖）；行不在 → 追加全格式行：摘要/金额/项目编号/支付方式/收款方/
+ *    收款账号/经办人（=接取人）自动填，投递单号可带参数、不带留空给财务补；状态沿用财务词表「已提交至中心」；
  *  - paid / reject → 按批次「摘要」精确匹配找到该行，回填 入账日期+状态=已到账 / 状态=已退回；
  *  - 行匹配只用摘要精确等值（机器人拼装的摘要含「第N笔」全局唯一）；财务手填的历史行
  *    摘要对不上 → 如实报 not_found，绝不改别人的行；摘要已存在 → 跳过不重复追加（幂等）；
@@ -110,10 +114,16 @@ function fmtDate(ms) {
  * submit 时同步台账：追加一行（幂等——摘要已存在则跳过）。
  * @param {string} batchNo 批次号
  * @param {string} [deliveryNo] 投递单号（财务 submit 时可带；不带留空由财务回填）
- * @returns {{action:'appended'|'exists'|'no_summary'|'disabled', rowIndex?, row?}}
+ * @param {{stage?: 'printed'|'submit'}} [opts]
+ *   - stage='printed'（2026-11-06 曼波定：打印回执即记账）：行不存在 → 追加「预登记」行
+ *     （投递日期/状态留空——尚未提交学校不撒谎，历史台账人工行同款口径）；已存在 → 幂等跳过。
+ *   - stage='submit'（默认）：行不存在 → 全格式行；已存在（printed 预登记行/人工行）→
+ *     补填 B 投递单号 / K 投递日期 / M 状态 中的空列（L 入账日期归 paid 管辖，不碰）。
+ * @returns {{action:'appended'|'exists'|'no_summary'|'disabled', rowIndex?, row?, updated?}}
  */
-async function syncOnSubmit(batchNo, deliveryNo = '') {
+async function syncOnSubmit(batchNo, deliveryNo = '', opts = {}) {
   if (!ledgerEnabled()) return { action: 'disabled' };
+  const stage = opts.stage === 'printed' ? 'printed' : 'submit';
   return withLedgerLock(config.ledger.spreadsheetToken, async () => {
     const batch = await collectStore.findBatchByName(batchNo);
     if (!batch) throw new Error(`批次不存在：${batchNo}`);
@@ -127,15 +137,25 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
     if (hitRows.length > 1) return { action: 'ambiguous', rows: hitRows.length }; // 多行同摘要转人工
     const existRow = hitRows[0] || 0;
     if (existRow) {
-    // 已有该批次行：投递单号留空且本次带了 → 补填，其余不动。
+    // 已有该批次行：printed 阶段幂等跳过；submit 阶段补填空列（B 单号/K 投递日期/M 状态）。
     // action='exists'（2026-11-03 审查 P3：此前误标 'appended'，chatService 的
     // updated==='deliveryNo' 判定只认 exists，补填场景永远播报成「已同步：第 X 行」）
     const existing = grid[existRow - 1] || [];
+    if (stage === 'printed') return { action: 'exists', rowIndex: existRow };
+    const filled = [];
     if (deliveryNo && String(existing[1] ?? '').trim() === '') {
       await writeRange(sheetId, `B${existRow}:B${existRow}`, [[/^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo]]);
-      return { action: 'exists', rowIndex: existRow, updated: 'deliveryNo' };
+      filled.push('deliveryNo');
     }
-      return { action: 'exists', rowIndex: existRow };
+    if (String(existing[10] ?? '').trim() === '') {
+      await writeRange(sheetId, `K${existRow}:K${existRow}`, [[fmtDate(Date.now())]]);
+      filled.push('deliverDate');
+    }
+    if (String(existing[12] ?? '').trim() === '') {
+      await writeRange(sheetId, `M${existRow}:M${existRow}`, [['已提交至中心']]);
+      filled.push('status');
+    }
+      return { action: 'exists', rowIndex: existRow, ...(filled.length ? { updated: filled.join(',') } : {}) };
     }
 
     const next = lastNonEmptyRow(grid) + 1;
@@ -147,6 +167,7 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
     const payee = String(f['收款方'] || '').trim() || config.batch.reporterName;
     const payeeAccount = String(f['收款账号'] || '').trim() || config.batch.bankCardNo;
     const operator = String(f['接取人'] || '').trim() || config.batch.reporterName;
+    const isPrinted = stage === 'printed';
     const row = [
       seq,
       /^\d+$/.test(deliveryNo) ? Number(deliveryNo) : deliveryNo,
@@ -158,9 +179,9 @@ async function syncOnSubmit(batchNo, deliveryNo = '') {
       payeeAccount,
       operator,
       fmtDate(Number(f['锁定时间']) || Date.now()),
-      fmtDate(Date.now()),
+      isPrinted ? '' : fmtDate(Date.now()),
       '',
-      '已提交至中心',
+      isPrinted ? '' : '已提交至中心',
     ];
     await writeRange(sheetId, `A${next}:M${next}`, [row]);
     return { action: 'appended', rowIndex: next, row };

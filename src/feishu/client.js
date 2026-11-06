@@ -166,8 +166,36 @@ async function uploadImageToIM(buffer) {
 }
 
 /**
+ * 按记录接口返回的预鉴权 url 下载素材（url 内已烤好 extra=bitablePerm 查询参数）。
+ * 2026-11-06 实证：审批 base 开启「高级权限」后，附件下载接口要求 URL 带 extra 参数鉴权
+ * （官方文档：不添加将返回 HTTP 400），裸 file_token 下载全体 400 空 body——
+ * 查询记录接口对高级权限 base 的附件字段自带预鉴权 url/tmp_url，用本函数取回。
+ * 需 drive 读权限（与 downloadMedia 同域）。
+ */
+async function downloadMediaByUrl(url) {
+  const token = await getTenantAccessToken();
+  const res = await fetch(url, {
+    method: 'GET',
+    signal: AbortSignal.timeout(60000),
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      msg = `${body.code || res.status}: ${body.msg || ''}`;
+    } catch (err) { /* 非 JSON 错误体 */ }
+    throw new Error(`下载素材失败(URL): ${msg}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('下载素材失败(URL): 空响应');
+  return buf;
+}
+
+/**
  * 下载云空间媒体（采集表/批次表附件字段的 file_token → 原文件二进制）。
  * 批次打印 PDF 排版时取回发票原件用。需 drive 读权限（与 uploadMediaToBitable 同域）。
+ * 注意：高级权限 base 的附件本函数会 400（缺 extra 参数），优先走 downloadMediaByUrl。
  */
 async function downloadMedia(fileToken) {
   const token = await getTenantAccessToken();
@@ -246,6 +274,7 @@ module.exports = {
   uploadMediaToBitable,
   uploadImageToIM,
   downloadMedia,
+  downloadMediaByUrl,
   getApprovalInstance,
   downloadApprovalFile,
 };
