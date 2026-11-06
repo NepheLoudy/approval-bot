@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v91**（2026-11-05，宣运物资组别线+全量审查 P1 收口（buyer_alert 接线）+11-03 遗留批合并入库，十套全绿）。上一版 v90（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。上一版 v89（2026-10-28，审批结构更新预迁移：resolveProject 统一项目归属+教师垫付人名项目）。更早 v88~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
+当前最新：**v92**（2026-11-06，发票下载修复（bitable 高级权限 extra 鉴权）+台账 printed 预登记（打印回执即记账），全套桩测试全绿）。上一版 v91（2026-11-05，宣运物资组别线+全量审查 P1 收口（buyer_alert 接线）+11-03 遗留批合并入库）。上一版 v90（2026-10-30，全量审查修复批：form_alert_live 冲刷注册+回执诚实性+台账白名单+时区统一+消毒补网）。更早 v89~v74 见下文历史条目（其中 v77~v88 由 6e66ea2 补记）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -727,3 +727,14 @@
 - **P1 两口径双计审查裁定（formAlertService 注释成文）**：实测票池与补充口径互斥已由 applyNo 链路保证（采集表为真源带关联申请编号，补充口径按 getCollectedApplyNoSet 排除已采集记录）；残留边缘=采集条目申请编号为空（OCR 缺失）时一次双计，注释如实成文+人工核对兜底，暂不做发票号级模糊匹配。
 - **11-03 审查修复同批**：quietHours 冲刷重试 3→8 次×60s（09:00 飞书抖动超 2 分钟周报条目不再被放弃）+ registerPayloadHandler 一次性载荷补发基建；time.js parseInvoiceDate 两道闸（NaN 拒绝+日历滚动回读比对，2026-02-30 类静默漂移入不了库）。
 - **测试**：npm test 全绿（form-alert-live/xuanyun×2/quiet-flush 等十套）。
+
+## v92 · 2026-11-06 · 随本提交落地 · fix/feat
+
+**发票下载修复 + 台账 printed 预登记（曼波令：台账做成打印回执确认后触发 + 排查鄢政批次打印件 4/4 占位页）**
+
+- **P0 发票下载根因（2026-11-06 夜定位）**：审批 base 在 10-20~11-06 之间被开启「高级权限」，飞书新规要求高级权限多维表格的附件下载（drive/v1/medias/:token/download 与 batch_get_tmp_download_url）必须带 `extra` 查询参数（bitablePerm 结构）鉴权，裸 token 调用返回 **HTTP 400 空 body**——`自动-鄢政-1106` 打印件 4/4「票面原件下载失败」占位页即此（10 月老票 token 同样 400，往返测试新上传 token 立即 400 排除 token 老化/补采链路嫌疑；scout 假设 H1/H2 被实证推翻）。
+- **修复**：`client.downloadMediaByUrl(url)` 新增——查询记录接口对高级权限 base 的附件字段自带预鉴权 url（内嵌 extra=bitablePerm，实测 GET+Bearer 200 取回 152KB PDF）；票池 item 增 `fileUrls`（token→url 映射），`downloadMediaSafe` 改三级：预鉴权 url → 失败回落裸 token → 失败占位页（低级权限 base 无 url 字段天然走老路，双形态兼容）；预热/打印PDF/docx/扫码清单四处全部接线。**端到端验证：本地同代码路径 regen 鄢政批次 13s 全套四件套成功，新打印 PDF 588KB/2 页（一页两票）/含 /Image 对象=4 张真票面嵌入**。
+- **台账 printed 预登记（2026-11-06 曼波定：打印回执即记账）**：`syncOnSubmit(batchNo, deliveryNo, {stage})` 双阶段——printed：行不存在追加「预登记」行（13 列同构历史台账，投递日期/状态留空=尚未提交学校不撒谎；幂等），chatService printed 分支回执附台账结果；submit：行已在（预登记行/财务手先行）补填 B 投递单号/K 投递日期/M 状态 中的空列（L 入账日期归 paid 管辖不碰），updated 字段透出补了啥。财务到账仍建议走 paid 指令（手填表会绕过队员到账私聊闭环）。
+- **采集链加固（排查副产物）**：backfill `downloadByUrl` 拒收空响应/text/html（登录壳/失效跳转不再被静默上传成坏 token）；采集/backfill 两处 `uploadMediaToBitable().catch(()=>null)` 补显式报错日志。
+- **测试**：stub-test-ledger 新增 printed 预登记 4 断言（落行格式/幂等/submit 三列补填/全齐无写入）；顺带修正写表桩潜伏缺陷（无视列字母一律从 A 列落——部分列写入实际落错列，新用例首次回读网格暴露）。全套桩测试全绿。
+- **遗留提醒**：duty-bot 等仓的 bitable base 若同样被开高级权限，附件下载会以同症状 400（本修复模式可平移）；printed 不在资金白名单（lock/submit/paid/reject/ledger 挂），现在它写台账了是否纳入名单待曼波裁定。
