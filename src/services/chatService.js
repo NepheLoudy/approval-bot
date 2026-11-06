@@ -526,7 +526,12 @@ async function syncLedgerQuietly(sub, batchNo, deliveryNo = '') {
     }
     if (sub === 'paid') {
       const ls = await ledger.syncOnStatus(batchNo, { paid: true });
-      if (ls.action === 'updated') return `· 📗 台账已回填：入账日期 + 已到账（第 ${ls.rowIndex} 行）`;
+      if (ls.action === 'updated') {
+        // 公用卡收支明细即时同步（2026-11-06 曼波定：入账行 → wiki 数据表27）；
+        // 失败仅记日志不回执，每小时轮询兜底重试
+        require('./cardFlowSyncService').triggerAfterPaid();
+        return `· 📗 台账已回填：入账日期 + 已到账（第 ${ls.rowIndex} 行）`;
+      }
       if (ls.action === 'no_summary') return '· ⚠️ 台账未同步：该批次无摘要（旧批次）';
       if (ls.action === 'not_found') return '· ⚠️ 台账未找到该批次行（按摘要匹配），请人工核对补记';
       if (ls.action === 'ambiguous') return '· ⚠️ 台账存在多行同摘要，请人工处理（未回填）';

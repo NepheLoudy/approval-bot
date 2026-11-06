@@ -5,6 +5,7 @@ const { runWeeklyBroadcast } = require('../services/broadcastService');
 const { runReminder } = require('../services/reminderService');
 const { runInvoiceUrge, announceTodayUrged, pollAllReplies } = require('../services/invoiceUrgeService');
 const formAlertService = require('../services/formAlertService');
+const cardFlowSyncService = require('../services/cardFlowSyncService');
 const batchService = require('../services/batchService');
 const bot = require('../feishu/bot');
 
@@ -126,6 +127,8 @@ const quietTaskRunners = {
   form_alert_live: () => withRetry('form_alert_live', () => formAlertService.runDailyCheck({ trigger: 'quiet_flush' })),
   print_ask: () => withRetry('print_ask', () => askPendingPrintConfirm()),
   confirm_remind: () => withRetry('confirm_remind', () => remindUnconfirmedBatches()),
+  // 公用卡收支明细轮询兜底（2026-11-06 曼波定）：手填入账日期的行也按小时扫到；paid 即时触发不经此闸
+  card_flow_sync: () => withRetry('card_flow_sync', () => cardFlowSyncService.syncOnce({ trigger: 'cron' })),
 };
 
 // 一次性载荷补发处理器（2026-11-03 审查 P2）：抬头警报卡此前是全仓唯一绕静默闸的
@@ -228,6 +231,7 @@ let formAlertTask = null;
 let printAskTask = null;
 let replyPollTask = null;
 let confirmRemindTask = null;
+let cardFlowTask = null;
 
 /** 启动全部定时任务 */
 function startCronJobs() {
@@ -326,6 +330,19 @@ function startCronJobs() {
   }, { timezone: 'Asia/Shanghai' });
   console.log(`[定时任务] 锁定未确认交付提醒已启动: ${config.batch.confirmRemindSchedule} (Asia/Shanghai, 锁定后 ${config.batch.confirmRemindDays} 天未确认则提醒) -> 下次 ${getNextExecutionTime(config.batch.confirmRemindSchedule)}`);
 
+  // 8. 公用卡收支明细轮询同步（2026-11-06 曼波定：台账入账日期行 → wiki 数据表27；
+  //    paid 指令即时为主动作，本任务兜手填入账与 paid 失败重试，过晚间静默闸）
+  if (config.cardFlow.nodeToken && config.cardFlow.tableId) {
+    cardFlowTask = cron.schedule(config.cardFlow.schedule, () => {
+      quietHours.gateTask('card_flow_sync', quietHours.shanghaiStamp(), quietTaskRunners.card_flow_sync, '公用卡收支明细同步').catch(err => {
+        console.error('[定时任务] 公用卡收支明细同步失败:', err.message);
+      });
+    }, { timezone: 'Asia/Shanghai' });
+    console.log(`[定时任务] 公用卡收支明细同步已启动: ${config.cardFlow.schedule} (Asia/Shanghai) -> 下次 ${getNextExecutionTime(config.cardFlow.schedule)}`);
+  } else {
+    console.log('[定时任务] 未配置 WIKI_CARD_FLOW_NODE_TOKEN/TABLE_ID，公用卡收支明细同步未启用');
+  }
+
   // 晚间静默：注册积压任务的冲刷执行器，并按启动时点调度积压补跑（有积压才调度）
   for (const [name, fn] of Object.entries(quietTaskRunners)) {
     quietHours.registerTask(name, fn);
@@ -403,6 +420,7 @@ function getCronStatus() {
       printAsk: !!printAskTask,
       replyPoll: !!replyPollTask,
       confirmRemind: !!confirmRemindTask, // 2026-11-03 审查 P3 补齐（schedules/nextExecution 均有独缺它）
+      cardFlowSync: !!cardFlowTask,
     },
     schedules: {
       weeklyBroadcast: config.cron.schedule,
@@ -412,6 +430,7 @@ function getCronStatus() {
       printAsk: config.batch.printAskSchedule,
       replyPoll: config.invoiceUrge.replyPollSchedule || '(未启用)',
       confirmRemind: config.batch.confirmRemindSchedule,
+      cardFlowSync: (config.cardFlow.nodeToken && config.cardFlow.tableId) ? config.cardFlow.schedule : '(未启用)',
     },
     nextExecution: {
       weeklyBroadcast: weeklyTask ? getNextExecutionTime(config.cron.schedule) : null,
@@ -421,6 +440,7 @@ function getCronStatus() {
       printAsk: printAskTask ? getNextExecutionTime(config.batch.printAskSchedule) : null,
       replyPoll: replyPollTask ? getNextExecutionTime(config.invoiceUrge.replyPollSchedule) : null,
       confirmRemind: confirmRemindTask ? getNextExecutionTime(config.batch.confirmRemindSchedule) : null,
+      cardFlowSync: cardFlowTask ? getNextExecutionTime(config.cardFlow.schedule) : null,
     },
     quietHours: quietHours.getStatus(),
   };

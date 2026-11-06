@@ -208,11 +208,25 @@ module.exports = {
     bankName: process.env.CQ_BANK_NAME || '',
   },
 
-  // 报销台账电子表格同步（submit 追加行 / paid·reject 回填状态；空 token = 关闭）
+  // 报销台账电子表格同步（submit 追加行 / printed 预登记 / paid·reject 回填状态；空 token = 关闭）
   ledger: {
     // 《2027年千里团队报销台账》
     spreadsheetToken: process.env.LEDGER_SPREADSHEET_TOKEN || '',
     // 工作表 sheet_id（留空 = 取第一个工作表）
     sheetId: process.env.LEDGER_SHEET_ID || '',
+  },
+
+  // 公用卡收支明细同步（2026-11-06 曼波定）：台账行「入账日期」被填（paid 回填或财务手填）
+  // → 转换后追加进 wiki「公用卡收支明细」多维表格的数据表27（收入行，上一笔余额链式递推）。
+  // 触发=paid 即时 + 每小时轮询 diff（手填也能被兜到）；空 nodeToken/tableId = 关闭
+  cardFlow: {
+    // wiki 节点 https://cquqianli.feishu.cn/wiki/O1A9wLFAeiZU3FkeoUicgzYanMg（公用卡收支明细）
+    nodeToken: process.env.WIKI_CARD_FLOW_NODE_TOKEN || '',
+    // 目标表=「数据表27」（27 赛季活跃账本；「数据表」是 25 赛季前的旧账）
+    tableId: process.env.WIKI_CARD_FLOW_TABLE_ID || '',
+    // 轮询 diff 调度（每小时一次，过晚间静默闸）
+    schedule: process.env.CARD_FLOW_SYNC_SCHEDULE || '0 40 * * * *',
+    // 状态文件（已同步摘要集合）
+    stateFile: process.env.CARD_FLOW_SYNC_STATE_FILE || '',
   },
 };
