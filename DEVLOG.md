@@ -758,7 +758,7 @@
 - **配置**：WIKI_CARD_FLOW_NODE_TOKEN/WIKI_CARD_FLOW_TABLE_ID（任一空=关闭）/CARD_FLOW_SYNC_SCHEDULE（默认每小时 40 分）/CARD_FLOW_SYNC_STATE_FILE（默认项目内 data/）；getCronStatus 透出 cardFlowSync。
 - **测试**：新增 stub-test-card-flow（基线快照/收编/递推链/失败不写追加行状态/幂等重试/dryRun 纯净/paid 兜底/互斥 already_running，夹具模拟公式重算）；全套桩测试全绿。写权限探针实案：wiki 表 batch_create+batch_delete 双 code=0。
 
-## v95 · 2026-11-13 · 随本提交落地 · fix/docs
+## v95 · 2026-11-13 · c7913c9 · fix/docs
 
 **2026-11-09 全量审查修复批（会话遗留回库收编，2026-11-12 文档巡检批盘点发现）+ README 定时任务口径同步**
 
