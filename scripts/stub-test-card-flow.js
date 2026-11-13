@@ -37,12 +37,33 @@ const wikiRows = [
 ];
 let batchCreateBodies = [];
 let failBatchCreate = false;
+let searchCalls = 0;
 client.requestAPI = async (method, urlPath, body) => {
   if (method === 'GET' && urlPath.includes('/wiki/v2/spaces/get_node')) {
     return { code: 0, data: { node: { obj_type: 'bitable', obj_token: 'appWikiTest' } } };
   }
   if (method === 'POST' && urlPath.includes('/records/search')) {
-    return { code: 0, data: { items: wikiRows.map(r => ({ record_id: r.record_id, fields: r.fields })) } };
+    // 翻页夹具（2026-11-09 审查 P1 修复回归）：search 单页 500 上限，第 1 页带
+    // has_more+page_token，第二页放一条早日期独立行——无翻页实现会漏读第二页
+    // （收编扫描失效）；早日期不影响链尾断言（链尾仍由第 1 页 w_35 决定）
+    searchCalls++;
+    if (urlPath.includes('page_token=pt2')) {
+      return {
+        code: 0,
+        data: {
+          items: [{ record_id: 'w_p2', fields: { '购买物资名称': [{ text: '第二页独有旧账行' }], '日期': Date.UTC(2026, 8, 1) - 8 * 3600e3 } }],
+          has_more: false,
+        },
+      };
+    }
+    return {
+      code: 0,
+      data: {
+        items: wikiRows.map(r => ({ record_id: r.record_id, fields: r.fields })),
+        has_more: true,
+        page_token: 'pt2',
+      },
+    };
   }
   if (method === 'POST' && urlPath.includes('/records/batch_create')) {
     if (failBatchCreate) return { code: 1254004, msg: '模拟写入失败' };
@@ -96,7 +117,9 @@ async function main() {
 
   // ---------- 模拟 paid 填入账日期 → 新行同步（链尾递推 + 收编双保险） ----------
   ledgerGrid[4][11] = '2026/11/6'; // S37 入账
+  const searchBefore = searchCalls;
   const r2 = await cardFlowSyncService.syncOnce({ trigger: 'paid' });
+  assert.equal(searchCalls - searchBefore, 2, 'readWikiTable 应翻页读完两页（单页 500 上限的翻页回归）');
   assert.deepEqual(r2.appended, [S37], '新入账行追加');
   assert.equal(batchCreateBodies.length, 1, 'batch_create 一次');
   assert.equal(batchCreateBodies[0].records.length, 1);
@@ -125,6 +148,31 @@ async function main() {
   assert.deepEqual(r5.appended, [S36], '修复后重试成功');
   assert.equal(batchCreateBodies[1].records[0].fields['上一笔余额'], 9431.56, '递推链：8837.14+594.42=9431.56');
   assert.equal(batchCreateBodies.length, 2, '重试即第二次 batch_create');
+
+  // ---------- 状态丢失重启 → 收编兜底（幂等第 2 层真覆盖，2026-11-09 审查批补） ----------
+  // 场景：S37 写 wiki 成功但状态 save 失败后进程重启（状态文件缺 S37 键）——
+  // 重启首轮 S37 进 pending，收编扫描对上 wiki 已有行 → 记状态不追加，不双写
+  const stLost = readState(st);
+  delete stLost.synced[S37];
+  fs.writeFileSync(st, JSON.stringify(stLost, null, 2));
+  cardFlowSyncService.init(st);
+  const r6 = await cardFlowSyncService.syncOnce({ trigger: 'cron' });
+  assert.deepEqual(r6.adopted, [S37], '状态丢失的已写行被收编进状态');
+  assert.deepEqual(r6.appended, [], '收编行不再追加');
+  assert.equal(batchCreateBodies.length, 2, '收编不产生新 batch_create');
+  assert.ok(readState(st).synced[S37], '收编后状态恢复');
+
+  // ---------- dryRun 预演（基线后路径）+ 链尾余额缺失残行跳过 ----------
+  // wiki 预置「日期最晚但余额缺失」的人工残行：不跳过会把链尾拉成 0 污染递推
+  const S38 = '机甲大师实验室-27赛季-对抗赛-无人机机器人-材料费-第三十八笔';
+  wikiRows.push({ record_id: 'w_nobal', fields: { '购买物资名称': [{ text: '人工残行（有日期无余额）' }], '日期': Date.UTC(2026, 10, 8) - 8 * 3600e3 } });
+  ledgerGrid.push([47, null, S38, 300, 'pc', '转卡', '贺', 'acct', '贺', '2026/11/8', null, '2026/11/8', null]);
+  const dry2 = await cardFlowSyncService.syncOnce({ dryRun: true });
+  assert.equal(dry2.pending, 1, 'S38 进待同步');
+  assert.equal(dry2.preview.length, 1, '基线后 dryRun 预演待同步行（递推链路径）');
+  assert.equal(dry2.preview[0].summary, S38);
+  assert.equal(dry2.preview[0].prevBalance, 10272.53, '链尾跳过余额缺失残行（取 11/7 的 10272.53 而非 0）');
+  assert.equal(dry2.preview[0].amount, 300);
 
   console.log('✅ stub-test-card-flow 全部通过');
 }

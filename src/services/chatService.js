@@ -409,7 +409,14 @@ async function handleBatchCommand(args = [], ctx = {}) {
     }
     const ls = await ledger.syncOnSubmit(ledgerBatchNo, deliveryNo || '');
     if (ls.action === 'appended') return `📗 台账已同步：${ledgerBatchNo} → 第 ${ls.rowIndex} 行`;
-    if (ls.action === 'exists') return `📗 台账已有该批次行（第 ${ls.rowIndex} 行）${ls.updated === 'deliveryNo' ? '，已补填投递单号' : '，未重复添加'}`;
+    // updated 已改多列形态 'deliveryNo,deliverDate,status'（v92 printed 预登记批）——
+    // 旧 `=== 'deliveryNo'` 判定在多列补填时谎报「未重复添加」（2026-11-09 审查 P2）
+    if (ls.action === 'exists') {
+      const filledText = ls.updated
+        ? `，已补填${ls.updated.split(',').map(s => ({ deliveryNo: '投递单号', deliverDate: '投递日期', status: '状态' }[s] || s)).join('/')}`
+        : '';
+      return `📗 台账已有该批次行（第 ${ls.rowIndex} 行）${filledText}，未重复添加`;
+    }
     if (ls.action === 'no_summary') return '⚠️ 该批次无摘要（旧批次），没有台账口径，请人工登记';
     if (ls.action === 'disabled') return '⚠️ 未配置台账表（LEDGER_SPREADSHEET_TOKEN），同步关闭';
     if (ls.action === 'ambiguous') return '⚠️ 台账存在多行同摘要，请人工处理';

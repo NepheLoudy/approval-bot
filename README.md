@@ -100,10 +100,19 @@
 │    财务回复 /approval-batch confirm <批次号> 后才生成交付件并发二维码交付卡
 │    （采集落库后即时触发 + 本时段兜底；夜间过静默闸顺延，formAlertService）
 │
-└─ 每小时 :15（BATCH_PRINT_ASK_SCHEDULE，过静默闸）
-     🖨️ 打印询问：confirm 后超 BATCH_PRINT_ASK_DELAY_HOURS（默认 12h）
-     未打印的批次群发询问卡（每批只问一次），财务回复
-     /approval-batch printed <批次号> 完成打印标记（批次表留痕）
+├─ 每小时 :15（BATCH_PRINT_ASK_SCHEDULE，过静默闸）
+│    🖨️ 打印询问：confirm 后超 BATCH_PRINT_ASK_DELAY_HOURS（默认 12h）
+│    未打印的批次群发询问卡（每批只问一次），财务回复
+│    /approval-batch printed <批次号> 完成打印标记（批次表留痕）
+│
+├─ 每小时 :25（BATCH_CONFIRM_REMIND_SCHEDULE，过静默闸）
+│    🔔 锁定未确认交付提醒：锁定后超 BATCH_CONFIRM_REMIND_DAYS 天无人
+│    confirm 的批次群发提醒卡（每批只问一次）
+│
+└─ 每小时（CARD_FLOW_SYNC_SCHEDULE，默认每小时，过静默闸；未配置 nodeToken/tableId 不启用）
+     💳 公用卡收支明细轮询同步（2026-11-06 曼波定：台账入账日期行 →
+     wiki 数据表27；paid 指令即时为主动作，本任务兜手填入账与
+     paid 失败重试）
 ```
 
 - 审批提交、审批通过/拒绝**不触发任何播报**（多维表格事件不订阅、不消费）
@@ -239,7 +248,7 @@ ssh mechax@192.168.31.57 "pm2 logs approval-bot --lines 30"
 ```
 approval-bot/
 ├── src/
-│   ├── cron/index.js              # 六个定时任务：财务催办周报 / 每日待审批提醒 / 催发票私聊 / 制单金额线（form_alert 10:35）/ 打印询问（每小时 :15）/ 回复轮询（每小时 :45，v67）
+│   ├── cron/index.js              # 八个定时任务：财务催办周报 / 每日待审批提醒 / 催发票私聊 / 制单金额线（form_alert 10:35）/ 打印询问（每小时 :15）/ 回复轮询（每小时 :45，v67）/ 锁定未确认交付提醒（每小时 :25，BATCH_CONFIRM_REMIND_SCHEDULE）/ 公用卡收支轮询（CARD_FLOW_SYNC_SCHEDULE，默认每小时，2026-11-06）
 │   ├── feishu/
 │   │   ├── bitable.js             # 多维表格 API（自动翻页）
 │   │   ├── bot.js                 # 卡片构建（催办周报/每日提醒/催发票私聊文案）+ webhook/API 发送
@@ -278,6 +287,8 @@ approval-bot/
 ├── scripts/stub-test-quiet-flush.js # 晚间静默冲刷桩测试（补跑不互吞/失败保留/幂等收尾）
 ├── scripts/stub-test-form-alert-live.js # form_alert_live 冲刷执行器注册桩测试（cron 注册缺口回归）
 ├── scripts/stub-test-xuanyun-group.js   # 宣运物资组别桩测试（独立警戒线/锁定路由/物料清单用途列/日期 NaN 安全）
+├── scripts/stub-test-xuanyun-purchase-type.js # 宣运物资采购类型列桩测试（实物图嵌入/缺图标注/非宣运行兼容）
+├── scripts/stub-test-card-flow.js       # 公用卡收支明细同步桩测试（基线/收编/递推链/失败重试/翻页回归）
 ├── scripts/drill-ocr-compat.js    # OCR 兼容性演练（离线 12 用例合成；产物落 .drill/ 不进 git）
 ├── scripts/drill-online.js        # OCR 在线端点探测演练（产物落 .drill/ 不进 git）
 ├── 财务协作指南.md                 # 面向财务的人机协作流程（交票/三件套/例外处理/FAQ）

@@ -16,7 +16,8 @@ const client = require('../src/feishu/client');
 const backfillService = require('../src/services/backfillService');
 
 const JPEG = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.alloc(500, 0x7F)]); // jpeg 魔数
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47]), Buffer.alloc(500, 0x7F)]);  // png 魔数
+// PNG 完整 8 字节签名（2026-11-09 交叉复核补强：实现已验完整签名，夹具同步）
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), Buffer.alloc(500, 0x7F)]);
 
 let instanceLookups = 0;
 backfillService.listInstances = async () => { instanceLookups++; return [{ code: 'inst-1', serialId: 'XY2026001' }]; };
@@ -97,6 +98,43 @@ global.fetch = async (url) => {
   const row2 = ws.getRow(4);
   assert.strictEqual(row2.getCell(5).value, '缺实物图', '拿不到实物图的宣运行应如实标注「缺实物图」');
   assert.ok(row2.getCell(5).fill && row2.getCell(5).fill.fgColor, '缺图行应标黄提示现场核对');
+
+  // == 7. 批次级实例预扫：10 张不同宣运票只扫一次全窗（2026-11-09 交叉复核 P2） ==
+  // 此前每条不同申请独立扫 200 天窗（≈7+ 次 API/条），预扫塌缩成每批 1 次
+  const multiItems = Array.from({ length: 10 }, (_, k) => ({
+    project: '宣运物资', applyNo: 'XYB' + k, usage: '批量' + k, invoiceContent: '物资' + k, material: '物资' + k, totalAmount: 10 + k,
+  }));
+  backfillService.listInstances = async () => {
+    instanceLookups++;
+    return Array.from({ length: 20 }, (_, k) => ({ code: 'inst-b' + k, serialId: 'XYB' + k }));
+  };
+  client.getApprovalInstance = async () => ({
+    code: 0,
+    data: { form: [{ name: '示意图', type: 'image', value: ['https://cdn.example/c.jpg'] }] },
+  });
+  let multiFetch = 0;
+  global.fetch = async (url) => {
+    if (!/^https:\/\/cdn\.example\//.test(String(url))) {
+      return {
+        ok: true, status: 200, headers: { get: (k) => (k === 'content-type' ? 'application/json' : null) },
+        json: async () => ({ code: 0, data: {} }), arrayBuffer: async () => Buffer.alloc(0),
+      };
+    }
+    multiFetch++;
+    return {
+      ok: true, status: 200, headers: { get: (k) => (k === 'content-type' ? 'image/jpg' : null) },
+      arrayBuffer: async () => JPEG, json: async () => ({ code: 0, data: {} }),
+    };
+  };
+  const lookupsBefore = instanceLookups;
+  let multiCaptured = null;
+  client.uploadMediaToBitable = async (buffer) => { multiCaptured = buffer; return 'mock-token-multi'; };
+  await batchService.uploadBatchMaterialList('测试批次-宣运物资-批量', multiItems, { purchaseType: '宣传物料' });
+  assert.strictEqual(instanceLookups - lookupsBefore, 1, '10 张不同宣运票只做一次全窗实例预扫（API 放大塌缩）');
+  assert.strictEqual(multiFetch, 10, '10 张票各即时下载 1 张实物图（预扫后逐条拉图不受影响）');
+  const wb2 = new ExcelJS.Workbook();
+  await wb2.xlsx.load(multiCaptured);
+  assert.strictEqual(wb2.getWorksheet('Sheet1').getImages().length, 10, '10 张票各嵌 1 张实物图（一一对应保持）');
 
   console.log('✅ stub-test-xuanyun-purchase-type 全部通过（实物图嵌入/缺图标注/非宣运行兼容/缓存与魔数过滤）');
 })().catch((err) => {

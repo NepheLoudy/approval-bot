@@ -889,9 +889,12 @@ async function fetchPhysicalPhotos(applyNo) {
           const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
           const ct = resp.headers.get('content-type') || '';
           const buf = Buffer.from(await resp.arrayBuffer());
-          // 拿回来必须是图（签名过期/受限会 200 返回 HTML 壳——按魔数验）
+          // 拿回来必须是图（签名过期/受限会 200 返回 HTML 壳——魔数+content-type 双闸；
+          // PNG 验完整 8 字节签名，jpeg 验 2 字节 SOI，2026-11-09 交叉复核补强）
           if (resp.ok && /^image\//.test(ct) && buf.length > 100
-            && ((buf[0] === 0xFF && buf[1] === 0xD8) || (buf[0] === 0x89 && buf[1] === 0x50))) {
+            && ((buf[0] === 0xFF && buf[1] === 0xD8)
+              || (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47
+                && buf[4] === 0x0D && buf[5] === 0x0A && buf[6] === 0x1A && buf[7] === 0x0A))) {
             photos.push(buf);
           } else {
             console.warn(`[批次] 实物图下载异常（${applyNo}）: HTTP ${resp.status} ${ct} ${buf.length}B（跳过该张）`);
@@ -908,9 +911,42 @@ async function fetchPhysicalPhotos(applyNo) {
   return photos;
 }
 
-/** 批内所有宣运物资票的实物图并行预热（lock/confirm 主链不串行等单张下载） */
+/** 批次级实例预扫（2026-11-09 交叉复核 P2）：一次全窗扫按 serialId 索引预灌缓存——
+ *  此前每条不同申请独立扫 200 天窗（30 天分片≈7+ 次 API/条），一批 10 张不同票
+ *  = 10 次全窗扫 ≈ 70+ 次 API，撞实例查询配额；预扫后塌缩成每批 1 次扫描 */
+async function prefetchInstanceCodes(applyNos) {
+  const missing = [...new Set(applyNos.filter(no => no && !instanceCodeCache.has(no)))];
+  if (!missing.length) return;
+  const approvalCode = process.env.APPROVAL_CODE || '';
+  if (!approvalCode) {
+    console.warn('[批次] 未配置 APPROVAL_CODE，无法拉取审批实例示意图（实物图列将留空）');
+    for (const no of missing) instanceCodeCache.set(no, null);
+    return;
+  }
+  try {
+    const backfillService = require('./backfillService');
+    const instances = await backfillService.listInstances(approvalCode, Date.now() - 200 * 24 * 3600 * 1000);
+    const wanted = new Set(missing);
+    let hit = 0;
+    for (const inst of instances) {
+      if (inst.serialId && wanted.has(inst.serialId)) {
+        instanceCodeCache.set(inst.serialId, inst.code || null);
+        hit++;
+      }
+    }
+    // 没命中本次需要的（早于 200 天窗/非本流程实例）也记 null，防后续逐条重复扫全窗
+    for (const no of missing) if (!instanceCodeCache.has(no)) instanceCodeCache.set(no, null);
+    console.log(`[批次] 实例预扫：${missing.length} 条申请一次全窗扫描命中 ${hit} 个实例`);
+  } catch (err) {
+    console.warn(`[批次] 实例预扫失败（各申请回落独立查找兜底）:`, err.message);
+  }
+}
+
+/** 批内所有宣运物资票的实物图并行预热（lock/confirm 主链不串行等单张下载）：
+ *  先批次级预扫实例码（塌缩 API 放大），再并行拉图 */
 async function prefetchPhysicalPhotos(items) {
   const xyItems = items.filter(i => String(i.project || '').trim() === approvalService.XUANYUN_GROUP && i.applyNo);
+  await prefetchInstanceCodes(xyItems.map(i => i.applyNo));
   await Promise.all(xyItems.map(i => fetchPhysicalPhotos(i.applyNo)));
 }
 

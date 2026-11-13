@@ -225,6 +225,8 @@ module.exports = {
     // 目标表=「数据表27」（27 赛季活跃账本；「数据表」是 25 赛季前的旧账）
     tableId: process.env.WIKI_CARD_FLOW_TABLE_ID || '',
     // 轮询 diff 调度（每小时一次，过晚间静默闸）
+    // 部署约束（2026-11-09 审查 P2 成文）：syncOnce 互斥为进程内变量（running），
+    // 生产必须 pm2 fork 单实例（现状即如此）——cluster 多实例会并发双写+余额重复加
     schedule: process.env.CARD_FLOW_SYNC_SCHEDULE || '0 40 * * * *',
     // 状态文件（已同步摘要集合）
     stateFile: process.env.CARD_FLOW_SYNC_STATE_FILE || '',

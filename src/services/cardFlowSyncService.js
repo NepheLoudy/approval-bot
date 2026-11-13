@@ -113,32 +113,46 @@ async function resolveAppToken() {
 }
 
 /** 读「数据表27」全部记录：datedRows=有日期行按日期升序（取链尾余额），
- *  existing=已有「购买物资名称」集合（收编扫描幂等用）。 */
+ *  existing=已有「购买物资名称」集合（收编扫描幂等用）。
+ *  翻页（2026-11-09 审查 P1）：search 单页上限 500——账本超 500 行后无翻页会
+ *  ①收编扫描漏掉旧页同名行 → 已同步行重复追加（幂等第 2 层失效）；
+ *  ②datedRows 缺旧页 → 链尾余额读到旧值 → 余额递推错账。page_token 走 query
+ *  string（instances/query 同款实测坑：放 body 被忽略，恒返回第 1 页）。 */
 async function readWikiTable(appToken, tableId) {
-  const r = await client.requestAPI('POST', `/bitable/v1/apps/${appToken}/tables/${tableId}/records/search`, {
-    page_size: 500,
-    sort: [{ field_name: '日期', desc: true }],
-  });
-  if (r.code !== 0) throw new Error(`公用卡收支明细读取失败: ${r.msg} (code: ${r.code})`);
-  const items = (r.data && r.data.items) || [];
   const datedRows = [];
   const existing = new Set();
-  for (const item of items) {
-    const fields = (item && item.fields) || {};
-    // 购买物资名称：文本字段读出来是富文本段数组 [{text}]，拼接为纯文本再比对
-    const rawMaterial = fields['购买物资名称'];
-    const material = Array.isArray(rawMaterial)
-      ? rawMaterial.map(x => (x && x.text) || '').join('')
-      : String(rawMaterial ?? '');
-    if (material) existing.add(material);
-    // 余额：可能被接口包装成 {value:[n]} 对象，否则按裸数字处理
-    const rawBalance = fields['余额'];
-    const balance = (rawBalance && typeof rawBalance === 'object' && Array.isArray(rawBalance.value))
-      ? (Number(rawBalance.value[0]) || 0)
-      : (Number(rawBalance) || 0);
-    const dateMs = Number(fields['日期']) || 0;
-    if (dateMs > 0) datedRows.push({ material, balance, dateMs });
-  }
+  let pageToken = '';
+  do {
+    const r = await client.requestAPI('POST', `/bitable/v1/apps/${appToken}/tables/${tableId}/records/search?page_token=${encodeURIComponent(pageToken)}`, {
+      page_size: 500,
+      sort: [{ field_name: '日期', desc: true }],
+    });
+    if (r.code !== 0) throw new Error(`公用卡收支明细读取失败: ${r.msg} (code: ${r.code})`);
+    const items = (r.data && r.data.items) || [];
+    for (const item of items) {
+      const fields = (item && item.fields) || {};
+      // 购买物资名称：文本字段读出来是富文本段数组 [{text}]，拼接为纯文本再比对
+      const rawMaterial = fields['购买物资名称'];
+      const material = Array.isArray(rawMaterial)
+        ? rawMaterial.map(x => (x && x.text) || '').join('')
+        : String(rawMaterial ?? '');
+      if (material) existing.add(material);
+      // 余额：可能被接口包装成 {value:[n]} 对象，否则按裸数字处理；
+      // round2 与递推同口径（公式列浮点读数尾差如 10272.529999… 归一到分）
+      const rawBalance = fields['余额'];
+      const balance = (rawBalance && typeof rawBalance === 'object' && Array.isArray(rawBalance.value))
+        ? round2(Number(rawBalance.value[0]) || 0)
+        : round2(Number(rawBalance) || 0);
+      const dateMs = Number(fields['日期']) || 0;
+      // 余额缺失（null/undefined/空串）的行不进链：人工行填了日期漏填余额时，
+      // Number()||0 会把链尾拉成 0，下一笔递推与真实余额脱节（2026-11-09 审查 P3）；
+      // 「余额」列是公式列，正常行都有值——缺失即视为人工残行，不作为链尾依据
+      const balanceMissing = rawBalance === null || rawBalance === undefined
+        || (typeof rawBalance === 'string' && rawBalance.trim() === '');
+      if (dateMs > 0 && !balanceMissing) datedRows.push({ material, balance, dateMs });
+    }
+    pageToken = (r.data && r.data.has_more) ? (r.data.page_token || '') : '';
+  } while (pageToken);
   datedRows.sort((a, b) => a.dateMs - b.dateMs); // 升序，末位即链尾
   return { datedRows, existing };
 }
@@ -245,7 +259,12 @@ async function doSync({ trigger = 'cron', dryRun = false } = {}) {
 }
 
 /** paid 指令即时触发入口（ledgerSheetService.syncOnStatus 回填入账日期后调）：
- *  失败不抛给调用方（台账回执不受影响），由每小时轮询兜底重试。 */
+ *  失败不抛给调用方（台账回执不受影响），由每小时轮询兜底重试。
+ *
+ *  静默闸裁定（2026-11-09 审查批，工位报 P1 不采纳）：paid 是财务当下主动发的指令
+ *  （交互回路，晚间静默契约明文不受限），写 wiki 数据表27 与 paid 回填台账 L 列同属
+ *  「业务动作（写表）」——顶层契约明文业务动作不延迟。cron 每小时轮询路径（兜财务
+ *  手填行）已过静默闸（gateTask card_flow_sync），两条路径口径各有依据，不统一改闸。 */
 function triggerAfterPaid() {
   return syncOnce({ trigger: 'paid' })
     .catch(err => {
