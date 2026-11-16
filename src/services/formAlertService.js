@@ -188,6 +188,15 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
         }
       } catch (err) {
         console.warn('[制单金额线] 锁定前补采失败（按现票池锁定，未采集票并入后续批次）:', err.message);
+        // 2026-11-16 修（收敛慢真凶）：补采抛错（超时/单请求失败）前已入库的票必须被看见——
+        // 不重算的话 hits 还是进补采前的旧快照（票池 0 张），已收进票池的票白白再等一轮。
+        // 郭禹澄实案：第 1 轮收 37 张后超时，判定却仍按旧快照跳过，锁定晚一轮
+        try {
+          all = await computeGroupAmounts();
+          hits = all.filter(s => s.amount >= thresholdFor(s.group));
+        } catch (reErr) {
+          console.warn('[制单金额线] 补采失败后重算失败（沿用旧快照）:', reErr.message);
+        }
       }
     }
   }

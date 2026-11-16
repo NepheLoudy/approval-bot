@@ -81,8 +81,27 @@ const item = (applicant, amount) => ({
   assert.strictEqual(backfillCalls.length, 0, '不满线不触发补采');
   assert.strictEqual(lockCalls.length, 0, '不满线不锁定');
 
-  for (const f of [st, st2]) { try { fs.unlinkSync(f); } catch { /* 无所谓 */ } }
-  console.log('✅ stub-test-form-alert-supplement-only 全部通过（纯补充口径满线：进预览/触发补采/收票后锁定/收不到显式跳过/不满线不动作）');
+  // == 4. 补采抛错但已收票入库 → catch 后用最新票池重算 → 立即锁定（2026-11-16 收敛修复）==
+  // 场景：第 1 轮补采收了 37 张后超时抛错——旧版 catch 沿用旧快照（票池 0）白丢一轮，
+  // 修复后 catch 内重算，票池已有票立即锁定
+  const st3 = path.join(os.tmpdir(), `fa-supp3-${process.pid}-${Date.now()}.json`);
+  formAlert.init(st3);
+  mockPool = [];                                   // 初始票池 0
+  mockSupplement = new Map([['郭禹澄', { count: 42, amount: 1229.39 }]]);
+  backfillService.backfillCollect = async (opts) => {
+    backfillCalls.push(opts);
+    // 模拟：补采中途已把票收进采集表（票池变非空），随后超时抛错
+    mockPool = [item('郭禹澄', 700), item('郭禹澄', 529.39)];
+    mockSupplement = new Map();
+    throw new Error('The operation was aborted due to timeout');
+  };
+  lockCalls = [];
+  const r3 = await formAlert.checkAndBroadcast({ trigger: 'stub' });
+  assert.strictEqual(lockCalls.length, 1, '补采抛错但票已入库 → catch 重算后应立即锁定（不再白丢一轮）');
+  assert.strictEqual(lockCalls[0].options.person, '郭禹澄');
+
+  for (const f of [st, st2, st3]) { try { fs.unlinkSync(f); } catch { /* 无所谓 */ } }
+  console.log('✅ stub-test-form-alert-supplement-only 全部通过（纯补充口径满线：进预览/触发补采/收票后锁定/补采抛错 catch 重算立即锁定/收不到显式跳过/不满线不动作）');
 })().catch((err) => {
   console.error('❌ stub-test-form-alert-supplement-only 失败:', err.message);
   process.exit(1);
