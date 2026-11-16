@@ -144,10 +144,12 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
       cur.unCollected += agg.count; // 该组未采集笔数（详情卡提示 + 锁定前补采判定）
       byPerson.set(group, cur);
     }
-    // 补充口径-only 人（票池 0 张）不触发——lockBatch 必抛「票池无票」且失败不写冷却
-    // → 无限重试（对抗审查 P3-1 同款）
+    // 2026-11-16 修复（郭禹澄 1116 实案）：不再在此处剔除 poolCount=0 的组——
+    // 纯补充口径满线人（票在审批表直接附票、从未走采集，采集票又全被归批后
+    // poolCount 归 0）被剔除后连「锁定前补采」都轮不到，每天扫描 checked=0 静默
+    // 返回、九天无人知晓。防 lockBatch「票池无票」失败循环的本意（对抗审查 P3-1）
+    // 改在锁定段实现：补采后仍无票池票的组显式跳过并打日志。
     return [...byPerson.values()]
-      .filter(s => s.poolCount > 0)
       .map(s => ({ ...s, amount: Math.round(s.amount * 100) / 100 }));
   };
 
@@ -204,12 +206,22 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
     locked: [],
     failed: [],
     skipped: hits.length - due.length, // 命中阈值但在冷却期内的分组数
+    noPoolSkipped: [], // 补采后仍票池无票而跳过的组（2026-11-16，显式暴露不再静默）
   };
   if (!due.length) return result;
 
   for (const s of due) {
     if (dryRun) {
-      result.locked.push({ project: s.group, count: s.count, amount: s.amount, dryRun: true });
+      // poolCount=0 的组如实标注（预览可见「补采后仍无票池票」的形态，2026-11-16）
+      result.locked.push({ project: s.group, count: s.count, amount: s.amount, poolCount: s.poolCount, dryRun: true });
+      continue;
+    }
+    // 防失败循环（对抗审查 P3-1 本意移到锁定段，2026-11-16）：补采后仍票池无票的组
+    // （票无法回溯/审批无附件/无 APPROVAL_CODE）显式跳过并打 warn——不再像旧版那样
+    // 在 computeGroupAmounts 一刀切剔除导致纯补充口径满线人永远静默（郭禹澄 1116 实案）
+    if (!(s.poolCount > 0)) {
+      console.warn(`[制单金额线] ${s.group} 满线 ¥${s.amount.toFixed(2)}（补充口径 ${s.unCollected} 笔）但票池无票（锁定前补采未收入），跳过锁定（下轮重试）`);
+      result.noPoolSkipped.push({ group: s.group, amount: s.amount, unCollected: s.unCollected });
       continue;
     }
     try {

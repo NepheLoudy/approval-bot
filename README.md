@@ -289,6 +289,7 @@ approval-bot/
 ├── scripts/stub-test-xuanyun-group.js   # 宣运物资组别桩测试（独立警戒线/锁定路由/物料清单用途列/日期 NaN 安全）
 ├── scripts/stub-test-xuanyun-purchase-type.js # 宣运物资采购类型列桩测试（实物图嵌入/缺图标注/非宣运行兼容）
 ├── scripts/stub-test-card-flow.js       # 公用卡收支明细同步桩测试（基线/收编/递推链/失败重试/翻页回归）
+├── scripts/stub-test-form-alert-supplement-only.js # 纯补充口径满线桩测试（补采触发/收票锁定/无票显式跳过）
 ├── scripts/drill-ocr-compat.js    # OCR 兼容性演练（离线 12 用例合成；产物落 .drill/ 不进 git）
 ├── scripts/drill-online.js        # OCR 在线端点探测演练（产物落 .drill/ 不进 git）
 ├── 财务协作指南.md                 # 面向财务的人机协作流程（交票/三件套/例外处理/FAQ）
