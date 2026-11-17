@@ -14,6 +14,17 @@ const sharp = require('sharp');
 const jsQR = require('jsqr');
 // pdf-parse v2（2.4.x）改为类 API：new PDFParse({data}).getText()；v1 的函数调用形态已废弃
 const { PDFParse } = require('pdf-parse');
+const config = require('../config');
+
+/** 已知购方真值表（购销方锚定兜底用；来自抬头校验配置「名称|税号」，纯解析无副作用） */
+function knownBuyers() {
+  return (config.invoiceCollect.allowedBuyers || [])
+    .map((raw) => {
+      const [name, taxNo] = String(raw).split('|').map(x => (x || '').trim());
+      return { name: name || '', taxNo: taxNo || '' };
+    })
+    .filter(k => k.name || k.taxNo);
+}
 
 // ---------- 文本字段抽取（PDF 文本与 OCR 分段拼接文本共用） ----------
 
@@ -43,7 +54,13 @@ function extractInvoiceContent(rawText) {
   if (!m) return null;
   // 列分隔截断：PDF 文本层列间多空格；行尾数量/金额（如「1 张」「3.97」）剥掉
   let name = m[2].split(/\s{2,}/)[0];
-  name = name.replace(/\s*[0-9.]+\s*(张|个|台|件|只|枚|套|米|卷|次)?\s*$/, '').trim();
+  // 列数据截断（2026-11-18 增强，立创开票平台实样）：单空格列流「连接器 AFC01-S24FCA-0
+  // 个 15 0.6533333333 9.80 13%」——多空格截不断，遇「量词+数字」列数据形态即停
+  const colIdx = name.search(/\s+(个|张|台|件|只|枚|套|米|卷|次|片|根|块|把|条|盒|包|箱|瓶|本|册|份|支|袋|双|副|对|颗|粒|卷)\s+\d/);
+  if (colIdx >= 0) name = name.slice(0, colIdx).trim();
+  // 行尾剥离要求数字前有空白（2026-11-18 修）：型号尾数字（AFC01-S24FCA-0）不得误剥——
+  // 原 \s*[0-9.]+ 对「-0」的 0 前零宽匹配会剥掉型号尾段
+  name = name.replace(/\s+[0-9.]+\s*(张|个|台|件|只|枚|套|米|卷|次)?\s*$/, '').trim();
   // 乱序文本流兜底（2026-10-17）：部分开票平台 PDF 把货品名按列拆行（行尾即折行截断）——
   // 后续行仍为纯中文（无数字/字母/百分号等列数据特征）时逐行拼接，拼到列数据行/空行为止
   const after = text.slice(m.index + m[0].length);
@@ -94,9 +111,69 @@ function extractParty(text, role) {
 }
 
 /**
- * 从发票文本抽取字段。输入文本（PDF 文本层或 OCR 分段用 \n 拼接）。
+ * 购销方提取兜底（2026-11-18 增强，真实素材实测三种失效形态后新增）：
+ *   ① OCR 分段流（飞书 basic_recognize 实测形态）：「购买方信息/销售方信息」标题段 +
+ *     「名称:XXX」独立段 ×2 + 「统一社会信用代码/纳税人识别号:XXX」独立段 ×2（购前销后）
+ *     ——无「购买方名称:」紧邻标签，extractParty 名称全空；
+ *   ② PDF 乱序文本流（立创开票平台实样）：「…销 售 方 信 息 … 购 买 方 信 息
+ *     <销方税号> <购方税号> 名称:深圳嘉立创…」标签逐字分行+税号先于名称出现，
+ *     位置猜测（第 1=购/第 2=销）会张冠李戴；
+ *   ③ 税号裸奔形态：部分版式税号前无「统一社会信用代码」标签（标签在别处/缺失），
+ *     标签式 RE_TAX_NO 扫不到。
+ * 策略：用抬头校验配置（INVOICE_ALLOWED_BUYERS「名称|税号」=真值表）双向锚定——
+ * 税号或名称命中已知购方 → 购方字段以配置回填，另一条税号/名称归销方；
+ * 税号扫描含裸税号兜底（统一信用代码 18 位=17 数字+校验位，前后防 20 位发票号子串）。
+ * 未配置/未对号返回 {}（完全保留旧逻辑结果，兼容无抬头校验配置的部署）。
+ * @param {string} text 拼接文本
+ * @param {Array<{name: string, taxNo: string}>} knownBuyers 配置真值表
  */
-function parseInvoiceText(rawText) {
+function extractPartiesAnchored(text, knownBuyers) {
+  if (!Array.isArray(knownBuyers) || !knownBuyers.length) return {};
+  const taxHits = [];
+  let m;
+  const taxRe = new RegExp(RE_TAX_NO.source, 'g');
+  while ((m = taxRe.exec(text)) !== null) taxHits.push(m[1]);
+  // 裸税号兜底（形态③）：标签式扫描无命中时才启用（防与标签命中重复）
+  if (!taxHits.length) {
+    const bareRe = /(?<![0-9A-Z])[0-9]{17}[0-9A-Z](?![0-9A-Z])/g;
+    while ((m = bareRe.exec(text)) !== null) taxHits.push(m[0]);
+  }
+  const uniqTax = [...new Set(taxHits)];
+
+  const nameHits = [];
+  const nameRe = /名称\s*[:：]\s*([^\n\r,，;；]{2,60})/g;
+  while ((m = nameRe.exec(text)) !== null) {
+    const v = m[1].split(/统一社会信用代码|纳税人识别号|销售方|购买方/)[0].replace(/[\s,，;；]+$/, '').trim();
+    if (v && !/^\d+$/.test(v)) nameHits.push(v);
+  }
+  const uniqNames = [...new Set(nameHits)];
+
+  // 购方锚定：税号命中配置优先，名称命中配置（包含关系）次之
+  const buyerCfg = knownBuyers.find(k => k.taxNo && uniqTax.includes(k.taxNo))
+    || knownBuyers.find(k => k.name && uniqNames.some(n => n.includes(k.name)));
+  if (!buyerCfg) return {};
+  // 销方税号取「非购方的最后一条」：版式购左销右、OCR 自上而下销方段靠后；且购方税号
+  // 可能有 OCR 漏位变体（实案：12100000400002697C 被 OCR 丢一位成 17 位）——取 first
+  // 会把漏位变体误当销方（2026-11-18 实案修正），最后一条才是真销方
+  const sellerTaxCandidates = uniqTax.filter(t => t !== buyerCfg.taxNo);
+  const sellerTax = sellerTaxCandidates.length ? sellerTaxCandidates[sellerTaxCandidates.length - 1] : null;
+  const sellerName = uniqNames.find(n => !(buyerCfg.name && n.includes(buyerCfg.name))) || null;
+  const buyerNameHit = uniqNames.find(n => buyerCfg.name && n.includes(buyerCfg.name)) || null;
+  return {
+    buyerTaxNo: buyerCfg.taxNo || null,
+    // 票面名称命中优先（保真原文），无命中回填配置名（抬头校验同源真值）
+    buyerName: buyerNameHit || buyerCfg.name || null,
+    sellerName,
+    sellerTaxNo: sellerTax,
+  };
+}
+
+/**
+ * 从发票文本抽取字段。输入文本（PDF 文本层或 OCR 分段用 \n 拼接）。
+ * @param {object} [opts] {knownBuyers} 已知购方真值表（购销方锚定兜底用，
+ *   来自 INVOICE_ALLOWED_BUYERS 配置；纯函数不读 config 由调用方传入）
+ */
+function parseInvoiceText(rawText, opts = {}) {
   const text = String(rawText || '').replace(/\u00a0/g, ' ');
   const fields = { invoiceCode: null, invoiceNo: null, issueDate: null, totalAmount: null, checkCode: null, buyerName: null, buyerTaxNo: null, sellerName: null, sellerTaxNo: null, invoiceContent: null };
   const warnings = [];
@@ -149,6 +226,15 @@ function parseInvoiceText(rawText) {
   fields.buyerTaxNo = buyer.taxNo;
   fields.sellerName = seller.name;
   fields.sellerTaxNo = seller.taxNo;
+  // 锚定兜底（2026-11-18 增强）：配置真值表（名称+税号）对号入座，字段级覆盖旧值——
+  // 旧 nth 逻辑部分成功（如税号恰好猜对）但名称丢失/张冠李戴时，锚定值逐字段修正；
+  // 锚定未对号（无配置/票面无购方特征）返回 {}，完全保留旧值（兼容无抬头校验配置部署）
+  const knownBuyers = Array.isArray(opts.knownBuyers) ? opts.knownBuyers : [];
+  const anchored = extractPartiesAnchored(text, knownBuyers);
+  if (anchored.buyerTaxNo) fields.buyerTaxNo = anchored.buyerTaxNo;
+  if (anchored.sellerTaxNo) fields.sellerTaxNo = anchored.sellerTaxNo;
+  if (anchored.buyerName) fields.buyerName = anchored.buyerName;
+  if (anchored.sellerName) fields.sellerName = anchored.sellerName;
   fields.invoiceContent = extractInvoiceContent(text);
 
   // 票种推断
@@ -195,7 +281,18 @@ function parseQrPayload(rawPayload) {
   return { ok: true, fields, invoiceType, warnings: [], qrPayload: String(rawPayload || ''), invoiceShape };
 }
 
-/** 图片 Buffer → 二维码解码 → parseQrPayload；无码/解码失败返回 null（调用方降级 OCR） */
+/** 单档解码（供多尺度序列复用）：sharp 变换 → jsQR → parseQrPayload */
+async function decodeQrWith(buffer, transform) {
+  const raw = await (transform ? transform(sharp(buffer)) : sharp(buffer)).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = raw;
+  const found = jsQR(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height);
+  return found && found.data ? parseQrPayload(found.data) : null;
+}
+
+/** 图片 Buffer → 二维码解码 → parseQrPayload；无码/解码失败返回 null（调用方降级 OCR）。
+ *  多尺度序列（2026-11-18 增强，截图票实测）：截图交票的分辨率/位置不可控——
+ *  低分辨率截图的 QR 模块密度不足 jsQR 解不出。序列：原图（>1600px 先缩小）
+ *  → 小图(<900px)放大 2x → 灰度+对比度归一（低对比截图）→ 放大 2x+灰度组合。 */
 async function tryQrChannel(buffer) {
   let raw;
   try {
@@ -203,8 +300,8 @@ async function tryQrChannel(buffer) {
   } catch (err) {
     return { result: null, error: `图片解码失败: ${err.message}` };
   }
-  // 大图缩小到 1600px 宽以内再解码（jsQR 对超大图既慢又易失败）；截图发票普遍偏小，不影响
   let { data, info } = raw;
+  // 大图缩小到 1600px 宽以内再解码（jsQR 对超大图既慢又易失败）
   if (info.width > 1600) {
     const scale = 1600 / info.width;
     const resized = await sharp(buffer).rotate().resize(Math.round(info.width * scale)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -212,8 +309,21 @@ async function tryQrChannel(buffer) {
     info = resized.info; // 用 sharp 实际输出尺寸，避免自行推算 ±1px 导致 jsQR 静默失败（复查 P2-11）
   }
   const found = jsQR(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height);
-  if (!found || !found.data) return { result: null, error: null };
-  return { result: parseQrPayload(found.data), error: null };
+  if (found && found.data) return { result: parseQrPayload(found.data), error: null };
+
+  // 多尺度重试（首档失败才逐档升级，正常票只付一档开销）
+  try {
+    const isSmall = info.width < 900;
+    const attempts = [];
+    if (isSmall) attempts.push((s) => s.resize(Math.round(info.width * 2)));
+    attempts.push((s) => s.grayscale().normalise());
+    if (isSmall) attempts.push((s) => s.resize(Math.round(info.width * 2)).grayscale().normalise());
+    for (const transform of attempts) {
+      const result = await decodeQrWith(buffer, transform);
+      if (result) return { result, error: null };
+    }
+  } catch (retryErr) { /* 增强档失败按原结果返回 */ }
+  return { result: null, error: null };
 }
 
 // ---------- PDF 通道 ----------
@@ -228,7 +338,7 @@ async function tryPdfChannel(buffer) {
     await parser.destroy().catch(() => {});
   }
   if (!text.trim()) return { result: null, error: 'PDF 无文本层（可能是扫描件，请发图片）' };
-  const parsedInvoice = parseInvoiceText(text);
+  const parsedInvoice = parseInvoiceText(text, { knownBuyers: knownBuyers() });
   if (parsedInvoice.missing.length) {
     return { result: null, error: `PDF 文本层识别要素不全（缺 ${parsedInvoice.missing.join('/')}）`, parsedInvoice };
   }
@@ -320,7 +430,7 @@ async function recognizeFromImage(buffer, ocrFallback) {
     if (typeof ocrFallback === 'function') {
       try {
         const segments = await ocrFallback(buffer);
-        const parsedInvoice = parseInvoiceText(segments.join('\n'));
+        const parsedInvoice = parseInvoiceText(segments.join('\n'), { knownBuyers: knownBuyers() });
         const merged = { ...qrResult.fields };
         // QR 精确要素优先，OCR 只补 QR 没有的字段（购买方/销售方/开票内容等）
         for (const k of Object.keys(parsedInvoice.fields || {})) {
@@ -344,7 +454,7 @@ async function recognizeFromImage(buffer, ocrFallback) {
     try {
       const segments = await ocrFallback(buffer);
       const joinedText = segments.join('\n');
-      const parsedInvoice = parseInvoiceText(joinedText);
+      const parsedInvoice = parseInvoiceText(joinedText, { knownBuyers: knownBuyers() });
       if (!parsedInvoice.missing.length) return { ok: true, source: 'ocr', ...parsedInvoice };
       const like = looksLikeInvoiceText(joinedText);
       // OCR 三要素也不全：若 QR 有部分要素则合并（QR 精确字段优先，OCR 补抬头）

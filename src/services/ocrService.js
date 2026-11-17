@@ -17,7 +17,10 @@ const path = require('path');
 const client = require('../feishu/client');
 const config = require('../config');
 
-const OCR_API_PATH = '/open-apis/optical_char_recognition/v1/image/basic_recognize';
+// 注意：client.requestAPI 会拼 BASE_URL（已含 /open-apis）——path 禁止再带前缀。
+// 2026-11-18 修复：原值误带 /open-apis 前缀 → 实际请求 /open-apis/open-apis/... 恒 404，
+// OCR 自上线起从未成功过一次（51 张 QR 票抬头补录 0 成功、qrcode+ocr 通道 0 张的根因）
+const OCR_API_PATH = '/optical_char_recognition/v1/image/basic_recognize';
 
 // ============================================================
 // 内置默认字段规则（增值税发票/数电票常见字段）。
@@ -229,6 +232,15 @@ async function recognizeBuffer(buffer) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) {
     throw new Error('OCR 失败: 图片内容为空');
   }
+  // 小图放大（2026-11-18 增强，截图票实测）：截图交票分辨率不可控，宽 <700px 的小票
+  // 直接 OCR 分段碎、字段提不出——先放大到 1200px 再喂飞书（发票为大字票据，放大无损语义）
+  try {
+    const sharp = require('sharp');
+    const meta = await sharp(buffer).metadata();
+    if (meta.width && meta.width < 700) {
+      buffer = await sharp(buffer).rotate().resize({ width: 1200 }).jpeg({ quality: 92 }).toBuffer();
+    }
+  } catch (err) { /* 尺寸读不到按原图处理 */ }
   // 超限大图先压缩（2026-10-17 采购回溯实测：7.78MB 照片票被飞书直接拒）——
   // 缩放 + JPEG 质量渐降压到上限内（发票为大字票据，压缩不影响识别）
   if (buffer.length > config.ocr.maxImageBytes) {

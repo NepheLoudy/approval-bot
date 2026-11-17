@@ -125,7 +125,54 @@ async function main() {
   assert.equal(ocrCalls.length, 1);
   assert.equal(ocrCalls[0].method, 'POST');
   assert.equal(ocrCalls[0].urlPath, ocrService.OCR_API_PATH,
-    '必须走 /open-apis/optical_char_recognition/v1/image/basic_recognize');
+    '必须走 basic_recognize 端点');
+  // 双前缀回归锁（2026-11-18 实案：OCR_API_PATH 误带 /open-apis → 请求 /open-apis/open-apis/…
+  // 恒 404，OCR 自上线起 0 成功、51 张 QR 票抬头补录全灭）
+  assert.ok(!ocrService.OCR_API_PATH.startsWith('/open-apis'),
+    'OCR_API_PATH 禁止自带 /open-apis 前缀（requestAPI 的 BASE_URL 已含，双拼恒 404）');
+
+  // ---------- 单元：购销方锚定提取（真实素材三形态回归，2026-11-18） ----------
+  const { parseInvoiceText } = require('../src/services/invoiceParser');
+  const KNOWN = [{ name: '重庆大学', taxNo: '12100000400002697C' }];
+  // 形态① OCR 分段流（飞书 basic_recognize 实测）：标题段+名称对+税号对（购前销后）
+  const ocrFlow = [
+    '电子发票(普通发票)', '发票号码:26442000010989568246', '开票日期:2026年09月23日',
+    '购买方信息', '销售方信息', '名称:重庆大学', '名称:广东铨洲科技有限公司',
+    '统一社会信用代码/纳税人识别号:1210000040002697C', '统一社会信用代码/纳税人识别号:91441900MA54YP1H9P',
+    '价税合计(大写) 肆佰柒拾捌圆捌角柒分 (小写) ¥478.87',
+  ].join('\n');
+  const ocrParsed = parseInvoiceText(ocrFlow, { knownBuyers: KNOWN });
+  assert.equal(ocrParsed.fields.buyerTaxNo, '12100000400002697C', '形态① 购方税号=配置真值');
+  assert.equal(ocrParsed.fields.buyerName, '重庆大学', '形态① 购方名称');
+  assert.equal(ocrParsed.fields.sellerTaxNo, '91441900MA54YP1H9P', '形态① 销方税号（购方 OCR 漏位变体不得误占销方）');
+  assert.equal(ocrParsed.fields.sellerName, '广东铨洲科技有限公司', '形态① 销方名称');
+  // 形态② PDF 乱序流（立创实样）：标签逐字分行+销方税号先于购方出现+裸名称段
+  const disorderFlow = [
+    '电子发票（普通发票） 发票号码: 26957000000248204704 开票日期: 2026年09月18日',
+    '销 售 方 信 息 项目名称 规格型号 *印制电路板*线路板 SuperCap2024_P 片 5 3.824 19.12 13% 2.48',
+    '合 计 ¥19.12 ¥2.48 价税合计(大写) 贰拾壹圆陆角 (小写) ¥21.60',
+    '购 买 方 信 息 91440300795432869Y 12100000400002697C 名称:深圳嘉立创科技集团股份有限公司',
+  ].join('\n');
+  const disParsed = parseInvoiceText(disorderFlow, { knownBuyers: KNOWN });
+  assert.equal(disParsed.fields.buyerTaxNo, '12100000400002697C', '形态② 乱序流购方税号锚定（不得按位置猜成销方）');
+  assert.equal(disParsed.fields.sellerTaxNo, '91440300795432869Y', '形态② 销方税号');
+  assert.equal(disParsed.fields.buyerName, '重庆大学', '形态② 购方名称（票面名称段截断时回填配置名）');
+  assert.equal(disParsed.fields.sellerName, '深圳嘉立创科技集团股份有限公司', '形态② 销方名称');
+  // 形态③ 税号裸奔（无「统一社会信用代码」标签）：裸 18 位扫描兜底
+  const bareFlow = '电子发票 发票号码:26957000000203105778 开票日期:2026年09月20日 价税合计(小写) ¥113.51 12100000400002697C 91440300597793399Q 名称:深圳市立创电子商务有限公司';
+  const bareParsed = parseInvoiceText(bareFlow, { knownBuyers: KNOWN });
+  assert.equal(bareParsed.fields.buyerTaxNo, '12100000400002697C', '形态③ 裸税号锚定（标签缺失兜底）');
+  assert.equal(bareParsed.fields.sellerTaxNo, '91440300597793399Q', '形态③ 销方裸税号');
+  // 开票内容列数据截断（单空格列流实案）
+  assert.equal(bareParsed.fields.invoiceContent === null || !/个\s+\d/.test(bareParsed.fields.invoiceContent),
+    true, '开票内容不得混入「量词+数字」列数据');
+  const colFlow = '价税合计(小写) ¥113.51 *电子元件*连接器 AFC01-S24FCA-0 个 15 0.6533333333 9.80 13% 1.27';
+  const colParsed = parseInvoiceText(colFlow, { knownBuyers: KNOWN });
+  assert.equal(colParsed.fields.invoiceContent, '*电子元件*连接器 AFC01-S24FCA-0', '开票内容列数据截断（连接器型号保留、数量单价剥离）');
+  // 无配置部署兼容：锚定不生效，旧 nth 逻辑照常（税号有完整标签可提，名称提不到）
+  const noCfgParsed = parseInvoiceText(ocrFlow, {});
+  assert.equal(noCfgParsed.fields.buyerTaxNo, '1210000040002697C', '无配置时旧标签逻辑照常提税号（兼容）');
+  assert.equal(noCfgParsed.fields.buyerName, null, '无配置时名称提取不到（锚定关闭，不回填）');
   assert.ok(Buffer.from(ocrCalls[0].body.image, 'base64').equals(FAKE_IMAGE), 'image 必须是图片的 base64');
   assert.equal(ocrCalls[0].opts.timeoutMs, config.ocr.timeoutMs);
   assert.deepEqual(segments, ['发票号码:1', '价税合计 ¥9.90']);
