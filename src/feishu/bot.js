@@ -541,7 +541,7 @@ function stripCardInjection(s) {
  * 2026-09-29 曼波定：卡内直接按序内嵌全部有效发票二维码（imageKey 由 sendDeliveryCard
  * 预先上传换得），财务对屏幕按序号扫码即可完成录入；自动触发场景头部/文案切换。
  */
-function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {} } = {}) {
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, blankCount = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {} } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}&view=vewwHv4bG4`
@@ -590,6 +590,8 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
     lines.push(``, `⚠️ 含 ${warningCount} 张异常票（录入时留意）：`, ...abnormalItemLines(abnormalItems));
   }
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);
+  // 空白票面提示（2026-11-18 检测批）：打印件里该票已是占位页，提醒补票
+  if (blankCount > 0) lines.push(`⚠️ ${blankCount} 张票面版式文件空白（打印件已用占位页）——请队员从电子税务局重新下载票面补印，扫码录入不受影响`);
 
   lines.push(
     ``,

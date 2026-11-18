@@ -438,6 +438,10 @@ async function lockBatch(batchNo, project, options = {}) {
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       abnormalItems: collectAbnormalItems(pool),
       missingContent: pool.filter(i => !i.invoiceContent).length,
+      // 空白票面计数（2026-11-18 检测批）：memo 过的票才有 __blankValue——锁定 deferDelivery
+      // 阶段不渲染，此处全为 undefined 恒 0；confirm/regen 渲染后再触发 lock 侧已不在。
+      // 空白计数实际经 doRegenerateBatchFiles 侧统计（同 memo 复用）
+      blankCount: pool.filter(i => i.__blankValue === true).length,
       recordId: batchRecord.record_id, items: pool,
     };
   }));
@@ -670,7 +674,7 @@ async function doRegenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift };
+  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift, blankCount: items.filter(i => i.__blankValue === true).length };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
@@ -696,6 +700,66 @@ async function downloadMediaSafe(fileToken, dlCache = null, urlByToken = null) {
   }
 }
 
+// ---------- 空白票面检测（2026-11-18 增强批，863426 空白票实案） ----------
+// 实案：队员交来的数电票版式文件结构合法但数据层未写入（二维码模板层在、票面全空），
+// QR 通道照常识别入账 → 打印件出现整页白纸，财务装订归档时才发现。
+// 检测：渲染帧非白像素占比（正常发票文字+表格密度 >2%；空白模板 <0.5%）。
+// 结果记 item.blankPage（懒计算 memo 到 item 对象），打印件占位升级+批次 blankCount 计数。
+
+const BLANK_INK_RATIO = 0.005;   // 非白像素占比阈值（低于此=空白票面）
+const BLANK_RENDER_WIDTH = 480;  // 检测渲染宽（够分清文字块，省内存）
+const BLANK_MIN_PIXELS = 40000;  // 最小统计像素数（~250×160）：过小样本占比无统计意义，
+                                 // 且真票面文字块数量也远超此阈值的可分辨下限
+
+/** 渲染帧非白像素占比（0~1）。非图/解码失败返回 null（不作空白判定）。 */
+async function inkRatioOf(buf) {
+  try {
+    if (!Buffer.isBuffer(buf) || buf.length < 8) return null;
+    if (!(buf.slice(0, 4).toString('latin1') === '%PDF' || buf[0] === 0xFF || buf[0] === 0x89)) return null;
+    let png;
+    if (buf.slice(0, 4).toString('latin1') === '%PDF') {
+      const pages = await invoiceParser.renderPdfPages(buf, 1, 1);
+      if (!pages || !pages.length) return null;
+      png = pages[0];
+    } else {
+      png = buf;
+    }
+    const { data, info } = await sharp(png)
+      .resize({ width: BLANK_RENDER_WIDTH, withoutEnlargement: true })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const total = info.width * info.height;
+    // 样本过小（测试夹具/异常小图）不做空白判定（占比无统计意义，宁可漏判不可误伤真票）
+    if (total < BLANK_MIN_PIXELS) return null;
+    let ink = 0;
+    for (let i = 0; i < total; i++) {
+      if (data[i] < 200) ink++; // 灰度 <200 视为笔迹/印刷（白底 255，纸纹噪声 >230）
+    }
+    return ink / total;
+  } catch (err) {
+    console.warn(`[批次] 空白票面检测失败（不阻塞，按有内容处理）: ${err.message}`);
+    return null;
+  }
+}
+
+/** item 的空白判定（memo 到 item 上；PDF 多页票只查首页——首页空白即整票无效） */
+async function blankPageOf(item, buf, dlCache) {
+  if (item.__blankChecked) return item.__blankValue;
+  // 检测用渲染帧与打印用下载帧分开算（同 token 缓存命中时零额外下载）
+  let target = buf;
+  if (!target && item.fileTokens.length) {
+    target = await downloadMediaSafe(item.fileTokens[0], dlCache, item.fileUrls);
+  }
+  const ratio = target ? await inkRatioOf(target) : null;
+  item.__blankChecked = true;
+  item.__blankValue = ratio !== null && ratio < BLANK_INK_RATIO;
+  if (item.__blankValue) {
+    console.warn(`[批次] 空白票面检出（尾号 ${String(item.invoiceNo || '').slice(-6)}，非白占比 ${ratio ? ratio.toFixed(4) : '?'}）——打印件用占位页，票号/金额等已识别字段不受影响`);
+  }
+  return item.__blankValue;
+}
+
 async function uploadBatchPdf(batchNo, items, opts = {}) {
   const dlCache = opts.dlCache || null;
   const out = await PDFDocument.create();
@@ -710,6 +774,13 @@ async function uploadBatchPdf(batchNo, items, opts = {}) {
       const buf = await downloadMediaSafe(token, dlCache, item.fileUrls);
       if (!buf) {
         addPlaceholderPage(out, index, item, '票面原件下载失败，请财务手工补');
+        index++;
+        continue;
+      }
+      // 空白票面检测（2026-11-18，863426 实案）：检出用占位页替代（打印装订不留白纸），
+      // 扫码清单二维码不受影响（票号/金额已由 QR/OCR 通道识别）
+      if (await blankPageOf(item, buf, dlCache)) {
+        addPlaceholderPage(out, index, item, 'BLANK PAGE DETECTED - invoice layout file is empty, please re-download from tax portal');
         index++;
         continue;
       }
@@ -1194,6 +1265,11 @@ async function uploadBatchDocx(batchNo, items, opts = {}) {
       let buf = await downloadMediaSafe(token, dlCache, item.fileUrls);
       if (!buf) {
         children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 票面原件下载失败，请财务手工补', color: 'FF0000' })] }));
+        continue;
+      }
+      // 空白票面检测（与 PDF 版同 memo：检出后 Word 版同样不嵌白纸，红字提示）
+      if (await blankPageOf(item, buf, dlCache)) {
+        children.push(new Paragraph({ children: [new TextRun({ text: '⚠️ 该票版式文件为空白（数据层缺失）——请队员从电子税务局重新下载有效票面补印；扫码录入不受影响', color: 'FF0000' })] }));
         continue;
       }
       if (buf.length > 4 && buf.slice(0, 4).toString('latin1') === '%PDF') {

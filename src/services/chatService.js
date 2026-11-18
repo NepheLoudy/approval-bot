@@ -327,7 +327,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         batchNo: r.batchNo, project: r.projects.join('/'), count: r.count, amount: r.amount,
         summary: r.summary, warningCount: r.warningCount, missingContent: r.missingContent,
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
-        specialCount: r.specialCount,
+        specialCount: r.specialCount, blankCount: r.blankCount,
         scanItems: r.scanItems || [],
         abnormalItems: r.abnormalItems || [],
       });
@@ -446,7 +446,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         batchNo: r.batchNo, project: r.project || '', count: r.count, amount: r.amount || 0,
         summary: r.summary || '', warningCount: 0, missingContent: 0,
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
-        specialCount: r.specialCount, scanItems: r.scanItems || [], abnormalItems: r.abnormalItems || [],
+        specialCount: r.specialCount, blankCount: r.blankCount, scanItems: r.scanItems || [], abnormalItems: r.abnormalItems || [],
       });
       if (sent) lines.push('· 📦 最新交付卡已重发群（二维码按当前票面重建）');
       else lines.push('· ⚠️ 交付卡重发被播报熔断暂缓（今日卡片额度已满），稍后重试或从批次表附件取用');
@@ -470,7 +470,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         batchNo: r.batchNo, project: g.project || '', count: g.count, amount: g.amount || 0,
         summary: g.summary || '', warningCount: 0, missingContent: 0,
         generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
-        specialCount: g.specialCount, scanItems: g.scanItems || [], abnormalItems: g.abnormalItems || [],
+        specialCount: g.specialCount, blankCount: g.blankCount, scanItems: g.scanItems || [], abnormalItems: g.abnormalItems || [],
       });
     } catch (err) {
       console.error('[对话服务] 确认后交付卡发送失败:', err.message);
