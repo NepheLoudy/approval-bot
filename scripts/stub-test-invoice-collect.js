@@ -183,6 +183,17 @@ async function main() {
   assert.equal(invoiceCollectServiceModule.matchRecord(999, single).match.applyNo, 'C1', '名下唯一候选直接归（金额比对闸兜底）');
   assert.equal(invoiceCollectServiceModule.matchRecord(100, []).match, null);
 
+  // ---------- 单元：多票求和制 matchRecord（2026-11-20 曼波定：剩余额度口径） ----------
+  const multiOpen = [
+    { applyNo: 'M1', amount: 500, collectedSum: 300, collectedCount: 1, material: '电机', senderName: '小张' },
+    { applyNo: 'M2', amount: 180, collectedSum: 0, collectedCount: 0, material: '舵机', senderName: '小张' },
+  ];
+  assert.equal(invoiceCollectServiceModule.matchRecord(200, multiOpen).match.applyNo, 'M1', '剩余额度精确匹配（500-300=200）→归 M1');
+  assert.equal(invoiceCollectServiceModule.matchRecord(200, multiOpen).match.collectedSum, 300, '候选带已收进度（供回执/比对闸）');
+  assert.equal(invoiceCollectServiceModule.matchRecord(165, multiOpen).match, null, '不匹配任何剩余额度→待人工（note 含已收进度）');
+  const multiSingle = [{ applyNo: 'S1', amount: 500, collectedSum: 300, collectedCount: 1 }];
+  assert.equal(invoiceCollectServiceModule.matchRecord(999, multiSingle).match.applyNo, 'S1', '多票唯一候选仍直接归（金额闸兜底）');
+
   // ---------- 单元：抬头校验 ----------
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerTaxNo: '50000000TESTXX01' }).status, null, '税号命中放行');
   assert.equal(invoiceCollectServiceModule.checkBuyer({ buyerName: '重庆大学' }).status, null, '名称命中放行');
@@ -361,6 +372,44 @@ async function main() {
   assert.equal(r5row.fields['校验状态'], '金额不符');
   assert.ok(typeof r5row.fields['金额差'] === 'number', '金额差落字段（两入口口径统一，复查 P2-10）');
   assert.ok(Math.abs(r5row.fields['金额差'] - 379.50) < 0.01, `金额差 = 发票-申请（实际 ${r5row.fields['金额差']}）`);
+
+  // ---------- 链路：多票求和制两连票（2026-11-20 曼波定） ----------
+  // 审批 500：第一张 300（中间态，不标金额不符）→ 第二张 200（收齐，回执带 🧮 进度）
+  approvalRows.set('rec_multi', {
+    '申请编号': { text: '202611200001' },
+    '申请状态': '已通过',
+    '审批流程': '💸【27赛季】千里采购申请/发票提交',
+    '发起人': [{ id: 'ou_member1', name: '小张' }],
+    '总金额': 500,
+    '购买物资名称': '主板',
+  });
+  // 第一张：¥300（< 剩余额度 500 → 单侧闸不标，合法中间态）
+  ocrSegments = shuziText.split('\n')
+    .map(l => l.replace('24312000000123456789', '24312000000123000001').replace('120.50', '300.00'));
+  const rMulti1 = await svc.collectFromMessage({
+    openId: 'ou_member1', messageId: 'om_m1', fileKey: 'img_v2_m1', msgType: 'image', source: 'private',
+  });
+  assert.equal(rMulti1.action, 'collected', '第一张 300 正常收录');
+  assert.notEqual(rMulti1.verifyStatus, '金额不符', `票<剩余额度是多票合法中间态不标金额不符（实际 ${rMulti1.verifyStatus}）`);
+  const m1row = collectRows[collectRows.length - 1];
+  assert.ok(Math.abs(m1row.fields['金额差'] - (-200)) < 0.01, `金额差照写负差=本张-剩余（实际 ${m1row.fields['金额差']}）`);
+  // 第二张：¥200（≈剩余额度 200 → 收齐）
+  ocrSegments = shuziText.split('\n')
+    .map(l => l.replace('24312000000123456789', '24312000000123000002').replace('120.50', '200.00'));
+  const rMulti2 = await svc.collectFromMessage({
+    openId: 'ou_member1', messageId: 'om_m2', fileKey: 'img_v2_m2', msgType: 'image', source: 'private',
+  });
+  assert.equal(rMulti2.action, 'collected', '第二张 200 正常收录');
+  assert.notEqual(rMulti2.verifyStatus, '金额不符', '收齐张 diff≈0 通过');
+  assert.ok(sentTexts.some((s) => s.text.includes('🧮') && s.text.includes('已收 1 张')), '回执带多票进度行（已收 1 张）', JSON.stringify(sentTexts));
+  // 收齐后再来一张 → 名下无未收齐候选 → 待人工
+  ocrSegments = shuziText.split('\n')
+    .map(l => l.replace('24312000000123456789', '24312000000123000003').replace('120.50', '10.00'));
+  const rMulti3 = await svc.collectFromMessage({
+    openId: 'ou_member1', messageId: 'om_m3', fileKey: 'img_v2_m3', msgType: 'image', source: 'private',
+  });
+  assert.equal(rMulti3.action, 'collected', '收齐后多交的票仍收录进台账');
+  assert.equal(rMulti3.verifyStatus, '待人工', '收齐后候选消失→待人工（财务核对）');
 
   // ---------- 链路：催办口径并入采集表（getCollectedApplyNoSet / fail-open） ----------
   const nos = await approvalService.getCollectedApplyNoSet();

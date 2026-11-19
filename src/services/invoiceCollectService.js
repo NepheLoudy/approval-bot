@@ -66,51 +66,66 @@ function checkBuyer(fields) {
 }
 
 /**
- * 名下可归类记录：已通过 + 活跃流程 + 两栏均未交票 + 采集台账未收录
- * （「发票/补交发票/采集台账」三口径等价——同队员连续交多张票时，
- *   先交的已进台账，不再作为候选干扰后续归类）。
- * 返回 [{record_id, applyNo, amount, material, project, senderName}]
+ * 名下可归类记录（2026-11-20 多票求和制，曼波定）：已通过 + 活跃流程 + 两栏均未交票
+ * + 采集台账**未收齐**（已收票金额之和 < 审批总金额 ±0.01——一个审批可分多张发票分批交，
+ * 交过几张的审批只要没收齐仍保留候选；收齐的从候选消失，再交的票转待人工）。
+ * 返回 [{record_id, applyNo, amount, collectedSum, collectedCount, material, project, senderName}]
  */
 async function listOpenRecordsByOpenId(openId) {
-  const collectedNos = await approvalService.getCollectedApplyNoSet();
+  const collectedSumMap = await collectStore.sumByApplyNo();
   const all = await approvalService.getAllApprovals();
   return all
     .map(r => ({ record_id: r.record_id, fields: r.fields || {} }))
     .filter(({ fields: f }) => {
       if (f['申请状态'] !== config.approvalStatus.APPROVED) return false;
       if (!approvalService.isActiveProcess(f)) return false;
-      if (approvalService.hasInvoiceSubmitted(f)) return false;
+      // 「发票/补交发票」两栏排除废止（2026-11-20 多票求和制）：自动采集每张票都镜像
+      // append「补交发票」栏，多票场景第二张起该栏必非空——两栏口径会把多票打回待人工
+      // （本需求病灶）。收齐判定统一走台账求和口径（见下）。
       const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-      return applyNo && !collectedNos.has(applyNo);
+      if (!applyNo) return false;
+      // 求和制收齐判定：台账已收和 ≥ 审批总金额-0.01 → 交齐，不再候选
+      const amount = typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null);
+      const collected = collectedSumMap.get(applyNo);
+      if (amount !== null && collected && collected.sum >= amount - 0.01) return false;
+      return true;
     })
     .filter(({ fields: f }) =>
       Array.isArray(f['发起人']) && f['发起人'].some(u => u.id === openId))
-    .map(({ record_id, fields: f }) => ({
-      record_id,
-      applyNo: f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : record_id,
-      amount: typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null),
-      material: f['购买物资名称'] || '',
-      project: f['项目'] ? (f['项目'].name || String(f['项目'])) : '',
-      senderName: (Array.isArray(f['发起人']) ? f['发起人'].find(u => u.id === openId) : null)?.name || '',
-    }));
+    .map(({ record_id, fields: f }) => {
+      const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : record_id;
+      const collected = collectedSumMap.get(applyNo) || { sum: 0, count: 0 };
+      return {
+        record_id,
+        applyNo,
+        amount: typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null),
+        collectedSum: Math.round((collected.sum || 0) * 100) / 100,
+        collectedCount: collected.count || 0,
+        material: f['购买物资名称'] || '',
+        project: f['项目'] ? (f['项目'].name || String(f['项目'])) : '',
+        senderName: (Array.isArray(f['发起人']) ? f['发起人'].find(u => u.id === openId) : null)?.name || '',
+      };
+    });
 }
 
 /**
- * 金额归类匹配（曼波：一名队员多种发票私聊提交时需自行核对金额归类）。
- * 金额精确匹配(±0.01)唯一 → 自动归类；名下仅一条待交票 → 直接归它（金额比对闸兜底标「金额不符」）；
- * 多候选/无候选 → 待人工（回执列候选，队员核对/找财务调整）。
+ * 金额归类匹配（2026-11-20 多票求和制，曼波定：多张发票金额加起来=审批即可）。
+ * 匹配口径改为「剩余额度」：remaining = 审批总金额 - 台账已收票金额和；
+ * 发票金额 ≈ 剩余额度(±0.01) 唯一 → 自动归类；名下仅一条候选 → 直接归它（金额比对闸兜底标「金额不符」）；
+ * 多候选/无候选 → 待人工（回执列候选与进度，队员核对/找财务调整）。
  */
 function matchRecord(invoiceAmount, openRecords) {
   if (!openRecords.length) return { match: null, status: '待人工', note: '名下没有待交票的已通过申请（可能都已交票，请找财务确认归类）' };
-  const exact = openRecords.filter(r => r.amount !== null && Math.abs(r.amount - invoiceAmount) < 0.01);
+  const remainingOf = (r) => (r.amount !== null ? Math.round((r.amount - (r.collectedSum || 0)) * 100) / 100 : null);
+  const exact = openRecords.filter(r => remainingOf(r) !== null && Math.abs(remainingOf(r) - invoiceAmount) < 0.01);
   if (exact.length === 1) return { match: exact[0], status: null, note: null };
   if (exact.length > 1) {
-    return { match: null, status: '待人工', note: `有 ${exact.length} 条同金额申请（${exact.map(r => r.applyNo).join('、')}），已转财务人工归类` };
+    return { match: null, status: '待人工', note: `有 ${exact.length} 条同剩余额度的申请（${exact.map(r => r.applyNo).join('、')}），已转财务人工归类` };
   }
   if (openRecords.length === 1) {
     return { match: openRecords[0], status: null, note: null }; // 唯一候选直接归，金额出入由金额比对闸标记
   }
-  return { match: null, status: '待人工', note: `金额与名下申请均不一致（名下待交票：${openRecords.map(r => `${r.applyNo} ¥${r.amount}`).join('、') || '无'}）` };
+  return { match: null, status: '待人工', note: `金额与名下申请剩余额度均不一致（名下待交票：${openRecords.map((r) => `${r.applyNo} 已收${r.collectedCount}张¥${(r.collectedSum || 0).toFixed(2)}/共¥${r.amount}`).join('、') || '无'}）` };
 }
 
 /** 打回回执文案 */
@@ -187,16 +202,26 @@ async function collectFromMessage(payload) {
     const { match, status: matchStatus, note: matchNote } = matchRecord(f.totalAmount, openRecords);
     const resolvedName = senderName || (match && match.senderName) || '';
 
-    // 6. 金额比对 + 抬头校验 → 校验状态（优先级：金额不符 > 抬头存疑 > 匹配状态 > 通过）
+    // 6. 金额比对（多票求和制单侧闸，2026-11-20 曼波定「金额加起来=审批即可」）：
+    //    基准=剩余额度 remaining=审批总额-台账已收和；**只拦「超剩余额度」**（amountDiff > 容忍）——
+    //    票 < 剩余额度是多票分批交的合法中间态（队员还会再交），不标金额不符；
+    //    「金额差」字段照写负差（还差多少，财务收齐核对用）。抬头校验同前。
     let verifyStatus = matchStatus || '通过';
     const notes = [];
     let amountDiff = null;
+    let remainingNote = '';
     if (match && match.amount !== null) {
-      amountDiff = Math.round((f.totalAmount - match.amount) * 100) / 100;
-      const tol = Math.max(Math.abs(match.amount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
-      if (Math.abs(amountDiff) > tol) {
+      const remaining = Math.round((match.amount - (match.collectedSum || 0)) * 100) / 100;
+      amountDiff = Math.round((f.totalAmount - remaining) * 100) / 100;
+      const tol = Math.max(Math.abs(remaining) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
+      if (amountDiff > tol) {
         verifyStatus = '金额不符';
-        notes.push(`发票 ¥${f.totalAmount.toFixed(2)} vs 申请 ¥${match.amount.toFixed(2)}（差 ${amountDiff.toFixed(2)}，超容忍 ±${tol.toFixed(2)}）`);
+        const progress = match.collectedCount
+          ? `该申请已收 ${match.collectedCount} 张 ¥${(match.collectedSum || 0).toFixed(2)}/共 ¥${match.amount.toFixed(2)}，剩余额度 ¥${remaining.toFixed(2)}；`
+          : '';
+        notes.push(`发票 ¥${f.totalAmount.toFixed(2)} vs 剩余额度 ¥${remaining.toFixed(2)}（超 ${amountDiff.toFixed(2)}，容忍 ±${tol.toFixed(2)}）。${progress}多张发票金额加起来等于申请金额即可`);
+      } else if (match.collectedCount) {
+        remainingNote = `该申请已收 ${match.collectedCount} 张 ¥${(match.collectedSum || 0).toFixed(2)}，本张后累计 ¥${(match.collectedSum + f.totalAmount).toFixed(2)}/共 ¥${match.amount.toFixed(2)}`;
       }
     }
     const buyerCheck = checkBuyer(f);
@@ -238,11 +263,11 @@ async function collectFromMessage(payload) {
       '采集时间': Date.now(),
     };
     const created = await collectStore.createCollect(collectFields);
-    return { created, match, verifyStatus, notes, matchNote, resolvedName, buyerCheck, fileToken };
+    return { created, match, verifyStatus, notes, matchNote, resolvedName, buyerCheck, fileToken, remainingNote };
   });
 
   if (dupGuard && dupGuard.action) return dupGuard; // 查重拦截（含静默 already_collected）
-  const { match, verifyStatus, notes, matchNote, buyerCheck, fileToken, created } = dupGuard;
+  const { match, verifyStatus, notes, matchNote, buyerCheck, fileToken, created, remainingNote } = dupGuard;
 
   // 8. 镜像回写审批表「补交发票」附件栏（按记录串行 + 先读后 append；GET 走带 code 校验的
   //    getRecord——裸 requestAPI 不抛错会把读失败当空列，PUT 整列覆盖清掉已有附件，复查 P1-4）
@@ -268,6 +293,8 @@ async function collectFromMessage(payload) {
   if (match) {
     lines.push(`· 归类：申请 ${match.applyNo}（${match.material || '未填物资'}${match.project ? '/' + match.project : ''}，申请 ¥${match.amount ?? '?'}）`);
     if (verifyStatus === '金额不符') lines.push(`· ⚠️ ${notes[0] || '金额与申请有出入'}`);
+    // 多票求和制进度行（2026-11-20）：已收张数/金额+本张后累计，队员自己知道还差多少
+    if (match.collectedCount && verifyStatus !== '金额不符') lines.push(`· 🧮 ${remainingNote}`);
     lines.push(mirrored ? '· 已同步到审批表补交发票栏' : '· ⚠️ 审批表镜像同步失败，已记录台账（财务可见），不影响收录');
   } else {
     lines.push(`· 归类：待财务人工归类——${matchNote || ''}`);

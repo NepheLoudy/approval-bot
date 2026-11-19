@@ -45,6 +45,31 @@ async function findByInvoiceNo(invoiceNo) {
 }
 
 /**
+ * 按关联申请编号聚合已交票（2026-11-20 多票求和对账，曼波定）：
+ * 一个审批可分多张发票提交（分批交票），金额对账=已收票金额之和 vs 审批总金额。
+ * 一次全量 listCollect 内存聚合（防逐审批 N+1 查询）。
+ * @returns {Map<string, {sum: number, count: number}>} applyNo → 已收金额和/张数
+ *   （价税合计非法值按 0 计并 warn——脏数据静默吞会让「收齐」判定失真）
+ */
+async function sumByApplyNo() {
+  const collects = await listCollect();
+  const map = new Map();
+  for (const r of collects) {
+    const applyNo = String(r.fields['关联申请编号'] || '');
+    if (!applyNo) continue; // 未归类票不进求和（归类后由 matchRecord 关联）
+    const amt = Number(r.fields['价税合计']);
+    if (!Number.isFinite(amt)) {
+      console.warn(`[采集台账] 关联申请 ${applyNo} 存在非法价税合计（${JSON.stringify(r.fields['价税合计'])}），按 0 计入求和——请财务核对该行`);
+    }
+    const cur = map.get(applyNo) || { sum: 0, count: 0 };
+    cur.sum += Number.isFinite(amt) ? amt : 0;
+    cur.count += 1;
+    map.set(applyNo, cur);
+  }
+  return map;
+}
+
+/**
  * 三元组近似查重（开票日期+价税合计+销售方税号）：发票号 OCR 错一位时的第二道闸。
  * 注意「开票日期」在表内是毫秒时间戳（DATE 字段），入参 issueDate 是 'YYYY-MM-DD'，
  * 这里统一转毫秒比对（此前直接字符串比较导致该闸恒不命中——复查 P1-1）。
@@ -137,6 +162,7 @@ module.exports = {
   batchTableId,
   listCollect,
   findByInvoiceNo,
+  sumByApplyNo,
   findBySimilarity,
   createCollect,
   updateCollect,
