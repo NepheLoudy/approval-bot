@@ -302,9 +302,14 @@ async function doBackfillCollect(options = {}) {
 
     // 逐附件识别 → 发票金额在窗口内精确匹配唯一记录 → 回填（复用金额匹配语义）
     let matchedAny = false;
-    // 全量附件（2026-10-20 实案：一申请挂 8 张发票，原 slice(0,3) 只处理前 3 个 → 漏票；
-    // 重装 1017 四申请共 11 张只收 4 张）。上限 20 防异常大附件列表。
-    for (const att of attachments.slice(0, 20)) {
+    // 全量附件（2026-10-20 实案：一申请挂 8 张发票，原 slice(0,3) 只处理前 3 个 → 漏票）。
+    // 上限 50 防异常大附件列表兜底；2026-11-19 吴子建实案：23 附件在旧上限 20 处静默截断
+    // 漏收 3 张真票（¥2310.74）——截断必须显式告警进 errors，不再静默。
+    const ATT_LIMIT = 50;
+    if (attachments.length > ATT_LIMIT) {
+      result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 附件 ${attachments.length} 个超上限 ${ATT_LIMIT}，仅处理前 ${ATT_LIMIT} 个（${attachments.length - ATT_LIMIT} 个被截断，需人工补）`);
+    }
+    for (const att of attachments.slice(0, ATT_LIMIT)) {
       if (result.collected >= limit) break;
       let buffer;
       try {
