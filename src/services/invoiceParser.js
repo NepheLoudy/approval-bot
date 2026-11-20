@@ -82,6 +82,14 @@ function looksLikeInvoiceText(text) {
   return /(发票|价税合计|统一社会信用代码|纳税人识别号|增值税|机器编号|开票日期)/.test(String(text || ''));
 }
 
+/** 名称值清洗（乱序文本流「名称： \t名称：」空标签过滤——2026-11-20 大对账诊断实案：
+ *  PDF 乱序流的「名称：」值段吞进下一个标签，落库 sellerName='名称：' 脏值） */
+function cleanNameValue(v) {
+  const t = String(v || '').split(/统一社会信用代码|纳税人识别号|销售方|购买方/)[0].replace(/[\s,，;；]+$/, '').trim();
+  if (!t || /^[^：:]{0,6}[:：]\s*$/.test(t) || /^\d+$/.test(t)) return null;
+  return t;
+}
+
 /** 从一段含「购买方…销售方」或分段拼接的文本中按角色取名称/税号 */
 function extractParty(text, role) {
   // 形态1：同段「购买方名称:XXX 统一社会信用代码:YYY」（OCR 拼接/PDF 文本）
@@ -94,8 +102,8 @@ function extractParty(text, role) {
     const m = text.match(re);
     if (m) {
       // 同段混排（OCR 拼接常见）：名称截断到税号字段标签之前，避免吞进「纳税人识别号:…」
-      name = m[1].split(/统一社会信用代码|纳税人识别号|销售方|购买方/)[0].replace(/[\s,，;；]+$/, '').trim();
-      break;
+      name = cleanNameValue(m[1]);
+      if (name) break;
     }
   }
   // 税号按角色分段截取后匹配（购买方在前销售方在后，第一个/第二个命中）
@@ -143,8 +151,8 @@ function extractPartiesAnchored(text, knownBuyers) {
   const nameHits = [];
   const nameRe = /名称\s*[:：]\s*([^\n\r,，;；]{2,60})/g;
   while ((m = nameRe.exec(text)) !== null) {
-    const v = m[1].split(/统一社会信用代码|纳税人识别号|销售方|购买方/)[0].replace(/[\s,，;；]+$/, '').trim();
-    if (v && !/^\d+$/.test(v)) nameHits.push(v);
+    const v = cleanNameValue(m[1]);
+    if (v) nameHits.push(v);
   }
   const uniqNames = [...new Set(nameHits)];
 

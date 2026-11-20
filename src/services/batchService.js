@@ -89,6 +89,13 @@ function collectToItem(r, byApplyNo) {
     amountInvalid: !(totalAmount > 0),
     collectedAt: Number(f['采集时间']) || 0,
     applyNo,
+    // 审批「总金额」（多票求和制锁定聚合对账用，v103；千分位容错同上）
+    applyAmount: (() => {
+      const raw = af['总金额'];
+      if (typeof raw === 'number') return raw;
+      const v = parseFloat(String(raw ?? '').replace(/,/g, ''));
+      return Number.isFinite(v) ? v : null;
+    })(),
     material: af['购买物资名称'] || '',
     model: af['型号规格参数'] || '',
     // 项目解析走 approvalService.resolveProject（2026-10-27 教师垫付=人名项目口径同源）
@@ -213,26 +220,32 @@ function collectAbnormalItems(items) {
  */
 async function getUnbatchedInvoicedByProject() {
   const all = await approvalService.getAllApprovals();
-  const collectedNos = await approvalService.getCollectedApplyNoSet();
+  // 多票求和制（v103）：排除「收齐」、金额计剩余额度——与 ByPerson 同口径（防金额线低估）
+  const collectedSumMap = await approvalService.getCollectedSumMap();
   const byProject = new Map();
   for (const record of all) {
     const f = record.fields || {};
     if (f['申请状态'] !== config.approvalStatus.APPROVED) continue;
     if (!approvalService.isActiveProcess(f)) continue;
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    if (applyNo && collectedNos.has(applyNo)) continue; // 已有采集票 → 票池已计
-    if (!approvalService.hasInvoiceSubmitted(f)) continue; // 两列都无票 → 不属于「已开发票」
+    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+    if (!approvalService.hasInvoiceSubmitted(f) && !collected) continue; // 两列+台账都无票
+    if (collected && collectStore.isFullyCollected(collected.sum, Number.isFinite(Number(f['总金额'])) ? Number(f['总金额']) : null)) continue; // 已收齐
     const form = f['报销单'];
     if (form !== null && form !== undefined && form !== '') continue; // 已制单
     if (fieldText(f['是否打印']) === '是') continue; // 财务人工线
     const raw = f['总金额'];
     const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
     if (!(amount > 0)) continue;
+    const counted = collected && Number.isFinite(amount)
+      ? Math.round((amount - collected.sum) * 100) / 100
+      : amount;
+    if (!(counted > 0)) continue; // 剩余额度 ≤0 不重复计
     // 教师垫付类（项目栏空）按人名项目归组——与票池/命名口径同源（2026-10-27）
     const project = approvalService.resolveProject(f);
     const agg = byProject.get(project) || { count: 0, amount: 0 };
     agg.count++;
-    agg.amount = Math.round((agg.amount + amount) * 100) / 100;
+    agg.amount = Math.round((agg.amount + counted) * 100) / 100;
     byProject.set(project, agg);
   }
   return byProject;
@@ -246,27 +259,36 @@ async function getUnbatchedInvoicedByProject() {
  */
 async function getUnbatchedInvoicedByPerson() {
   const all = await approvalService.getAllApprovals();
-  const collectedNos = await approvalService.getCollectedApplyNoSet();
+  // 多票求和制（v103）：排除「收齐」的申请（收录≥1 张≠收齐——部分交的申请剩余票仍要
+  // 计金额线，旧 1/N 排除会让金额线低估，v96 郭禹澄盲区的新变体）；金额计「剩余额度」
+  // （总金额-已收和），已收进票池的部分不重复计。
+  const collectedSumMap = await approvalService.getCollectedSumMap();
   const byPerson = new Map();
   for (const record of all) {
     const f = record.fields || {};
     if (f['申请状态'] !== config.approvalStatus.APPROVED) continue;
     if (!approvalService.isActiveProcess(f)) continue;
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    if (applyNo && collectedNos.has(applyNo)) continue;
-    if (!approvalService.hasInvoiceSubmitted(f)) continue;
+    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+    if (!approvalService.hasInvoiceSubmitted(f) && !collected) continue; // 无票（两栏+台账都无）
+    if (collected && collectStore.isFullyCollected(collected.sum, Number.isFinite(Number(f['总金额'])) ? Number(f['总金额']) : null)) continue; // 已收齐
     const form = f['报销单'];
     if (form !== null && form !== undefined && form !== '') continue; // 已制单
     if (fieldText(f['是否打印']) === '是') continue;
     const raw = f['总金额'];
     const amount = typeof raw === 'number' ? raw : (parseFloat(String(raw ?? '').replace(/,/g, '')) || 0);
     if (!(amount > 0)) continue;
+    // 计剩余额度（总金额-已收和）；总金额解析失败时按旧全额口径（保守）
+    const counted = collected && Number.isFinite(amount)
+      ? Math.round((amount - collected.sum) * 100) / 100
+      : amount;
+    if (!(counted > 0)) continue; // 剩余额度 ≤0（超交/收齐边缘）不重复计
     const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '未知发起人';
     // 宣运物资组记录不占发起人名下的 500 线额度，归入组键走独立线
     const group = approvalService.isXuanYunGroup(f) ? approvalService.XUANYUN_GROUP : person;
     const agg = byPerson.get(group) || { count: 0, amount: 0 };
     agg.count++;
-    agg.amount = Math.round((agg.amount + amount) * 100) / 100;
+    agg.amount = Math.round((agg.amount + counted) * 100) / 100;
     byPerson.set(group, agg);
   }
   return byPerson;
@@ -429,6 +451,34 @@ async function lockBatch(batchNo, project, options = {}) {
       }
     }
 
+    // 未收齐申请聚合对账（v103 校核姿态，曼波「校核姿态」迭代）：批内按申请聚合票面合计
+    // vs 审批总额——收不齐的申请列出（还差多少）。多票分批交的收口信号集中给财务：
+    // 采集期中间态不标异常（reconcileApplyAmount v103 三态），锁批时一眼看到拆单风险。
+    const sumByApply = new Map();
+    for (const i of pool) {
+      if (!i.applyNo) continue;
+      const cur = sumByApply.get(i.applyNo) || { sum: 0, count: 0 };
+      cur.sum = Math.round((cur.sum + i.totalAmount) * 100) / 100;
+      cur.count++;
+      sumByApply.set(i.applyNo, cur);
+    }
+    const notFullyCollected = [];
+    for (const [applyNo, agg] of sumByApply) {
+      const item = pool.find(i => i.applyNo === applyNo);
+      const total = item ? item.applyAmount : null;
+      if (total === null || !(total > 0)) continue;
+      if (agg.sum < total - 0.01) {
+        notFullyCollected.push({
+          applyNo,
+          count: agg.count,
+          collected: agg.sum,
+          total,
+          short: Math.round((total - agg.sum) * 100) / 100,
+        });
+      }
+    }
+    notFullyCollected.sort((a, b) => b.short - a.short);
+
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
       pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken,
@@ -437,6 +487,7 @@ async function lockBatch(batchNo, project, options = {}) {
       summary, purpose, ordinal, markFailed,
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       abnormalItems: collectAbnormalItems(pool),
+      notFullyCollected, // 未收齐申请（多票求和制收口信号，v103）
       missingContent: pool.filter(i => !i.invoiceContent).length,
       // 空白票面计数（2026-11-18 检测批）：memo 过的票才有 __blankValue——锁定 deferDelivery
       // 阶段不渲染，此处全为 undefined 恒 0；confirm/regen 渲染后再触发 lock 侧已不在。
@@ -674,7 +725,27 @@ async function doRegenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), amountDrift, blankCount: items.filter(i => i.__blankValue === true).length };
+  // 未收齐申请聚合对账（v103，与 lockBatch 同款——confirm/regen 交付卡也要带收口信号）
+  const sumByApplyRegen = new Map();
+  for (const i of items) {
+    if (!i.applyNo) continue;
+    const cur = sumByApplyRegen.get(i.applyNo) || { sum: 0, count: 0 };
+    cur.sum = Math.round((cur.sum + i.totalAmount) * 100) / 100;
+    cur.count++;
+    sumByApplyRegen.set(i.applyNo, cur);
+  }
+  const notFullyCollected = [];
+  for (const [applyNo, agg] of sumByApplyRegen) {
+    const item = items.find(i => i.applyNo === applyNo);
+    const total = item ? item.applyAmount : null;
+    if (total === null || !(total > 0)) continue;
+    if (agg.sum < total - 0.01) {
+      notFullyCollected.push({ applyNo, count: agg.count, collected: agg.sum, total, short: Math.round((total - agg.sum) * 100) / 100 });
+    }
+  }
+  notFullyCollected.sort((a, b) => b.short - a.short);
+
+  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), notFullyCollected, amountDrift, blankCount: items.filter(i => i.__blankValue === true).length };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------

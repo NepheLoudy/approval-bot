@@ -335,6 +335,23 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     elements.push({ tag: 'markdown', content: obLines.join('\n') });
   }
 
+  // 6. 采集质量（v103 未识别报告，曼波「最大识别率+未识别报告+校核姿态」迭代）：
+  // 识别率体检随周报每周走——字段缺失/校验异常存量可见，财务不用再问「识别得怎么样」
+  const cq = options.collectQuality;
+  if (cq && cq.total > 0) {
+    const cqLines = [`**🧪 采集识别质量**（采集表 ${cq.total} 张票）`];
+    const cqItems = [];
+    if (cq.missingBuyer > 0) cqItems.push(`- 购销方信息缺失：${cq.missingBuyer} 张（BOM 对照不完整，录入时人工补）`);
+    if (cq.missingContent > 0) cqItems.push(`- 开票内容缺失：${cq.missingContent} 张（物料清单标黄，录入时现场补填）`);
+    if (cq['金额不符'] > 0) cqItems.push(`- 金额待核对：${cq['金额不符']} 张（校验状态「金额不符」，多票分批交未收齐属正常，收口见批次卡 🧮 段）`);
+    if (cq['抬头存疑'] > 0) cqItems.push(`- 抬头存疑：${cq['抬头存疑']} 张（非重庆大学抬头，需财务核实）`);
+    if (cqItems.length) {
+      cqLines.push(...cqItems);
+      elements.push({ tag: 'hr' });
+      elements.push({ tag: 'markdown', content: cqLines.join('\n') });
+    }
+  }
+
   // 底部：本周统计（仅本周结果，不放全量数据）+ 按项目粗分类
   elements.push({ tag: 'hr' });
   const statLines = [
@@ -541,7 +558,7 @@ function stripCardInjection(s) {
  * 2026-09-29 曼波定：卡内直接按序内嵌全部有效发票二维码（imageKey 由 sendDeliveryCard
  * 预先上传换得），财务对屏幕按序号扫码即可完成录入；自动触发场景头部/文案切换。
  */
-function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, blankCount = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {} } = {}) {
+function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, blankCount = 0, specialCount = 0, auto = false, scanItems = [], abnormalItems = [], generated = {}, notFullyCollected = [] } = {}) {
   // 表链接带租户子域（复查 P2-13：feishu.cn 裸域打不开，链接须落在租户域名下才能直达表）
   const tableUrl = config.bitable.appToken
     ? `${config.feishu.tenantBaseUrl}/base/${config.bitable.appToken}?table=${config.bitable.batchTableId}&view=vewwHv4bG4`
@@ -589,6 +606,14 @@ function buildDeliveryCard({ batchNo, project = '', count = 0, amount = 0, summa
   if (warningCount > 0) {
     lines.push(``, `⚠️ 含 ${warningCount} 张异常票（录入时留意）：`, ...abnormalItemLines(abnormalItems));
   }
+  // 未收齐申请聚合对账（v103 校核姿态）：多票分批交的申请收口信号——财务决定补票或按现状制单
+  if (notFullyCollected && notFullyCollected.length) {
+    lines.push(``, `🧮 **${notFullyCollected.length} 个申请未收齐**（多票分批交，票面合计 < 申请总额）——补齐后金额加起来等于申请即可，或按现状制单前与队员确认：`);
+    for (const n of notFullyCollected.slice(0, 6)) {
+      lines.push(`- ${stripCardInjection(n.applyNo)}：已收 ${n.count} 张 ¥${n.collected.toFixed(2)} / 共 ¥${n.total.toFixed(2)}（还差 ¥${n.short.toFixed(2)}）`);
+    }
+    if (notFullyCollected.length > 6) lines.push(`- …另有 ${notFullyCollected.length - 6} 个未收齐申请，见批次表 BOM 对账`);
+  }
   if (missingContent > 0) lines.push(`⚠️ ${missingContent} 张缺「开票内容」（底单已标黄），录入小翼Plus 时现场补填`);
   // 空白票面提示（2026-11-18 检测批）：打印件里该票已是占位页，提醒补票
   if (blankCount > 0) lines.push(`⚠️ ${blankCount} 张票面版式文件空白（打印件已用占位页）——请队员从电子税务局重新下载票面补印，扫码录入不受影响`);
@@ -629,7 +654,7 @@ function abnormalItemLines(abnormalItems, cap = 8) {
  * 先只发批次详情等财务确认——确认（/approval-batch confirm）后才生成交付件并发二维码卡。
  * 无二维码、无附件清单（都还没生成）；要退有 reject 出口。
  */
-function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [] } = {}) {
+function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [], notFullyCollected = [] } = {}) {
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
   const safeBatchNo = stripCardInjection(batchNo); // 自动批次号含项目段，消毒后再进卡（P2-3）
@@ -657,6 +682,15 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
   // 金额已计入本批触发，但无票面图片进不了打印批——如实提示；锁定时已先做定点补采
   //（2026-10-17），此处剩余=补采仍未入库的（无票面图/识别失败），入库后并入后续批次
   if (unCollected > 0) lines.push(`⚠️ 另有 ${unCollected} 笔已交票暂未能采集入库（无票面图片或识别失败），未计入本批；处理入库后将并入后续批次`);
+  // 未收齐申请聚合对账（v103 校核姿态）：确认前看全收口状态——补票还是按现状制单由财务裁决
+  if (notFullyCollected && notFullyCollected.length) {
+    lines.push(``, `🧮 **${notFullyCollected.length} 个申请未收齐**（多票分批交）：`);
+    for (const n of notFullyCollected.slice(0, 6)) {
+      lines.push(`- ${stripCardInjection(n.applyNo)}：已收 ${n.count} 张 ¥${n.collected.toFixed(2)} / 共 ¥${n.total.toFixed(2)}（还差 ¥${n.short.toFixed(2)}）`);
+    }
+    if (notFullyCollected.length > 6) lines.push(`- …另有 ${notFullyCollected.length - 6} 个`);
+    lines.push(`确认前请与队员核对剩余票：金额加起来等于申请金额即可收齐；按现状制单请自行确认差额可接受`);
+  }
 
   return {
     config: { wide_screen_mode: true },

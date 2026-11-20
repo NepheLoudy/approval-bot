@@ -190,15 +190,22 @@ async function doBackfillCollect(options = {}) {
   // 一申请多张票时此前只收到部分，补收时按发票号查重跳过已收，只补缺失附件
   const includeApplyNos = new Set(Array.isArray(options.includeApplyNos) ? options.includeApplyNos : []);
 
-  // 表格侧候选：已通过 + 活跃流程 + 已交票 + 采集表无记录（与旧骨架一致）
+  // 表格侧候选：已通过 + 活跃流程 + 已交票 + **未收齐**（多票求和制 v103：
+  // 「台账收录 ≥1 张」不再排除候选——部分交的申请剩余票正是补采要收的尾票，
+  // 旧 1/N 排除会让锁定前补采不收尾票 → 拆单；收齐判定统一 collectStore.isFullyCollected，
+  // 总金额不可解析时视为未收齐继续补，由查重闸兜住重复）。includeApplyNos 仍可强制重扫收齐单。
   const all = await approvalService.getAllApprovals();
-  const collected = await collectStore.listCollect();
-  const collectedApplyNos = new Set(collected.map(r => String(r.fields['关联申请编号'] || '')));
+  const collectedSumMap = await collectStore.sumByApplyNo();
   const candidates = all.filter((r) => {
     const f = r.fields || {};
     if (f['申请状态'] !== config.approvalStatus.APPROVED) return false;
     if (!approvalService.isActiveProcess(f)) return false;
-    if (!approvalService.hasInvoiceSubmitted(f)) return false;
+    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+    if (!approvalService.hasInvoiceSubmitted(f) && !collected) return false;
+    if (collected && collectStore.isFullyCollected(collected.sum, Number.isFinite(Number(f['总金额'])) ? Number(f['总金额']) : null)) {
+      return includeApplyNos.has(applyNo); // 已收齐：仅显式 include 才重扫
+    }
     if (onlyProjects && onlyPersons) {
       // 双定向（或语义，2026-11-03）：命中任一集合即放行
       const project = approvalService.resolveProject(f);
@@ -210,8 +217,7 @@ async function doBackfillCollect(options = {}) {
       const person = (Array.isArray(f['发起人']) && f['发起人'][0]?.name) || '';
       if (!person || !onlyPersons.has(person)) return false;
     }
-    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    return applyNo && (!collectedApplyNos.has(applyNo) || includeApplyNos.has(applyNo));
+    return Boolean(applyNo);
   });
   if (!candidates.length) {
     // 定向补采零命中要把定向值带回给调用方（2026-11-03 审查 P2：此前静默零处理，
@@ -354,7 +360,12 @@ async function doBackfillCollect(options = {}) {
       const hf = hit.fields || {};
       const applyNo = hf['申请编号'] ? (hf['申请编号'].text || String(hf['申请编号'])) : hit.record_id;
       const applyAmount = typeof hf['总金额'] === 'number' ? hf['总金额'] : (parseFloat(hf['总金额']) || null);
-      const amountDiff = applyAmount !== null ? Math.round((fields.totalAmount - applyAmount) * 100) / 100 : null;
+      // 多票求和制（v103）：金额差/校验状态统一「剩余额度」口径（与实时采集同源，P2-6 分叉修复）——
+      // remaining = 申请总额 - 台账已收和（含本轮回溯已落库的票，本地增量防 N+1）；
+      // 票 ≤ 剩余额度是多票合法中间态不标异常（负差留财务核对），只拦超交。
+      const collectedBefore = collectedSumMap.get(applyNo) || { sum: 0, count: 0 };
+      const remaining = applyAmount !== null ? Math.round((applyAmount - collectedBefore.sum) * 100) / 100 : null;
+      const amountDiff = remaining !== null ? Math.round((fields.totalAmount - remaining) * 100) / 100 : null;
       // 迟到票归属（2026-10-20）：报销单值命中批次表「报销单号」→ 机器人批次——
       // 未确认批次（交付件未生成，可安全追加）批次列直接写批次号并入该批；
       // 已确认批次 → 批次留空进池走下一批；人工历史标签 → 保持原值（历史批次标记=出池）
@@ -393,7 +404,7 @@ async function doBackfillCollect(options = {}) {
           ...(applyAmount !== null ? { '申请金额': applyAmount } : {}),
           ...(amountDiff !== null ? { '金额差': amountDiff } : {}),
           '识别通道': parsed.source === 'qrcode+ocr' ? 'qrcode+ocr' : parsed.source,
-          '校验状态': verifyStatusFor(fields.totalAmount, applyAmount),
+          '校验状态': verifyStatusFor(fields.totalAmount, applyAmount, collectedBefore.sum),
           // 二维码原文（扫码清单重生成同源；qrcode/渲染通道识别时携带）——与实时采集同口径
           ...(parsed.qrPayload ? { '二维码内容': String(parsed.qrPayload) } : {}),
           ...(historyBatch ? { '批次': historyBatch } : {}),
@@ -411,6 +422,9 @@ async function doBackfillCollect(options = {}) {
       }
       result.collected++;
       matchedAny = true;
+      // 本地增量：同实例/同申请多票串行落库时，下一张的剩余额度要扣掉刚落的这张
+      const agg = collectedSumMap.get(applyNo) || { sum: 0, count: 0 };
+      collectedSumMap.set(applyNo, { sum: agg.sum + fields.totalAmount, count: agg.count + 1 });
       // 从候选与编号索引移除已回填记录（防同一记录被多个实例/多附件重复回填）
       const idx = candidates.indexOf(hit);
       if (idx >= 0) candidates.splice(idx, 1);
@@ -447,8 +461,12 @@ async function doBackfillCollect(options = {}) {
   return result;
 }
 
-/** 多票同申请聚合校验：该申请下全部采集票票面合计在容差内 → 各票校验状态=通过
- *  （否则金额不符）。一申请多张票时单票金额必然 ≠ 申请金额，逐票判定会全部误标异常
+/** 多票同申请聚合校验（v103 三态）：聚合和 vs 申请总额——
+ *  收齐（sum ≥ 总额-tol）→ 各票统一「通过」；超收（sum > 总额+tol）→ 统一「金额不符」；
+ *  **未收齐（sum < 总额-tol）→ 不动**（多票分批交的合法中间态，单票落表时点的单侧闸判定
+ *  站得住——旧版双向判定会把未收齐申请下全部票误标「金额不符」，吴子建 23 张实案；
+ *  未收齐的收口在锁定时 collectAbnormalItems 聚合对账暴露给财务，不在采集期吓队员）。
+ *  一申请多张票时单票金额必然 ≠ 申请金额，逐票判定会全部误标异常
  *  （2026-10-20 实案：202610050001 挂 8 张票合计 188.82，单票 53.43 被判金额不符）。 */
 async function reconcileApplyAmount(applyNo, applyAmount) {
   if (!applyNo || applyAmount === null || applyAmount === undefined || Number.isNaN(applyAmount)) return;
@@ -460,7 +478,11 @@ async function reconcileApplyAmount(applyNo, applyAmount) {
     const v = parseFloat(String(r.fields['价税合计'] ?? '').replace(/,/g, ''));
     if (!Number.isNaN(v)) sum += v;
   }
-  const status = verifyStatusFor(sum, applyAmount);
+  const tol = Math.max(Math.abs(applyAmount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
+  let status = null;
+  if (sum >= applyAmount - tol) status = '通过';
+  else if (sum > applyAmount + tol) status = '金额不符';
+  else return; // 未收齐中间态：不覆盖各票自身判定
   for (const r of rows) {
     if (String(r.fields['校验状态'] || '') !== status) {
       await collectStore.updateCollect(r.record_id, { '校验状态': status });
@@ -468,11 +490,13 @@ async function reconcileApplyAmount(applyNo, applyAmount) {
   }
 }
 
-function verifyStatusFor(invoiceAmount, applyAmount) {
+/** 校验状态判定（v103 单侧拦超，与实时采集同口径）：超「剩余额度」才标金额不符，
+ *  票 ≤ 剩余额度是多票合法中间态不标（负差落「金额差」字段留财务核对）。 */
+function verifyStatusFor(invoiceAmount, applyAmount, collectedSum = 0) {
   if (applyAmount === null) return '待人工';
-  const diff = Math.abs(invoiceAmount - applyAmount);
-  const tol = Math.max(Math.abs(applyAmount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
-  return diff > tol ? '金额不符' : '通过';
+  const remaining = Math.round((applyAmount - (collectedSum || 0)) * 100) / 100;
+  const tol = Math.max(Math.abs(remaining) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
+  return invoiceAmount - remaining > tol ? '金额不符' : '通过';
 }
 
 module.exports = { backfillCollect, extractAttachmentRefs, listInstances };

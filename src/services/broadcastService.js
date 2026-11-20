@@ -50,6 +50,30 @@ async function runWeeklyBroadcast(options = {}) {
     console.warn('[周播报] 批次推进超期段跳过:', err.message);
   }
 
+  // 采集质量段（v103 未识别报告，曼波「最大识别率+未识别报告+校核姿态」迭代）：
+  // 字段缺失/校验异常的存量可见性——识别率体检每周随周报走，财务不用再问「识别得怎么样」。
+  // 查询失败降级跳过不炸周报（同 ledger/超期段口径）
+  let collectQuality = null;
+  try {
+    const collects = await collectStore.listCollect();
+    const missingBuyer = collects.filter(r => !r.fields['购买方名称'] && !r.fields['购买方税号']).length;
+    const missingContent = collects.filter(r => !r.fields['开票内容']).length;
+    const stDist = { 金额不符: 0, 抬头存疑: 0, 待人工: 0 };
+    for (const r of collects) {
+      const s = String(r.fields['校验状态'] || '');
+      if (stDist[s] !== undefined) stDist[s]++;
+    }
+    collectQuality = {
+      total: collects.length,
+      missingBuyer,
+      missingContent,
+      ...stDist,
+    };
+    console.log(`[周播报] 采集质量: 总${collectQuality.total} 缺购销方${missingBuyer} 缺开票内容${missingContent} 金额不符${stDist['金额不符']} 抬头存疑${stDist['抬头存疑']}`);
+  } catch (err) {
+    console.warn('[周播报] 采集质量段跳过:', err.message);
+  }
+
   const card = buildWeeklyFinanceCard(followUp, stats, {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
@@ -58,6 +82,7 @@ async function runWeeklyBroadcast(options = {}) {
     urgeStates: urgeStateStore.init(config.invoiceUrge.stateFile).allRecords(),
     ledger,
     overdueBatches,
+    collectQuality,
   });
 
   if (options.dryRun) {

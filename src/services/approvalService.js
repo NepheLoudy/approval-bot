@@ -73,6 +73,9 @@ function isXuanYunGroup(fields) {
  * 已采集台账的申请编号集合（fail-open：采集表未配置/查询失败时返回空集，
  * 退回两栏判断——本地开发与采集表未建的部署不崩）。
  * 口径：机器人采集成功即视为已交票（采集表为真源，补交发票栏是镜像）。
+ * ⚠️ 2026-11-20 多票求和制（v103）后**不再作为「已交票」判据**——「收录 ≥1 张」≠「收齐」，
+ * 催办/金额线/backfill 等消费点一律改用 getCollectedSumMap + isFullyCollected（收齐口径）。
+ * 本函数仅保留给「这张票已在台账」类的收录性判断。
  */
 async function getCollectedApplyNoSet() {
   try {
@@ -88,6 +91,22 @@ async function getCollectedApplyNoSet() {
       console.warn('[审批服务] 采集台账查询失败，退回两栏判断:', err.message);
     }
     return new Set();
+  }
+}
+
+/**
+ * 台账已收金额聚合（多票求和制收齐判据的数据源，v103）。
+ * fail-open 同 getCollectedApplyNoSet：查询失败返回空 Map（视为全部未收齐，继续催）。
+ * @returns {Promise<Map<string, {sum: number, count: number}>>}
+ */
+async function getCollectedSumMap() {
+  try {
+    return await collectStore.sumByApplyNo();
+  } catch (err) {
+    if (!/未配置发票采集表/.test(err.message)) {
+      console.warn('[审批服务] 采集台账求和查询失败（按全部未收齐处理）:', err.message);
+    }
+    return new Map();
   }
 }
 
@@ -196,16 +215,20 @@ async function getApprovalStats() {
 async function getOverdueInvoices() {
   const all = await fetchAllApprovals();
   const APPROVED = config.approvalStatus.APPROVED;
-  const collectedNos = await getCollectedApplyNoSet();
+  const collectedSumMap = await getCollectedSumMap();
   const graceMs = config.invoiceUrge.graceDays * 24 * 60 * 60 * 1000;
 
   const overdue = all.filter((record) => {
     const f = record.fields || {};
     if (f['申请状态'] !== APPROVED) return false;
     if (!isActiveProcess(f)) return false;
-    if (hasInvoiceSubmitted(f)) return false; // 发票/补交发票任一栏有值即不算超期
+    // 多票求和制（v103）：「收齐」才算已交——两栏口径在多票场景失效（采集镜像 append
+    // 补交发票栏，交 1/N 张后该栏非空，旧两栏判断会把未收齐的申请永久踢出催票名单）；
+    // 「台账收录 ≥1 张」同理（收录≠收齐）。统一走 sumByApplyNo + isFullyCollected。
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    if (applyNo && collectedNos.has(applyNo)) return false; // 采集台账已收录（真源口径）不算超期
+    const amount = typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null);
+    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+    if (collected && collectStore.isFullyCollected(collected.sum, amount)) return false;
     const ms = typeof f['完成时间'] === 'number' ? f['完成时间'] : parseInt(f['完成时间'], 10);
     if (!ms || Number.isNaN(ms)) return false; // 无完成时间不催
     return ms + graceMs <= Date.now();
@@ -229,9 +252,9 @@ async function getOverdueInvoices() {
 async function getFinanceFollowUp() {
   const all = await fetchAllApprovals();
   const APPROVED = config.approvalStatus.APPROVED;
-  const collectedNos = await getCollectedApplyNoSet();
+  const collectedSumMap = await getCollectedSumMap();
 
-  const missingInvoice = [];  // 未交发票
+  const missingInvoice = [];  // 未交发票（含部分交未收齐——求和制下继续催剩余票）
   const missingForm = [];     // 未制单（缺报销单）
   const missingTransfer = []; // 未转账（完成超3个月）
 
@@ -241,7 +264,21 @@ async function getFinanceFollowUp() {
     if (!isActiveProcess(f)) continue;
 
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    const hasInvoice = hasInvoiceSubmitted(f) || (applyNo && collectedNos.has(applyNo));
+    const amount = typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null);
+    // 多票求和制（v103）：收齐才算已交票——交 1/N 张继续走「催发票」分支（催剩余票），
+    // 不再提前进「催制单」（旧口径 collectedNos.has(1 张收录)=已交 → 财务提前做报销单拆单）。
+    // 两栏判断同步废止：采集镜像 append 补交发票栏，交 1 张后该栏必非空。
+    // 总金额不可解析时收齐判定恒 false → 会一直催发票；为不误催已交全票的记录，
+    // 回落收录性判断（sum>0 或两栏有值 = 至少交过，按旧口径视为已交，转财务人工收口）
+    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+    let hasInvoice;
+    if (collected && collectStore.isFullyCollected(collected.sum, amount)) {
+      hasInvoice = true;
+    } else if (amount !== null) {
+      hasInvoice = false; // 总金额可解析且未收齐 → 继续催发票（含已交部分票的）
+    } else {
+      hasInvoice = hasInvoiceSubmitted(f) || Boolean(collected); // 总金额缺失 fail-open 旧口径
+    }
     // 是否打印=是（2026-09-29 曼波定）：财务已自行制单打印（或已进机器人批次）——
     // 该记录整条跳过（不催制单也不催转账），机器人不与财务手工线重合
     if (fieldText(f['是否打印']) === '是') continue;
@@ -287,4 +324,5 @@ module.exports = {
   isXuanYunGroup,
   XUANYUN_GROUP,
   getCollectedApplyNoSet,
+  getCollectedSumMap,
 };

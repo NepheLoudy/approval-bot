@@ -70,6 +70,22 @@ async function sumByApplyNo() {
 }
 
 /**
+ * 收齐判定（2026-11-20 多票求和制，全仓「已交票」判据统一入口）：
+ * 已收票金额和 ≥ 审批总金额-0.01（一分容差）= 收齐。
+ * 语义是对「未收齐」的审批继续催票/继续补采/继续计金额线——交 1/N 张=已交票的旧口径
+ * （getCollectedApplyNoSet）会催办拆单/金额线低估，v103 起各消费点一律改用本判定。
+ * 总金额不可解析（null/NaN）时无法判定 → 返回 false（视为未收齐，保守继续催，
+ * 由财务人工收口——绝不因数据缺失而静默放行）。
+ * @param {number} collectedSum 台账已收票金额和（sumByApplyNo().sum）
+ * @param {number|null} totalAmount 审批「总金额」
+ * @returns {boolean}
+ */
+function isFullyCollected(collectedSum, totalAmount) {
+  if (typeof totalAmount !== 'number' || !Number.isFinite(totalAmount)) return false;
+  return collectedSum >= totalAmount - 0.01;
+}
+
+/**
  * 三元组近似查重（开票日期+价税合计+销售方税号）：发票号 OCR 错一位时的第二道闸。
  * 注意「开票日期」在表内是毫秒时间戳（DATE 字段），入参 issueDate 是 'YYYY-MM-DD'，
  * 这里统一转毫秒比对（此前直接字符串比较导致该闸恒不命中——复查 P1-1）。
@@ -163,6 +179,7 @@ module.exports = {
   listCollect,
   findByInvoiceNo,
   sumByApplyNo,
+  isFullyCollected,
   findBySimilarity,
   createCollect,
   updateCollect,
