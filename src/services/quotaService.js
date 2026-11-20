@@ -74,7 +74,8 @@ async function setQuota(project, amount, initialSpent = 0, note = '') {
   if (init > quota) throw new Error(`初始已用（${init}）大于总额度（${quota}）——若历史消耗确超预算请调高总额度`);
 
   const rows = await bitableApi.listAllRecords(quotaTableId());
-  const hit = rows.find(r => String((r.fields || {})['项目'] || '').trim() === name);
+  const hits = rows.filter(r => String((r.fields || {})['项目'] || '').trim() === name);
+  const hit = hits[0];
   const fields = {
     '项目': name,
     '总额度': quota,
@@ -82,6 +83,11 @@ async function setQuota(project, amount, initialSpent = 0, note = '') {
     '更新时间': Date.now(),
     ...(note ? { '备注': String(note).slice(0, 200) } : {}),
   };
+  // 同名多余行顺手清理（全量审查工位 B#3：重复行 warn 只进服务器日志操作者看不到，
+  // 也没有清理入口——set 时删除多余行，保证「一项目一行」不变式）
+  for (const extra of hits.slice(1)) {
+    try { await bitableApi.deleteRecord(quotaTableId(), extra.record_id); } catch (err) { /* 清理失败不影响主流程 */ }
+  }
   if (hit) {
     await bitableApi.updateRecord(quotaTableId(), hit.record_id, fields);
     return { action: 'updated', project: name, quota, initialSpent: init };

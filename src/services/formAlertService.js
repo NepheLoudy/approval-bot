@@ -115,12 +115,12 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
    *  2026-11-03 起键再添组别名「宣运物资」（跨发起人并组走独立线）。 */
   const computeGroupAmounts = async () => {
     // 「已开发票且未制单」= 票池（采集表，票面精确金额）+ 票池外补充（审批表「发票」列
-    // 直接附票未走采集的记录，申请金额近似）——两列等效口径，2026-09-29 曼波定
-    // 双计审查裁定（2026-11-05 全量审查 P1-2）：两口径互斥已由 applyNo 链路保证——
-    // 采集表为真源（条目带「关联申请编号」），补充口径 getUnbatchedInvoicedByPerson
-    // 按 getCollectedApplyNoSet 排除已采集记录（batchService），同一张票不会两边都计。
-    // 已知边缘：采集条目「关联申请编号」为空（OCR 缺失）时无法与审批记录链接，
-    // 会产生一次双计——靠采集回执人工核对兜底，暂不做发票号级模糊匹配。
+    // 直接附票未走采集的记录）——两列等效口径，2026-09-29 曼波定
+    // 口径注释更新（2026-11-21 全量审查工位 B#5，v103 求和制后旧「双计裁定」论证失效）：
+    // 补充口径 getUnbatchedInvoicedByPerson 现按**收齐判据**排除（isFullyCollected）且金额
+    // 计**剩余额度**（总额-全局已收和）——票池已收的票计票面、未收的尾票在补充口径计剩余，
+    // 两段拼起来=审批总额，天然无双计；孤儿票（关联申请编号空）在票池因无发起人分组被跳过、
+    // 在补充口径计一次近似值，仍是单计（pre-v103 的「会产生一次双计」描述已不成立）。
     const pool = await batchService.getPoolWithRecords();
     const byPerson = new Map();
     for (const p of pool) {

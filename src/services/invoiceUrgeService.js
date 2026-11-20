@@ -457,7 +457,12 @@ async function runInvoiceUrgeInner(options = {}) {
 
       // 计数与升级
       for (const id of recordIds) {
-        const st = urgeStateStore.updateRecord(id, { urgeCount: (urgeStateStore.getRecord(id)?.urgeCount || 0) + 1, lastUrgeAt: Date.now() });
+        const prev = urgeStateStore.getRecord(id) || {};
+        // 延期到期重催：deferred 状态清回 none（全量审查工位 A#4——残留误导性状态，
+        // 消费点虽有 snoozeUntil 守卫无实害，但状态文件里「deferred 却在催」自相矛盾）
+        const patch = { urgeCount: (prev.urgeCount || 0) + 1, lastUrgeAt: Date.now() };
+        if (prev.status === 'deferred') patch.status = 'none';
+        const st = urgeStateStore.updateRecord(id, patch);
         if (st.urgeCount >= maxTimes && st.status !== 'escalated') {
           urgeStateStore.updateRecord(id, { status: 'escalated', statusNote: `已私聊催交 ${st.urgeCount} 次` });
         }

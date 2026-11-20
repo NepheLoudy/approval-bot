@@ -177,7 +177,7 @@ curl http://localhost:3002/api/health
 | POST | `/api/bot/test-form-alert` | 立即触发一次制单金额线检查（测试，X-API-Token，v63） |
 | GET | `/api/bot/cron-status` | 定时任务状态 + 下次执行时间 |
 | GET | `/api/bot/history` | 播报历史 |
-| GET | `/api/quota/overview` | 项目额度总览（X-API-Token）：`{items:[{project,quota,initialSpent,locked,submitted,paid,spent,remaining,overspend}], unmanaged:[{project,spent}]}`（额度功能，v104） |
+| POST | `/api/quota/overview` | 项目额度总览（X-API-Token；POST 以适配运维台代理鉴权）：`{items:[{project,quota,initialSpent,locked,submitted,paid,spent,remaining,overspend}], unmanaged:[{project,spent}]}`（额度功能，v104） |
 | POST | `/api/quota/set` | 设置/更新项目额度（X-API-Token）：`{project, amount, initialSpent?, note?}` 幂等 upsert（运维台 SSH 代理调此端点） |
 | POST | `/api/quota/unset` | 撤销项目额度管理（X-API-Token）：`{project}` |
 | POST | `/api/chat/command` | 指令转发端点（`{command, args, senderName?, senderId?}` → `{reply}`；`command:'接取'` 为审批群裸词放行指令，senderName 用于登记接取人） |

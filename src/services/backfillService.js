@@ -326,7 +326,15 @@ async function doBackfillCollect(options = {}) {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 附件下载失败 - ${err.message.slice(0, 100)}`);
         continue;
       }
-      const parsed = await invoiceParser.recognizeInvoice(buffer, {}, (buf) => ocrService.recognizeBuffer(buf));
+      let parsed;
+      try {
+        parsed = await invoiceParser.recognizeInvoice(buffer, {}, (buf) => ocrService.recognizeBuffer(buf));
+      } catch (err) {
+        // 识别管线异常兜底（全量审查工位 C#P3）：parser 内 resize/OCR 链路可能 throw
+        // （首次解码成功后重采样失败等）——单附件失败不炸整轮回溯（下载/实例详情同款口径）
+        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 识别异常 - ${err.message.slice(0, 100)}`);
+        continue;
+      }
       if (!parsed.ok || !parsed.fields.invoiceNo) {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 识别不完整（${parsed.reason || '未知'}）`);
         continue;
@@ -357,6 +365,10 @@ async function doBackfillCollect(options = {}) {
 
       // 查重双闸 + 落表整体按发票号加锁（复查 P2：与实时采集同双闸——backfill 与 hub
       // 实时采集并发时，各自通过查重后再各自落一条重复票；三元组近似闸同 invoiceCollectService）
+      // 开票日期先换算再判空（全量审查工位 C#P2）：parseInvoiceText 只校月 1-12/日 1-31，
+      // 「2026-02-30」能过正则但 issueDateToMs 回读比对得 null——按 issueDate 真值守卫会
+      // 写出显式 null 列（该票从此三元组闸永不匹配）。同修 invoiceCollectService 同款点。
+      const issueDateMs = fields.issueDate ? require('../utils/time').issueDateToMs(fields.issueDate) : null;
       const hf = hit.fields || {};
       const applyNo = hf['申请编号'] ? (hf['申请编号'].text || String(hf['申请编号'])) : hit.record_id;
       const applyAmount = typeof hf['总金额'] === 'number' ? hf['总金额'] : (parseFloat(hf['总金额']) || null);
@@ -375,7 +387,9 @@ async function doBackfillCollect(options = {}) {
         const mapped = formNoToBatch.get(historyBatchRaw);
         if (mapped) historyBatch = mapped.confirmed ? '' : mapped.batchNo;
       }
-      const outcome = await withRecordLock(`inv_${fields.invoiceNo}`, async () => {
+      let outcome;
+      try {
+        outcome = await withRecordLock(`inv_${fields.invoiceNo}`, async () => {
         const dupExact = await collectStore.findByInvoiceNo(fields.invoiceNo);
         if (dupExact.length) return { kind: 'dup_exact' };
         const dupSimilar = await collectStore.findBySimilarity({ issueDate: fields.issueDate, totalAmount: fields.totalAmount, sellerTaxNo: fields.sellerTaxNo });
@@ -391,7 +405,7 @@ async function doBackfillCollect(options = {}) {
           ...(fields.invoiceCode ? { '发票代码': fields.invoiceCode } : {}),
           '票种': parsed.invoiceType || 'unknown',
           // NaN 安全（2026-11-03 审查 P2）：非法日期返回 null 不写该列，防查重闸失效
-          ...(fields.issueDate ? { '开票日期': require('../utils/time').issueDateToMs(fields.issueDate) } : {}),
+          ...(issueDateMs ? { '开票日期': issueDateMs } : {}),
           '价税合计': fields.totalAmount,
           ...(fields.buyerName ? { '购买方名称': fields.buyerName } : {}),
           ...(fields.buyerTaxNo ? { '购买方税号': fields.buyerTaxNo } : {}),
@@ -418,6 +432,13 @@ async function doBackfillCollect(options = {}) {
       if (outcome.kind === 'dup_similar') {
         result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 发票尾号 ${String(fields.invoiceNo).slice(-6)} 三元组近似命中已收发票（疑似重复/发票号错位），转人工`);
         matchedAny = true;
+        continue;
+      }
+      } catch (lockErr) {
+        // 落表链路异常兜底（全量审查工位 C#P3）：查重/上传/写表 throw 不炸整轮回溯
+        // （withRecordLock 内外均可能抛——上传失败已有内部 catch，此处兜底其余路径）
+        result.failed++;
+        result.errors.push(`实例 ${String(instanceId).slice(0, 16)}…: 落表失败（尾号 ${String(fields.invoiceNo).slice(-6)}）- ${lockErr.message.slice(0, 80)}`);
         continue;
       }
       result.collected++;
@@ -461,11 +482,15 @@ async function doBackfillCollect(options = {}) {
   return result;
 }
 
-/** 多票同申请聚合校验（v103 三态）：聚合和 vs 申请总额——
- *  收齐（sum ≥ 总额-tol）→ 各票统一「通过」；超收（sum > 总额+tol）→ 统一「金额不符」；
- *  **未收齐（sum < 总额-tol）→ 不动**（多票分批交的合法中间态，单票落表时点的单侧闸判定
- *  站得住——旧版双向判定会把未收齐申请下全部票误标「金额不符」，吴子建 23 张实案；
- *  未收齐的收口在锁定时 collectAbnormalItems 聚合对账暴露给财务，不在采集期吓队员）。
+/** 多票同申请聚合校验（v105 三态修正，全量审查工位 C#P1/P2）：
+ *  聚合和 vs 申请总额——**先判超收再判收齐**（v103 曾顺序写反：`sum >= 总额-tol` 先命中，
+ *  `sum > 总额+tol` 数学不可达 → 超收票被整单翻「通过」洗白，实案 sum=550/总额500 输出通过）：
+ *  超收（sum > 总额+tol）→ 各票统一「金额不符」；收齐（总额-tol ≤ sum ≤ 总额+tol）→
+ *  统一「通过」；**未收齐（sum < 总额-tol）→ 不动**（多票分批交的合法中间态，单票落表时点
+ *  的单侧闸判定站得住——旧版双向判定会把未收齐申请下全部票误标「金额不符」，吴子建 23 张
+ *  实案；未收齐的收口在锁定时 notFullyCollected 聚合对账暴露给财务，不在采集期吓队员）。
+ *  覆盖范围只限**金额类**状态（通过/金额不符）——「抬头存疑/待人工」等非金额判定不被
+ *  聚合回写覆盖（工位 C#P2：错抬头票不得被收齐聚合静默洗白）。
  *  一申请多张票时单票金额必然 ≠ 申请金额，逐票判定会全部误标异常
  *  （2026-10-20 实案：202610050001 挂 8 张票合计 188.82，单票 53.43 被判金额不符）。 */
 async function reconcileApplyAmount(applyNo, applyAmount) {
@@ -480,11 +505,13 @@ async function reconcileApplyAmount(applyNo, applyAmount) {
   }
   const tol = Math.max(Math.abs(applyAmount) * config.invoiceCollect.amountToleranceRatio, config.invoiceCollect.amountToleranceFixed);
   let status = null;
-  if (sum >= applyAmount - tol) status = '通过';
-  else if (sum > applyAmount + tol) status = '金额不符';
+  if (sum > applyAmount + tol) status = '金额不符';
+  else if (sum >= applyAmount - tol) status = '通过';
   else return; // 未收齐中间态：不覆盖各票自身判定
   for (const r of rows) {
-    if (String(r.fields['校验状态'] || '') !== status) {
+    const cur = String(r.fields['校验状态'] || '');
+    if (cur !== '通过' && cur !== '金额不符') continue; // 抬头存疑/待人工等非金额状态不覆盖
+    if (cur !== status) {
       await collectStore.updateCollect(r.record_id, { '校验状态': status });
     }
   }
@@ -499,4 +526,4 @@ function verifyStatusFor(invoiceAmount, applyAmount, collectedSum = 0) {
   return invoiceAmount - remaining > tol ? '金额不符' : '通过';
 }
 
-module.exports = { backfillCollect, extractAttachmentRefs, listInstances };
+module.exports = { backfillCollect, extractAttachmentRefs, listInstances, reconcileApplyAmount };

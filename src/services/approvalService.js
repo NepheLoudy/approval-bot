@@ -212,6 +212,35 @@ async function getApprovalStats() {
  * 超期未交发票（催发票私聊用）：「已通过」且完成时间满 graceDays 天、发票/补交发票均为空
  * 按完成时间正序（最久未交的排最前）
  */
+/** 解析「总金额」（千分位容错统一入口——全量审查工位 A#6：三处解析口径漂移，
+ *  "1,234.5" 裸 parseFloat 会截成 1，求和制收齐判据整体失真；统一走本函数） */
+function parseTotalAmount(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const p = parseFloat(String(v ?? '').replace(/,/g, ''));
+  return Number.isFinite(p) ? p : null;
+}
+
+/**
+ * 「已交票」判据 v105（全量审查工位 A#1 修复，求和制最终口径）：
+ *   已交 = 「发票」栏有值（审批直附——审批系统管理的 Url 形态，干净信号：47% 已交票
+ *   从未走采集通道，2026-11-16 实证） || 台账**收齐**（sumByApplyNo + isFullyCollected）。
+ *   「补交发票」栏**不再单独算已交**（v102 求和制病灶本体：采集每张票都镜像 append 该栏，
+ *   多票第 2 张起必非空——用它判定会把分批交票的中间态误判已交，v103 曾连同发票栏一起
+ *   废止属过度修正——直附记录被永久误催发票，本函数恢复发票栏信号）。
+ *   已交的记录进「未制单」分支（票面未进池的由锁定前补采收），不进「未交发票」分支。
+ */
+function isInvoiceSettled(f, collectedSumMap) {
+  if (hasAttachment(f['发票'])) return true; // 审批直附：一次性交齐动作完成
+  const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
+  const amount = parseTotalAmount(f['总金额']);
+  const collected = applyNo ? collectedSumMap.get(applyNo) : null;
+  if (collected && collectStore.isFullyCollected(collected.sum, amount)) return true;
+  // 总金额不可解析：收齐判定恒 false → 会永久催；fail-open 回落「至少交过一些」
+  // （直附或台账收录过 = 视为已交转财务人工收口，不无限催）
+  if (amount === null && (collected || hasInvoiceSubmitted(f))) return true;
+  return false;
+}
+
 async function getOverdueInvoices() {
   const all = await fetchAllApprovals();
   const APPROVED = config.approvalStatus.APPROVED;
@@ -222,13 +251,10 @@ async function getOverdueInvoices() {
     const f = record.fields || {};
     if (f['申请状态'] !== APPROVED) return false;
     if (!isActiveProcess(f)) return false;
-    // 多票求和制（v103）：「收齐」才算已交——两栏口径在多票场景失效（采集镜像 append
-    // 补交发票栏，交 1/N 张后该栏非空，旧两栏判断会把未收齐的申请永久踢出催票名单）；
-    // 「台账收录 ≥1 张」同理（收录≠收齐）。统一走 sumByApplyNo + isFullyCollected。
-    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    const amount = typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null);
-    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
-    if (collected && collectStore.isFullyCollected(collected.sum, amount)) return false;
+    // v105 统一判据（工位 A#1/#2）：直附或收齐=已交不催；部分交未收齐继续催剩余票；
+    // 总金额缺失 fail-open（此前与本函数在 getFinanceFollowUp 口径分叉——同一记录
+    // 周报不催私聊催，修复为同款回落）
+    if (isInvoiceSettled(f, collectedSumMap)) return false;
     const ms = typeof f['完成时间'] === 'number' ? f['完成时间'] : parseInt(f['完成时间'], 10);
     if (!ms || Number.isNaN(ms)) return false; // 无完成时间不催
     return ms + graceMs <= Date.now();
@@ -263,22 +289,10 @@ async function getFinanceFollowUp() {
     if (f['申请状态'] !== APPROVED) continue;
     if (!isActiveProcess(f)) continue;
 
-    const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
-    const amount = typeof f['总金额'] === 'number' ? f['总金额'] : (parseFloat(f['总金额']) || null);
-    // 多票求和制（v103）：收齐才算已交票——交 1/N 张继续走「催发票」分支（催剩余票），
-    // 不再提前进「催制单」（旧口径 collectedNos.has(1 张收录)=已交 → 财务提前做报销单拆单）。
-    // 两栏判断同步废止：采集镜像 append 补交发票栏，交 1 张后该栏必非空。
-    // 总金额不可解析时收齐判定恒 false → 会一直催发票；为不误催已交全票的记录，
-    // 回落收录性判断（sum>0 或两栏有值 = 至少交过，按旧口径视为已交，转财务人工收口）
-    const collected = applyNo ? collectedSumMap.get(applyNo) : null;
-    let hasInvoice;
-    if (collected && collectStore.isFullyCollected(collected.sum, amount)) {
-      hasInvoice = true;
-    } else if (amount !== null) {
-      hasInvoice = false; // 总金额可解析且未收齐 → 继续催发票（含已交部分票的）
-    } else {
-      hasInvoice = hasInvoiceSubmitted(f) || Boolean(collected); // 总金额缺失 fail-open 旧口径
-    }
+    // v105 统一判据（工位 A#1）：直附（发票栏）或台账收齐=已交 → 进「未制单」分支；
+    // 部分交未收齐且总金额可解析 → 继续走「催发票」分支催剩余票（求和制，不再提前催制单
+    // 拆单）；总金额缺失 fail-open 回落「至少交过」转财务人工收口（同 getOverdueInvoices）
+    const hasInvoice = isInvoiceSettled(f, collectedSumMap);
     // 是否打印=是（2026-09-29 曼波定）：财务已自行制单打印（或已进机器人批次）——
     // 该记录整条跳过（不催制单也不催转账），机器人不与财务手工线重合
     if (fieldText(f['是否打印']) === '是') continue;

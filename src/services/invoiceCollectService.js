@@ -223,6 +223,11 @@ async function collectFromMessage(payload) {
       } else if (match.collectedCount) {
         remainingNote = `该申请已收 ${match.collectedCount} 张 ¥${(match.collectedSum || 0).toFixed(2)}，本张后累计 ¥${(match.collectedSum + f.totalAmount).toFixed(2)}/共 ¥${match.amount.toFixed(2)}`;
       }
+    } else if (match && match.amount === null) {
+      // 申请总额不可解析（全量审查工位 C#P3，与 backfill 同口径对齐）：无法做金额比对，
+      // 不再静默「通过」——标「待人工」交财务核对（backfill 同款终态），两入口不再分叉
+      verifyStatus = '待人工';
+      notes.push('该申请「总金额」字段无法解析，金额归类需财务人工核对');
     }
     const buyerCheck = checkBuyer(f);
     if (buyerCheck.status && verifyStatus !== '金额不符') verifyStatus = buyerCheck.status;
@@ -239,9 +244,10 @@ async function collectFromMessage(payload) {
       '发票号码': f.invoiceNo,
       ...(f.invoiceCode ? { '发票代码': f.invoiceCode } : {}),
       '票种': result.invoiceType || 'unknown',
-      // NaN 安全（2026-11-03 审查 P2）：非法日期（2/30、13 月等）返回 null 不写该列，
-      // 防「开票日期」空列让三元组查重对这条票永久失效
-      ...(f.issueDate ? { '开票日期': issueDateToMs(f.issueDate) } : {}),
+      // NaN 安全（2026-11-03 审查 P2 + 全量审查工位 C#P2）：非法日期（2/30、13 月等）
+      // issueDateToMs 回读比对得 null——先换算再判空，防写出显式 null 列
+      // （该票从此三元组查重永久失效；此前按 issueDate 真值守卫拦不住「格式合法但不存在」的日期）
+      ...(f.issueDate && issueDateToMs(f.issueDate) ? { '开票日期': issueDateToMs(f.issueDate) } : {}),
       '价税合计': f.totalAmount,
       ...(f.buyerName ? { '购买方名称': f.buyerName } : {}),
       ...(f.buyerTaxNo ? { '购买方税号': f.buyerTaxNo } : {}),
@@ -251,8 +257,11 @@ async function collectFromMessage(payload) {
       ...(f.checkCode ? { '校验码后6位': f.checkCode } : {}),
       '提交人': openId,
       ...(resolvedName ? { '提交人姓名': resolvedName } : {}),
-      ...(match ? { '关联申请编号': match.applyNo, '申请金额': match.amount } : {}),
-      ...(match && match.amount !== null ? { '金额差': amountDiff } : {}),
+      // 申请金额 null 守卫（全量审查工位 C#P3，与 backfill 同口径）：总金额不可解析时
+      // 不写 null 字段（bitable 报错风险），终态「待人工」由财务核对
+      ...(match ? { '关联申请编号': match.applyNo } : {}),
+      ...(match && match.amount !== null ? { '申请金额': match.amount } : {}),
+      ...(match && match.amount !== null && amountDiff !== null ? { '金额差': amountDiff } : {}),
       '识别通道': result.source === 'qrcode+ocr' ? 'qrcode+ocr' : result.source,
       '校验状态': verifyStatus,
       // qrPayload 挂识别结果顶层（invoiceParser 各通道统一），不在 fields 里——

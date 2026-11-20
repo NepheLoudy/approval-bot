@@ -549,7 +549,51 @@ let invoiceCollectServiceModule;
 (async () => {
   invoiceCollectServiceModule = require('../src/services/invoiceCollectService');
   await main();
-  console.log('✅ stub-test-invoice-collect 全部通过');
+    // ---------- 单元：reconcileApplyAmount 三态回归（全量审查工位 C#P1——v103 曾顺序写反
+  // 致超收分支数学不可达，超收票被整单翻「通过」洗白；v105 先判超收再判收齐+只覆盖金额类状态） ----------
+  {
+    const bf = require('../src/services/backfillService');
+    // 桩 collectStore.listCollect/updateCollect（require.cache 已被本测试注入过——直接复用其 Map）
+    const collected = [];
+    const origList = collectStore.listCollect;
+    const origUpdate = collectStore.updateCollect;
+    const updates = [];
+    collectStore.listCollect = async () => collected;
+    collectStore.updateCollect = async (rid, fields) => { updates.push({ rid, fields }); const row = collected.find(r => r.record_id === rid); if (row) Object.assign(row.fields, fields); };
+    // 超收：总额 500，两张 300+300=600（>500+tol10）→ 统一「金额不符」
+    collected.length = 0;
+    collected.push({ record_id: 'r1', fields: { '关联申请编号': 'RC1', '价税合计': 300, '校验状态': '通过' } });
+    collected.push({ record_id: 'r2', fields: { '关联申请编号': 'RC1', '价税合计': 300, '校验状态': '通过' } });
+    await bf.reconcileApplyAmount('RC1', 500);
+    assert.equal(updates.length, 2, '超收两票均回写');
+    assert.ok(updates.every(u => u.fields['校验状态'] === '金额不符'), '超收聚合=金额不符（v103 死分支回归锁）');
+    // 收齐：300+200=500 ∈ [490,510] → 统一「通过」
+    updates.length = 0;
+    collected.length = 0;
+    collected.push({ record_id: 'r3', fields: { '关联申请编号': 'RC2', '价税合计': 300, '校验状态': '金额不符' } });
+    collected.push({ record_id: 'r4', fields: { '关联申请编号': 'RC2', '价税合计': 200, '校验状态': '通过' } });
+    await bf.reconcileApplyAmount('RC2', 500);
+    assert.equal(updates.length, 1, '只有金额不符那张被翻通过');
+    assert.equal(updates[0].fields['校验状态'], '通过', '收齐聚合=通过');
+    // 未收齐：300 < 490 → 不动（中间态不覆盖）
+    updates.length = 0;
+    collected.length = 0;
+    collected.push({ record_id: 'r5', fields: { '关联申请编号': 'RC3', '价税合计': 300, '校验状态': '通过' } });
+    collected.push({ record_id: 'r6', fields: { '关联申请编号': 'RC3', '价税合计': 100, '校验状态': '通过' } });
+    await bf.reconcileApplyAmount('RC3', 500);
+    assert.equal(updates.length, 0, '未收齐中间态不覆盖');
+    // 抬头存疑不被收齐聚合洗白（C#P2）
+    updates.length = 0;
+    collected.length = 0;
+    collected.push({ record_id: 'r7', fields: { '关联申请编号': 'RC4', '价税合计': 300, '校验状态': '抬头存疑' } });
+    collected.push({ record_id: 'r8', fields: { '关联申请编号': 'RC4', '价税合计': 200, '校验状态': '通过' } });
+    await bf.reconcileApplyAmount('RC4', 500);
+    assert.equal(updates.length, 0, '收齐聚合不覆盖抬头存疑（非金额状态保护）');
+    collectStore.listCollect = origList;
+    collectStore.updateCollect = origUpdate;
+  }
+
+console.log('✅ stub-test-invoice-collect 全部通过');
   process.exit(0);
 })().catch((err) => {
   console.error('❌ stub-test-invoice-collect 失败:', err);

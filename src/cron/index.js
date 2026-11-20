@@ -10,7 +10,7 @@ const batchService = require('../services/batchService');
 const bot = require('../feishu/bot');
 
 // ============================================================
-// 定时任务（共七个）：
+// 定时任务（共八个，cardFlowSync 2026-11-06 起——全量审查工位 D#3 补正注释）：
 //   1. 每周财务催办周报  CRON_SCHEDULE                     (0 0 18 * * 1, 周一18:00)
 //   2. 每日待审批提醒    DAILY_INVOICE_REMINDER_SCHEDULE   (0 0 9 * * *,  每天09:00, 无审批中记录则跳过)
 //   3. 催发票私聊        INVOICE_URGE_SCHEDULE             (0 30 10 * * *, 每天10:30,

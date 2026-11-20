@@ -2,7 +2,7 @@
 
 版本隔离单位：一次 `npm run push`（= 一次 git 提交 + 一次部署）。v1~v15 于 2026-09-04 按提交历史回溯编号，此后每次 push 在文末追加新版本（规则见顶层 [AGENTS.md](../AGENTS.md)）。
 
-当前最新：**v104**（2026-11-21，项目额度功能：批次表承诺即占用口径（锁定+提交+到账，退回释放）+周报「💰 项目额度」段+锁批 🚨 超支预警+/approval-quota 指令（总览全员，set/unset 资金白名单）+HTTP 三端点+运维台额度面板，初始已用字段兜历史消耗，24 套全绿；SFTP 待回实验室）。上一版 **v103**（2026-11-20，多票求和制全链路收口：催办/催发票/金额线/backfill 四处统一收齐判据（cross-check 复核 P1×4 口径裂缝修复）+锁定聚合对账 🧮 未收齐段（校核姿态）+周报采集质量段（未识别报告）+存量回刷 182 张购销方/开票内容补齐，23 套全绿）。
+当前最新：**v105**（2026-11-21，全量审查批：四异源工位并行 17 项发现全部收口——A1 发票栏信号回归（isInvoiceSettled 统一判据）/B2 notFullyCollected 全局口径（跨批误报修复）/B1 BOM 申请金额接线/C1 reconcile 超收死分支（回归锁）/D1 quota 指令 args 错位/D2 运维台 GET 403（overview 改 POST）/D3 cron 泄漏等，24 套全绿）。上一版 **v104**（2026-11-21，项目额度功能：批次表承诺即占用口径+周报「💰 项目额度」段+锁批 🚨 超支预警+/approval-quota 指令+HTTP 三端点+运维台额度面板，初始已用兜历史消耗，24 套全绿）。
 
 ## 阶段十 · 私聊链接文本简化（2026-09-05）
 
@@ -853,3 +853,31 @@
 - **测试**：stub-test-quota.js 新增（占用口径边界：退回释放/拟批不占/主项目归属聚合、upsert 幂等、非法值拒绝、初始已用>额度拒绝、超支排序置顶、撤销、周报渲染、空配置子进程真实验证）——npm test 24 段全绿。
 - **bitable.deleteRecord 补齐**（此前只有 CRUD 无 D）。
 - **部署注**：本批提交时台式机在校园网（SuperQianLi_5G 不可达）——SFTP 通道不通，**提交与部署分离**：代码与 .env（含 tblDtuU4t74fePSn）随下次在实验室 push 生效；运维台 UI 在 dashboard 仓（index.html 已改，静态文件刷新即生效）。
+
+### v105 · 2026-11-21 · fix（全量审查批，随本提交落地）
+**全项目代码审查+修复（曼波令「全面审查全项目代码，寻找 bug 和不通链路并修复」）——四异源工位并行（A催办/B批次台账/C识别采集/D播报接线），17 项发现全部裁决收口**
+- **工位 A（催办链路，deepseek cross-check）**：
+  - A1【高危回归】v103「两栏判断废止」过度修正——「发票」栏（Url，审批直附）是干净信号被误杀，47% 直附记录被永久误催发票。修复：新统一判据 `isInvoiceSettled`（直附 || 台账收齐；补交发票栏不再单独算已交——求和制病灶本体保留废止），getFinanceFollowUp/getOverdueInvoices 双消费点接入；
+  - A2【口径分叉】getOverdueInvoices 缺总金额缺失 fail-open（同一记录周报不催私聊催）——补齐同款回落；
+  - A3【锁持有】lockBatch 额度预警+聚合对账移出 pool 锁（两次全表扫描不占锁）；
+  - A4 deferred 到期重催清回 none（状态残留）；A5 formAlert 过时注释更新（getCollectedApplyNoSet 保留——测试套件在用作 fail-open 回归断言，工位误报全死）；
+  - A6 总金额解析统一 parseTotalAmount（千分位容错，approvalService 导出+batchService 两处接入）；
+  - A9「是否打印=是 × 求和制部分锁批」周报丢失剩余催票——裁定成文不改（私聊链路兜底，低频）。
+- **工位 B（批次/台账/额度，deepseek cross-check）**：
+  - B1【接线遗漏】BOM「申请金额」列恒空字符串——接上 item.applyAmount（v103 字段就位但没接）；
+  - B2【真口径分裂】notFullyCollected 本批局部聚合 vs 全局总额——跨批申请误报「还差」（实案：总额 1000=5×200，A 批收 400 B 批收 600，B 批报「还差 400」而 400 在 A 批）。改 sumByApplyNo 全局已收和（lockBatch/regen 双路径）；
+  - B3 额度同名重复行 set 时顺手清理（warn 只进日志操作者看不到）；B4/B6 confirm/regen 补 quotaAlert（一致性缺口）+buildDeliveryCard 渲染。
+- **工位 C（识别采集，bigmodel dev-worker）**：
+  - C1【P1 死分支】reconcileApplyAmount 三态顺序写反（v103 本会话所写：`sum >= 总额-tol` 先命中，`sum > 总额+tol` 数学不可达——超收票被整单翻「通过」洗白，0..2000 全扫描实证零命中）。修复：先判超收再判收齐 + 回归断言锁进桩测试；
+  - C2【P2】开票日期「2026-02-30」格式合法但不存在 → issueDateToMs 得 null 仍显式落库 → 三元组闸对该票永久失效。两入口修（先换算再判空）；
+  - C2b【P2】reconcile 聚合回写只覆盖金额类状态（通过/金额不符）——「抬头存疑/待人工」不再被收齐聚合静默洗白；
+  - C3【P3】实时链路 applyAmount=null 终态与 backfill 对齐（「待人工」+null 字段守卫）；
+  - C4【P3】backfill 逐附件识别/落表 catch（单点失败不再炸整轮回溯）；
+  - C 观察项成文不改：三元组闸 sellerTaxNo 缺失退化二元组（误伤方向非绕过）、backfill 不跑 checkBuyer（产品口径待曼波定）、sumByApplyNo 计入异常票（财务看标记收口）。
+- **工位 D（播报/接线，bigmodel dev-worker）**：
+  - D1【P0】/approval-quota set/unset 的 args 索引错位（v104 本会话所写：sub=args[1] 应为 args[0]，写通道全死恒回用法错误；总览歪打正着可用）——修正+参数顺移；
+  - D2【P0】运维台代理 GET 分支无 X-API-Token（fail-closed 端点经 GET 恒 403）+面板静默假空态——overview 端点改 POST + dashboard 前端同步（已 commit b03db8a）+README「管理端点一律 POST」口径；
+  - D3【P1】stopCronJobs 漏停 cardFlowTask（重复 start 定时器泄漏、card_flow_sync 每小时双跑）——补停+头注释「七个」→八个；
+  - D4 帮助/拦截文案漂移（lock 收款账号=xx、资金闸覆盖 ledger+quota set/unset）；D5 卡片消毒三处补齐（周报项目分布/台账段 status/提醒卡申请编号）。
+- **测试**：reconcileApplyAmount 三态回归断言新增（超收=金额不符/收齐=通过/未收齐不动/抬头存疑不洗白），npm test 24 段全绿。
+- **部署注**：v104（a3796da）已随内网恢复部署生产（额度端点实测回真实 unmanaged 数据：实验室建设 ¥10005/重装 ¥3739/团队建设 ¥1156/步兵 ¥541/宣运 ¥220 待设额度）；本批 v105 随后部署。

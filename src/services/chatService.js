@@ -82,7 +82,7 @@ async function handleHelpCommand() {
     '  /approval-status  查看审批统计',
     '  /approval-urge    手动催办 [发票|报销单|转账]，留空=发票私聊催交',
     '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
-    '                    submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
+    '                    submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]（lock 另支持 收款账号=xx）',
     '                    （confirm=确认自动批次明细后才生成交付件与二维码；printed=标记打印完成并自动预登记《报销台账》；submit/paid/reject 自动同步《报销台账》）',
     '  /approval-quota  项目额度：查看各项目剩余额度（占用=锁定+提交+到账）；set <项目> <额度> [初始已用] / unset <项目>（资金白名单）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
@@ -251,7 +251,9 @@ async function handleQuotaCommand(args = [], ctx = {}) {
     return 'ℹ️ 未配置项目额度表（BITABLE_QUOTA_TABLE_ID）——先跑 scripts/create-collect-tables.js 建表并配 .env，额度功能才会启用';
   }
   const quotaService = require('./quotaService');
-  const sub = String(args[1] || '').toLowerCase();
+  // args 不含指令本体（本地 parseCommand 与 hub 转发同口径）——sub=args[0]，
+  // set 的参数顺移 args[1..3]（v104 曾写成 args[1..] 全部错位，写通道全死——全量审查工位 D#1）
+  const sub = String(args[0] || '').toLowerCase();
 
   // 查看：财务群人人可用（只读）
   if (!sub || sub === 'overview') {
@@ -273,18 +275,18 @@ async function handleQuotaCommand(args = [], ctx = {}) {
   if (denied) return denied;
 
   if (sub === 'set') {
-    const project = String(args[2] || '').trim();
-    const amount = parseFloat(String(args[3] ?? ''));
+    const project = String(args[1] || '').trim();
+    const amount = parseFloat(String(args[2] ?? ''));
     if (!project || !Number.isFinite(amount) || amount < 0) {
       return '❌ 用法：/approval-quota set <项目> <额度> [初始已用]（如 /approval-quota set 对抗赛 20000 15000）';
     }
-    const init = parseFloat(String(args[4] ?? '')) || 0;
+    const init = parseFloat(String(args[3] ?? '')) || 0;
     const r = await quotaService.setQuota(project, amount, init);
     const item = (await quotaService.getProjectQuota(project));
     return `✅ 项目额度已${r.action === 'created' ? '设置' : '更新'}：${r.project} 额度 ¥${r.quota.toFixed(2)}${r.initialSpent ? `（初始已用 ¥${r.initialSpent.toFixed(2)}）` : ''}${item ? `，当前剩余 ¥${item.remaining.toFixed(2)}` : ''}`;
   }
   if (sub === 'unset') {
-    const project = String(args[2] || '').trim();
+    const project = String(args[1] || '').trim();
     if (!project) return '❌ 用法：/approval-quota unset <项目>';
     const r = await quotaService.deleteQuota(project);
     return r.action === 'deleted' ? `✅ 已撤销「${r.project}」的额度管理（批次流转不受影响）` : `ℹ️ 「${r.project}」本来就没有额度配置`;
@@ -304,7 +306,7 @@ function fundOperatorDenied(ctx = {}) {
   if (!allowed.length) return '';
   const senderId = ctx.senderId || '';
   if (senderId && allowed.includes(senderId)) return '';
-  return '❌ 未获资金指令权限：lock/submit/paid/reject/printed 已启用操作人白名单（APPROVAL_FUND_OPERATOR_IDS），请联系管理员把你的 open_id 加入名单';
+  return '❌ 未获资金指令权限：lock/submit/paid/reject/printed/ledger 与额度 set/unset 已启用操作人白名单（APPROVAL_FUND_OPERATOR_IDS），请联系管理员把你的 open_id 加入名单';
 }
 
 /**
@@ -395,6 +397,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         scanItems: r.scanItems || [],
         abnormalItems: r.abnormalItems || [],
         notFullyCollected: r.notFullyCollected || [],
+        quotaAlert: r.quotaAlert || null,
       });
       if (sent) {
         lines.push(`· 📦 交付卡已发本群，@机器人 回复「接取」领取后录入小翼Plus；完成后：/approval-batch submit ${r.batchNo}`);
@@ -514,6 +517,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         generated: { pdf: !!r.pdfToken, printDocx: !!r.docxToken, bom: !!r.bomToken, materialList: !!r.mlToken, specialSheet: !!(r.specialPdfToken || r.specialDocxToken), scanSheet: !!r.ssToken },
         specialCount: r.specialCount, blankCount: r.blankCount, scanItems: r.scanItems || [], abnormalItems: r.abnormalItems || [],
         notFullyCollected: r.notFullyCollected || [],
+        quotaAlert: r.quotaAlert || null,
       });
       if (sent) lines.push('· 📦 最新交付卡已重发群（二维码按当前票面重建）');
       else lines.push('· ⚠️ 交付卡重发被播报熔断暂缓（今日卡片额度已满），稍后重试或从批次表附件取用');
@@ -539,6 +543,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
         generated: { pdf: !!g.pdfToken, printDocx: !!g.docxToken, bom: !!g.bomToken, materialList: !!g.mlToken, specialSheet: !!(g.specialPdfToken || g.specialDocxToken), scanSheet: !!g.ssToken },
         specialCount: g.specialCount, blankCount: g.blankCount, scanItems: g.scanItems || [], abnormalItems: g.abnormalItems || [],
         notFullyCollected: g.notFullyCollected || [],
+        quotaAlert: g.quotaAlert || null,
       });
     } catch (err) {
       console.error('[对话服务] 确认后交付卡发送失败:', err.message);

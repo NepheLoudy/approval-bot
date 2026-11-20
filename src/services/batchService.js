@@ -230,7 +230,7 @@ async function getUnbatchedInvoicedByProject() {
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     const collected = applyNo ? collectedSumMap.get(applyNo) : null;
     if (!approvalService.hasInvoiceSubmitted(f) && !collected) continue; // 两列+台账都无票
-    if (collected && collectStore.isFullyCollected(collected.sum, Number.isFinite(Number(f['总金额'])) ? Number(f['总金额']) : null)) continue; // 已收齐
+    if (collected && collectStore.isFullyCollected(collected.sum, approvalService.parseTotalAmount(f['总金额']))) continue; // 已收齐
     const form = f['报销单'];
     if (form !== null && form !== undefined && form !== '') continue; // 已制单
     if (fieldText(f['是否打印']) === '是') continue; // 财务人工线
@@ -271,7 +271,7 @@ async function getUnbatchedInvoicedByPerson() {
     const applyNo = f['申请编号'] ? (f['申请编号'].text || String(f['申请编号'])) : '';
     const collected = applyNo ? collectedSumMap.get(applyNo) : null;
     if (!approvalService.hasInvoiceSubmitted(f) && !collected) continue; // 无票（两栏+台账都无）
-    if (collected && collectStore.isFullyCollected(collected.sum, Number.isFinite(Number(f['总金额'])) ? Number(f['总金额']) : null)) continue; // 已收齐
+    if (collected && collectStore.isFullyCollected(collected.sum, approvalService.parseTotalAmount(f['总金额']))) continue; // 已收齐
     const form = f['报销单'];
     if (form !== null && form !== undefined && form !== '') continue; // 已制单
     if (fieldText(f['是否打印']) === '是') continue;
@@ -309,8 +309,10 @@ async function lockBatch(batchNo, project, options = {}) {
   // 全程按批次号加锁（防并发双锁同一池票——复查 P1-6）；锁内二次查重。
   // batch_ 锁内全程再包 pool 锁（复查 P1：batch_ 锁只互斥同批次号，不同批次号并发 lock
   // 会在互不排斥的情况下各自快照同一票池，同一张票进两批 → 双金额双张数；
-  // 嵌套锁顺序恒为 batch_ → pool → proj_，无反向嵌套，安全）
-  return withLock(`batch_${batchNo}`, () => withLock('pool', async () => {
+  // 嵌套锁顺序恒为 batch_ → pool → proj_，无反向嵌套，安全）。
+  // v105：锁内只做锁定本体；未收齐全局聚合与额度预警移到锁外（工位 A#3——两次全表
+  // 扫描不占 pool 锁），结果经 result 变量在锁外补充后返回。
+  const result = await withLock(`batch_${batchNo}`, () => withLock('pool', async () => {
     const existing = await collectStore.findBatchByName(batchNo);
     if (existing) throw new Error(`批次号已存在：${batchNo}（报销批次表）`);
 
@@ -451,65 +453,15 @@ async function lockBatch(batchNo, project, options = {}) {
       }
     }
 
-    // 未收齐申请聚合对账（v103 校核姿态，曼波「校核姿态」迭代）：批内按申请聚合票面合计
-    // vs 审批总额——收不齐的申请列出（还差多少）。多票分批交的收口信号集中给财务：
-    // 采集期中间态不标异常（reconcileApplyAmount v103 三态），锁批时一眼看到拆单风险。
-    const sumByApply = new Map();
-    for (const i of pool) {
-      if (!i.applyNo) continue;
-      const cur = sumByApply.get(i.applyNo) || { sum: 0, count: 0 };
-      cur.sum = Math.round((cur.sum + i.totalAmount) * 100) / 100;
-      cur.count++;
-      sumByApply.set(i.applyNo, cur);
-    }
-    const notFullyCollected = [];
-    for (const [applyNo, agg] of sumByApply) {
-      const item = pool.find(i => i.applyNo === applyNo);
-      const total = item ? item.applyAmount : null;
-      if (total === null || !(total > 0)) continue;
-      if (agg.sum < total - 0.01) {
-        notFullyCollected.push({
-          applyNo,
-          count: agg.count,
-          collected: agg.sum,
-          total,
-          short: Math.round((total - agg.sum) * 100) / 100,
-        });
-      }
-    }
-    notFullyCollected.sort((a, b) => b.short - a.short);
-
-    // 项目额度超支预警（2026-11-21 曼波定额度功能）：本批锁定后该项目剩余 < 0 → 🚨 进回执。
-    // 注意时序：此处批次记录已建（createBatch 先行=占用已生效），quota.remaining 已含本批——
-    // remainingAfter=quota.remaining，remainingBefore=remaining+本批金额（防双重扣）。
-    // 预警不阻断锁定（报销该走还走，额度是管理信号不是硬闸）；无配置/查询失败静默跳过。
-    let quotaAlert = null;
-    try {
-      const quotaService = require('./quotaService');
-      const q = await quotaService.getProjectQuota(primaryProject);
-      if (q && q.remaining < 0) {
-        quotaAlert = {
-          project: primaryProject,
-          remainingBefore: Math.round((q.remaining + amount) * 100) / 100,
-          remainingAfter: q.remaining,
-          quota: q.quota,
-        };
-        console.warn(`[批次] 项目额度预警：${primaryProject} 锁定本批 ¥${amount.toFixed(2)} 后剩余 ¥${q.remaining.toFixed(2)}（额度 ¥${q.quota.toFixed(2)}）——超支`);
-      }
-    } catch (err) {
-      console.warn('[批次] 项目额度查询失败（预警跳过）:', err.message);
-    }
-
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
       pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken,
       ssToken, scanItems,
       specialCount: specials.length,
       summary, purpose, ordinal, markFailed,
+      primaryProject,
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       abnormalItems: collectAbnormalItems(pool),
-      notFullyCollected, // 未收齐申请（多票求和制收口信号，v103）
-      quotaAlert, // 项目额度超支预警（额度功能，v104）
       missingContent: pool.filter(i => !i.invoiceContent).length,
       // 空白票面计数（2026-11-18 检测批）：memo 过的票才有 __blankValue——锁定 deferDelivery
       // 阶段不渲染，此处全为 undefined 恒 0；confirm/regen 渲染后再触发 lock 侧已不在。
@@ -518,6 +470,57 @@ async function lockBatch(batchNo, project, options = {}) {
       recordId: batchRecord.record_id, items: pool,
     };
   }));
+
+  // 未收齐申请聚合对账 + 项目额度预警（v105 重构，全量审查工位 A#3/B#2）：
+  // **移出锁外**（额度查询/notFullyCollected 两次全表扫描不占 pool 锁——预警本不阻断锁定，
+  // 旧版在锁内做拉长并发 lock 争抢窗口）；**全局口径**（工位 B#2 真口径分裂修复：v103 用
+  // 本批局部聚合 vs 全局总额，跨批申请会误报「还差」——实案：总额 1000=5×200，A 批收 400
+  // B 批收 600，B 批会报「已收 600/还差 400」而 400 其实在 A 批。改用 sumByApplyNo 全局
+  // 已收和（批次记录已建，本批票已进聚合），「还差」才是真差额）。
+  try {
+    const collectedSumMap = await collectStore.sumByApplyNo();
+    const seen = new Set();
+    const notFullyCollected = [];
+    for (const i of result.items) {
+      if (!i.applyNo || i.applyAmount === null || !(i.applyAmount > 0) || seen.has(i.applyNo)) continue;
+      seen.add(i.applyNo);
+      const agg = collectedSumMap.get(i.applyNo) || { sum: 0, count: 0 };
+      if (agg.sum < i.applyAmount - 0.01) {
+        notFullyCollected.push({
+          applyNo: i.applyNo,
+          count: agg.count,
+          collected: Math.round(agg.sum * 100) / 100,
+          total: i.applyAmount,
+          short: Math.round((i.applyAmount - agg.sum) * 100) / 100,
+        });
+      }
+    }
+    notFullyCollected.sort((a, b) => b.short - a.short);
+    result.notFullyCollected = notFullyCollected;
+  } catch (err) {
+    console.warn('[批次] 未收齐聚合对账失败（跳过）:', err.message);
+  }
+
+  // 项目额度超支预警（2026-11-21 曼波定额度功能）：本批锁定后主项目剩余 < 0 → 🚨 进回执。
+  // 时序：批次记录已建（占用已生效）→ quota.remaining 即 after 值，before=remaining+本批金额（防双重扣）。
+  // 预警不阻断锁定（额度是管理信号不是硬闸）；无配置/查询失败静默跳过。
+  try {
+    const quotaService = require('./quotaService');
+    const q = await quotaService.getProjectQuota(result.primaryProject);
+    if (q && q.remaining < 0) {
+      result.quotaAlert = {
+        project: result.primaryProject,
+        remainingBefore: Math.round((q.remaining + result.amount) * 100) / 100,
+        remainingAfter: q.remaining,
+        quota: q.quota,
+      };
+      console.warn(`[批次] 项目额度预警：${result.primaryProject} 锁定本批 ¥${result.amount.toFixed(2)} 后剩余 ¥${q.remaining.toFixed(2)}（额度 ¥${q.quota.toFixed(2)}）——超支`);
+    }
+  } catch (err) {
+    console.warn('[批次] 项目额度查询失败（预警跳过）:', err.message);
+  }
+
+  return result;
 }
 
 // ---------- 交付包元数据（摘要/笔序/归档名） ----------
@@ -747,27 +750,38 @@ async function doRegenerateBatchFiles(batchNo) {
       console.error('[批次] 金额漂移备注回写失败:', err.message);
     }
   }
-  // 未收齐申请聚合对账（v103，与 lockBatch 同款——confirm/regen 交付卡也要带收口信号）
-  const sumByApplyRegen = new Map();
-  for (const i of items) {
-    if (!i.applyNo) continue;
-    const cur = sumByApplyRegen.get(i.applyNo) || { sum: 0, count: 0 };
-    cur.sum = Math.round((cur.sum + i.totalAmount) * 100) / 100;
-    cur.count++;
-    sumByApplyRegen.set(i.applyNo, cur);
-  }
-  const notFullyCollected = [];
-  for (const [applyNo, agg] of sumByApplyRegen) {
-    const item = items.find(i => i.applyNo === applyNo);
-    const total = item ? item.applyAmount : null;
-    if (total === null || !(total > 0)) continue;
-    if (agg.sum < total - 0.01) {
-      notFullyCollected.push({ applyNo, count: agg.count, collected: agg.sum, total, short: Math.round((total - agg.sum) * 100) / 100 });
+  // 未收齐申请聚合对账（v105 全局口径，与 lockBatch 同款——工位 B#2：局部聚合 vs 全局
+  // 总额在跨批申请上误报「还差」，改 sumByApplyNo 全局已收和；quotaAlert 同步补齐——
+  // 工位 B#6：confirm/regen 交付卡此前不带额度预警，confirm 前若有新锁批拉低剩余不会刷新）
+  let notFullyCollected = [];
+  let quotaAlert = null;
+  try {
+    const collectedSumMap = await collectStore.sumByApplyNo();
+    const seen = new Set();
+    for (const i of items) {
+      if (!i.applyNo || i.applyAmount === null || !(i.applyAmount > 0) || seen.has(i.applyNo)) continue;
+      seen.add(i.applyNo);
+      const agg = collectedSumMap.get(i.applyNo) || { sum: 0, count: 0 };
+      if (agg.sum < i.applyAmount - 0.01) {
+        notFullyCollected.push({ applyNo: i.applyNo, count: agg.count, collected: Math.round(agg.sum * 100) / 100, total: i.applyAmount, short: Math.round((i.applyAmount - agg.sum) * 100) / 100 });
+      }
     }
+    notFullyCollected.sort((a, b) => b.short - a.short);
+  } catch (err) {
+    console.warn('[批次] 未收齐聚合对账失败（跳过）:', err.message);
   }
-  notFullyCollected.sort((a, b) => b.short - a.short);
+  try {
+    const quotaService = require('./quotaService');
+    const primaryProjectRegen = String(bf['项目'] || '').split('/')[0] || '未归类';
+    const q = await quotaService.getProjectQuota(primaryProjectRegen);
+    if (q && q.remaining < 0) {
+      quotaAlert = { project: primaryProjectRegen, remainingBefore: Math.round((q.remaining + regenTotal) * 100) / 100, remainingAfter: q.remaining, quota: q.quota };
+    }
+  } catch (err) {
+    console.warn('[批次] regen 额度查询失败（预警跳过）:', err.message);
+  }
 
-  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), notFullyCollected, amountDrift, blankCount: items.filter(i => i.__blankValue === true).length };
+  return { batchNo, count: items.length, project: String(bf['项目'] || ''), summary: String(bf['摘要'] || ''), amount: regenTotal, pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken, ssToken, scanItems, specialCount: specials.length, abnormalItems: collectAbnormalItems(items), notFullyCollected, quotaAlert, amountDrift, blankCount: items.filter(i => i.__blankValue === true).length };
 }
 
 // ---------- 财务三件套②：打印 PDF（录入序，一页两票，A4 竖版） ----------
@@ -975,7 +989,9 @@ async function uploadBatchBom(batchNo, items) {
       material: item.material,
       model: typeof item.model === 'string' ? item.model : JSON.stringify(item.model),
       applicant: item.applicant,
-      applyAmount: '',
+      // 申请金额对照列（v105 接线修复，工位 B#1：v103 给 collectToItem 加了 applyAmount
+      // 本为对账聚合用，BOM 该列却恒空字符串——发票金额 vs 申请金额没法并排核对）
+      applyAmount: item.applyAmount !== null && item.applyAmount !== undefined ? item.applyAmount : '',
       invoiceNo: item.invoiceNo,
       invoiceAmount: item.totalAmount,
       // 空校验状态显示「未校验」而非「通过」（复查 P2：纯 QR 通道票票面无校验结果，

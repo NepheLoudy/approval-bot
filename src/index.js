@@ -257,8 +257,10 @@ app.post('/api/chat/command', requireApiToken, async (req, res) => {
 });
 
 // ---------- 项目额度（2026-11-21 曼波定：额度输入/重置入口——运维台 SSH 代理调本端点，
-//             或财务群 /approval-quota 指令；占用口径见 quotaService.js 头注释） ----------
-app.get('/api/quota/overview', requireApiToken, async (req, res) => {
+//             或财务群 /approval-quota 指令；占用口径见 quotaService.js 头注释）。
+//             overview 用 POST：运维台 deploy/api 代理只在 POST 分支自动附 X-API-Token
+//             （GET 分支无 token 头——2026-11-21 全量审查工位 D 实锤，GET 会恒 403） ----------
+app.post('/api/quota/overview', requireApiToken, async (req, res) => {
   try {
     res.json(await quotaService.getQuotaOverview());
   } catch (err) {
