@@ -256,6 +256,7 @@ async function doCheck({ trigger = 'manual', dryRun = false } = {}) {
           unCollected: s.unCollected || 0,
           abnormalItems: r.abnormalItems || [],
           notFullyCollected: r.notFullyCollected || [],
+          quotaAlert: r.quotaAlert || null,
         }));
         // 熔断/无 webhook 静默 null（2026-11-03 审查 P3）：与 print_ask/confirm_remind
         // 口径对齐——批次已锁卡没发出要有痕，财务侧靠次日 confirm-remind 兜底

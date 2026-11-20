@@ -98,6 +98,22 @@ async function updateRecord(tableId, recordId, fields) {
 }
 
 /**
+ * 删除记录（项目额度撤销等管理操作用）
+ * @returns {Promise<{record_id: string}>}
+ */
+async function deleteRecord(tableId, recordId) {
+  const appToken = config.bitable.appToken;
+  const res = await requestAPI(
+    'DELETE',
+    `/bitable/v1/apps/${appToken}/tables/${tableId}/records/${recordId}`
+  );
+  if (res.code !== 0) {
+    throw new Error(`删除多维表格记录失败: ${res.msg} (code: ${res.code})`);
+  }
+  return { record_id: res.data.record_id || recordId };
+}
+
+/**
  * 按表名查表（不存在返回 null）。建表脚本/采集表定位用。
  */
 async function findTableByName(tableName) {
@@ -148,6 +164,7 @@ module.exports = {
   getRecord,
   createRecord,
   updateRecord,
+  deleteRecord,
   findTableByName,
   ensureTable,
   ensureField,

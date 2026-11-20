@@ -74,6 +74,16 @@ async function runWeeklyBroadcast(options = {}) {
     console.warn('[周播报] 采集质量段跳过:', err.message);
   }
 
+  // 项目额度段（2026-11-21 曼波定额度功能）：各项目剩余额度每周随周报走；
+  // 额度表未配置/查询失败降级跳过不炸周报（quotaService 头注释见占用口径）
+  let quotaOverview = null;
+  try {
+    quotaOverview = await require('./quotaService').getQuotaOverview();
+    console.log(`[周播报] 项目额度: ${quotaOverview.items.length} 个项目（超支 ${quotaOverview.items.filter(i => i.overspend).length}），未设额度项目 ${quotaOverview.unmanaged.length}`);
+  } catch (err) {
+    console.warn('[周播报] 项目额度段跳过:', err.message);
+  }
+
   const card = buildWeeklyFinanceCard(followUp, stats, {
     date: new Date().toLocaleDateString('zh-CN'),
     mentionIds: config.reminder.mentionIds,
@@ -83,6 +93,7 @@ async function runWeeklyBroadcast(options = {}) {
     ledger,
     overdueBatches,
     collectQuality,
+    quotaOverview,
   });
 
   if (options.dryRun) {

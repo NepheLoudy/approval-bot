@@ -479,6 +479,27 @@ async function lockBatch(batchNo, project, options = {}) {
     }
     notFullyCollected.sort((a, b) => b.short - a.short);
 
+    // 项目额度超支预警（2026-11-21 曼波定额度功能）：本批锁定后该项目剩余 < 0 → 🚨 进回执。
+    // 注意时序：此处批次记录已建（createBatch 先行=占用已生效），quota.remaining 已含本批——
+    // remainingAfter=quota.remaining，remainingBefore=remaining+本批金额（防双重扣）。
+    // 预警不阻断锁定（报销该走还走，额度是管理信号不是硬闸）；无配置/查询失败静默跳过。
+    let quotaAlert = null;
+    try {
+      const quotaService = require('./quotaService');
+      const q = await quotaService.getProjectQuota(primaryProject);
+      if (q && q.remaining < 0) {
+        quotaAlert = {
+          project: primaryProject,
+          remainingBefore: Math.round((q.remaining + amount) * 100) / 100,
+          remainingAfter: q.remaining,
+          quota: q.quota,
+        };
+        console.warn(`[批次] 项目额度预警：${primaryProject} 锁定本批 ¥${amount.toFixed(2)} 后剩余 ¥${q.remaining.toFixed(2)}（额度 ¥${q.quota.toFixed(2)}）——超支`);
+      }
+    } catch (err) {
+      console.warn('[批次] 项目额度查询失败（预警跳过）:', err.message);
+    }
+
     return {
       batchNo, count: pool.length, amount, projects, approvalWritten,
       pdfToken, docxToken, bomToken, mlToken, specialPdfToken, specialDocxToken,
@@ -488,6 +509,7 @@ async function lockBatch(batchNo, project, options = {}) {
       warningCount: pool.filter(i => i.verifyStatus !== '通过' || i.amountInvalid).length,
       abnormalItems: collectAbnormalItems(pool),
       notFullyCollected, // 未收齐申请（多票求和制收口信号，v103）
+      quotaAlert, // 项目额度超支预警（额度功能，v104）
       missingContent: pool.filter(i => !i.invoiceContent).length,
       // 空白票面计数（2026-11-18 检测批）：memo 过的票才有 __blankValue——锁定 deferDelivery
       // 阶段不渲染，此处全为 undefined 恒 0；confirm/regen 渲染后再触发 lock 侧已不在。

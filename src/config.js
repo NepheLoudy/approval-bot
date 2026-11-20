@@ -31,6 +31,9 @@ module.exports = {
     // 发票采集/报销批次表（机器人自建自写，先跑 scripts/create-collect-tables.js 再把 table_id 配进来）
     collectTableId: process.env.BITABLE_COLLECT_TABLE_ID || '',
     batchTableId: process.env.BITABLE_BATCH_TABLE_ID || '',
+    // 项目额度表（2026-11-21 曼波定额度功能：每项目花销从给定额度扣除，周报播报剩余；
+    // 空=额度功能整体关闭，播报/指令/端点全部降级「未配置」）
+    quotaTableId: process.env.BITABLE_QUOTA_TABLE_ID || '',
   },
 
   feishuEvent: {

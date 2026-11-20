@@ -71,6 +71,13 @@ const BATCH_FIELDS = [
   { field_name: '确认提醒时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } }, // 防重复提醒：锁定超期未确认交付只自动提醒一次（2026-10-12）
   { field_name: '备注', type: FIELD_TYPES.TEXT },
 ];
+const QUOTA_FIELDS = [
+  { field_name: '项目', type: FIELD_TYPES.TEXT }, // 唯一 key（=批次表「项目」口径，教师垫付=人名/宣运物资=组名），同名行=更新
+  { field_name: '总额度', type: FIELD_TYPES.NUMBER, property: { formatter: '0.00' } }, // 项目总预算（元）
+  { field_name: '初始已用', type: FIELD_TYPES.NUMBER, property: { formatter: '0.00' } }, // 建账前历史消耗预扣（v50 前手工批次的台账历史，批次表统计不到）
+  { field_name: '备注', type: FIELD_TYPES.TEXT },
+  { field_name: '更新时间', type: FIELD_TYPES.DATE, property: { date_formatter: 'yyyy-MM-dd HH:mm' } },
+];
 
 async function main() {
   console.log('== 建表：发票采集 ==');
@@ -89,11 +96,21 @@ async function main() {
     if (r.created) console.log(`  + 字段 ${field.field_name}`);
   }
 
+  console.log('== 建表：项目额度 ==');
+  const quota = await bitableApi.ensureTable('项目额度');
+  console.log('表 ID: ' + quota.tableId);
+  for (const field of QUOTA_FIELDS) {
+    const r = await bitableApi.ensureField(quota.tableId, field);
+    if (r.created) console.log('  + 字段 ' + field.field_name);
+  }
+
   const collectId = (await bitableApi.findTableByName('发票采集')).tableId;
   const batchId = (await bitableApi.findTableByName('报销批次')).tableId;
-  console.log('\n✅ 完成。请把下面两行配置进 .env：');
+  const quotaId = (await bitableApi.findTableByName('项目额度')).tableId;
+  console.log('\n✅ 完成。请把下面三行配置进 .env：');
   console.log(`BITABLE_COLLECT_TABLE_ID=${collectId}`);
   console.log(`BITABLE_BATCH_TABLE_ID=${batchId}`);
+  console.log(`BITABLE_QUOTA_TABLE_ID=${quotaId}`);
 }
 
 main().catch(err => { console.error('失败:', err.message); process.exit(1); });

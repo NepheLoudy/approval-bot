@@ -8,6 +8,7 @@ const approvalService = require('./services/approvalService');
 const ocrService = require('./services/ocrService');
 const invoiceCollectService = require('./services/invoiceCollectService');
 const backfillService = require('./services/backfillService');
+const quotaService = require('./services/quotaService');
 const bot = require('./feishu/bot');
 const { startCronJobs, runBroadcast, runReminder, runInvoiceUrgeOnce, runFormAlertOnce, getCronStatus, getBroadcastHistory } = require('./cron');
 
@@ -252,6 +253,35 @@ app.post('/api/chat/command', requireApiToken, async (req, res) => {
   } catch (err) {
     console.error('处理转发指令失败:', err);
     res.json({ reply: `❌ 指令执行失败：${err.message}` });
+  }
+});
+
+// ---------- 项目额度（2026-11-21 曼波定：额度输入/重置入口——运维台 SSH 代理调本端点，
+//             或财务群 /approval-quota 指令；占用口径见 quotaService.js 头注释） ----------
+app.get('/api/quota/overview', requireApiToken, async (req, res) => {
+  try {
+    res.json(await quotaService.getQuotaOverview());
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/quota/set', requireApiToken, async (req, res) => {
+  try {
+    const { project, amount, initialSpent, note } = req.body || {};
+    const r = await quotaService.setQuota(project, amount, initialSpent, note);
+    res.json({ success: true, ...r });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/quota/unset', requireApiToken, async (req, res) => {
+  try {
+    const { project } = req.body || {};
+    res.json({ success: true, ...(await quotaService.deleteQuota(project)) });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 

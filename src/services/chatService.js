@@ -84,6 +84,7 @@ async function handleHelpCommand() {
     '  /approval-batch   报销批次：拟批建议 | lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx] | status |',
     '                    submit <批次号> [投递单号] | paid/reject <批次号> | confirm <批次号> | printed <批次号> | regen <批次号> | ledger [submit|paid|reject] <批次号> [投递单号]',
     '                    （confirm=确认自动批次明细后才生成交付件与二维码；printed=标记打印完成并自动预登记《报销台账》；submit/paid/reject 自动同步《报销台账》）',
+    '  /approval-quota  项目额度：查看各项目剩余额度（占用=锁定+提交+到账）；set <项目> <额度> [初始已用] / unset <项目>（资金白名单）',
     '  接取 [批次号]     领取交付包（锁定后群里回复「接取」，登记接取人）',
     '',
     `使用方式：群聊中先 @${config.bot.name} 再发送指令`,
@@ -233,8 +234,63 @@ const commandHandlers = {
   '/approval-status': handleStatusCommand,
   '/approval-urge': handleUrgeCommand,
   '/approval-batch': handleBatchCommand,
+  '/approval-quota': handleQuotaCommand,
   '接取': handleTakeCommand, // 审批群交付卡领取（hub 转发裸词，非 / 指令）
 };
+
+/**
+ * 项目额度指令（2026-11-21 曼波定额度功能）：
+ *   /approval-quota                       → 总览（财务群可用，无需白名单）
+ *   /approval-quota set <项目> <额度> [初始已用] → 设置/更新（资金白名单——写额度真值）
+ *   /approval-quota unset <项目>          → 撤销该项目的额度管理（资金白名单）
+ * 占用口径：批次表「已锁定/已提交/已到账」金额合计（承诺即占用），已退回释放；
+ * 初始已用=建账前历史消耗预扣（v50 前手工批次只在台账，统计不到）。
+ */
+async function handleQuotaCommand(args = [], ctx = {}) {
+  if (!config.bitable.quotaTableId) {
+    return 'ℹ️ 未配置项目额度表（BITABLE_QUOTA_TABLE_ID）——先跑 scripts/create-collect-tables.js 建表并配 .env，额度功能才会启用';
+  }
+  const quotaService = require('./quotaService');
+  const sub = String(args[1] || '').toLowerCase();
+
+  // 查看：财务群人人可用（只读）
+  if (!sub || sub === 'overview') {
+    const { items, unmanaged } = await quotaService.getQuotaOverview();
+    if (!items.length) return '📊 尚未配置任何项目额度——运维台或 /approval-quota set <项目> <额度> [初始已用] 设置';
+    const lines = ['💰 项目额度总览（占用=已锁定+已提交+已到账，已退回释放）：'];
+    for (const i of items) {
+      const flag = i.overspend ? '🚨' : (i.remaining < i.quota * 0.2 ? '⚠️' : '✅');
+      lines.push(`· ${flag} ${i.project}：剩余 ¥${i.remaining.toFixed(2)} / 额度 ¥${i.quota.toFixed(2)}（占用 ¥${i.spent.toFixed(2)}${i.initialSpent ? `，初始已用 ¥${i.initialSpent.toFixed(2)}` : ''}）`);
+    }
+    if (unmanaged.length) {
+      lines.push(`· ℹ️ 有消耗但未设额度的项目：${unmanaged.map(u => `${u.project} ¥${u.spent.toFixed(2)}`).join('、')}（需要管理就补设）`);
+    }
+    return lines.join('\n');
+  }
+
+  // 设置/撤销：资金指令级——挂 fundOperatorDenied 白名单
+  const denied = fundOperatorDenied(ctx);
+  if (denied) return denied;
+
+  if (sub === 'set') {
+    const project = String(args[2] || '').trim();
+    const amount = parseFloat(String(args[3] ?? ''));
+    if (!project || !Number.isFinite(amount) || amount < 0) {
+      return '❌ 用法：/approval-quota set <项目> <额度> [初始已用]（如 /approval-quota set 对抗赛 20000 15000）';
+    }
+    const init = parseFloat(String(args[4] ?? '')) || 0;
+    const r = await quotaService.setQuota(project, amount, init);
+    const item = (await quotaService.getProjectQuota(project));
+    return `✅ 项目额度已${r.action === 'created' ? '设置' : '更新'}：${r.project} 额度 ¥${r.quota.toFixed(2)}${r.initialSpent ? `（初始已用 ¥${r.initialSpent.toFixed(2)}）` : ''}${item ? `，当前剩余 ¥${item.remaining.toFixed(2)}` : ''}`;
+  }
+  if (sub === 'unset') {
+    const project = String(args[2] || '').trim();
+    if (!project) return '❌ 用法：/approval-quota unset <项目>';
+    const r = await quotaService.deleteQuota(project);
+    return r.action === 'deleted' ? `✅ 已撤销「${r.project}」的额度管理（批次流转不受影响）` : `ℹ️ 「${r.project}」本来就没有额度配置`;
+  }
+  return '❌ 用法：/approval-quota（查看总览）| set <项目> <额度> [初始已用] | unset <项目>';
+}
 
 /**
  * 资金指令白名单闸（2026-09-27 对抗审查 P1）：APPROVAL_FUND_OPERATOR_IDS 配置后，
@@ -322,6 +378,10 @@ async function handleBatchCommand(args = [], ctx = {}) {
     if (r.notFullyCollected && r.notFullyCollected.length) {
       lines.push(`· 🧮 ${r.notFullyCollected.length} 个申请未收齐：${r.notFullyCollected.slice(0, 3).map(n => `${n.applyNo} 已收¥${n.collected.toFixed(2)}/共¥${n.total.toFixed(2)}`).join('、')}${r.notFullyCollected.length > 3 ? ` 等 ${r.notFullyCollected.length} 个` : ''}（多票金额加起来=申请即可，制单前与队员确认补齐）`);
     }
+    // 项目额度超支预警（v104 额度功能）：锁定本批后剩余 < 0
+    if (r.quotaAlert) {
+      lines.push(`· 🚨 项目额度超支：${r.quotaAlert.project} 锁定本批 ¥${Number(r.amount).toFixed(2)} 后剩余 ¥${r.quotaAlert.remainingAfter.toFixed(2)}（额度 ¥${r.quotaAlert.quota.toFixed(2)}，锁定前 ¥${r.quotaAlert.remainingBefore.toFixed(2)}）——请裁决补额度或调整报销计划`);
+    }
     // 交付卡（人工锁定触发的直接回路，即时发群；卡内按序内嵌全部有效发票二维码——
     // 2026-09-29 曼波定；失败不阻断锁定）。sendMessage 被播报熔断时静默返回 null——
     // 如实回执「暂缓」而非谎报已发（2026-10-30 审查批，同 cron 先例）。
@@ -357,6 +417,7 @@ async function handleBatchCommand(args = [], ctx = {}) {
     }
     return lines.join('\n');
   }
+
 
   const statusMap = {
     submit: { status: '已提交', label: '已提交学校' },

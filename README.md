@@ -177,6 +177,9 @@ curl http://localhost:3002/api/health
 | POST | `/api/bot/test-form-alert` | 立即触发一次制单金额线检查（测试，X-API-Token，v63） |
 | GET | `/api/bot/cron-status` | 定时任务状态 + 下次执行时间 |
 | GET | `/api/bot/history` | 播报历史 |
+| GET | `/api/quota/overview` | 项目额度总览（X-API-Token）：`{items:[{project,quota,initialSpent,locked,submitted,paid,spent,remaining,overspend}], unmanaged:[{project,spent}]}`（额度功能，v104） |
+| POST | `/api/quota/set` | 设置/更新项目额度（X-API-Token）：`{project, amount, initialSpent?, note?}` 幂等 upsert（运维台 SSH 代理调此端点） |
+| POST | `/api/quota/unset` | 撤销项目额度管理（X-API-Token）：`{project}` |
 | POST | `/api/chat/command` | 指令转发端点（`{command, args, senderName?, senderId?}` → `{reply}`；`command:'接取'` 为审批群裸词放行指令，senderName 用于登记接取人） |
 | POST | `/api/feishu/event` | feishu-gateway 事件转发入口（消息事件） |
 | POST | `/api/ocr/transcribe` | 发票图像 OCR 转录（X-API-Token）：body `{messageId, imageKey}` 或 `{imageBase64}` → `{segments, fullText, fields, misses, meta}` |
@@ -208,6 +211,8 @@ curl http://localhost:3002/api/health
 
 **printed 预登记（v92，2026-11-06 曼波定「打印回执即记账」）**：`printed` 时即在台账追加「预登记」行——摘要/金额/项目编号/支付方式/收款方/收款账号/经办人自动填，投递单号/投递日期/状态**留空**（尚未提交学校不撒谎，同历史台账人工行口径）；幂等，行已在则跳过。后续 `submit` 对已有行只补填 B 投递单号 / K 投递日期 / M 状态 中的**空列**（L 入账日期归 paid 管辖不碰）。`printed` 自 v93 起挂资金指令白名单（printed 写台账真账）。财务手填的历史台账行同款口径：摘要非空即参与摘要匹配，机器人永不覆盖手填值（空列才补）。
 
+**项目额度（v104，2026-11-21 曼波定）**：每个项目的花销以报销单（批次表）为准，从给定额度里扣除——消耗 spent=批次表「已锁定/已提交/已到账」金额合计按项目聚合（**承诺即占用**），「已退回」释放、「拟批」不占；多项目批次按主项目归属（金额不可拆，已知限制）；「初始已用」字段兜建账前历史消耗（v50 前手工批次只在台账，统计不到）。剩余额度每周随财务周报「💰 项目额度」段播报（🚨超支置顶/⚠️<20% 预警/未设额度项目提示补配）；锁批后主项目超支 → 🚨 进锁定回执与详情卡（**预警不阻断锁定**——额度是管理信号不是硬闸）。额度输入/重置双通道：财务群 `/approval-quota set <项目> <额度> [初始已用]`（资金白名单）与运维台 approval 定制窗口（SSH 代理调 `/api/quota/*`，X-API-Token）。额度表未配置（`BITABLE_QUOTA_TABLE_ID` 空）时功能整体关闭，播报/指令/端点全降级提示。
+
 **台账与播报**：周报卡新增「报销台账」段（票池待归集张数/金额 + 各状态批次汇总）；`GET /api/approval/policy` 含 ocr 段。采集/批次两表建在审批 base 下（`scripts/create-collect-tables.js` 幂等建表），**采集表为唯一真源**，审批表「补交发票」栏仅为财务可见镜像（队员交票后不会自行修改审批，镜像被覆盖风险可忽略）。
 
 **权限前置**：在「图片识别」`optical_char_recognition` +「获取与上传图片或资源」`im:resource`（v44 已列）基础上，需再开通**审批只读**（审批实例详情/附件下载）与**云文档**读写（附件上传下载）；后台开通前采集链路会在下载/识别环节报错，报错信息如实透出。
@@ -225,6 +230,7 @@ curl http://localhost:3002/api/health
 | `/approval-urge` | 手动催办：`/approval-urge [发票\|报销单\|转账]`，**留空=发票私聊催交**，并群播「今日已催」卡片（本次私聊了哪些未开票记录+状态）；`报销单`/`转账` 仅显式传参时播报对应清单 @财务（常规展示由周报承担） |
 | `/approval-batch` | 报销批次三件套+交付包：`/approval-batch` 拟批建议；`lock <批次号> [项目] [用途=xx] [费用项=xx] [采购类型=xx] [收款方=xx 收款账号=xx]` 锁定（回写两表+生成 打印PDF/BOM/物料清单/扫码清单 + 群发交付卡）；`status` 总览（含接取人）；`confirm <批次号>` 自动批次两阶段确认——生成交付件+发二维码交付卡（2026-09-29）；`printed <批次号>` 完成打印标记（批次表留痕，回应打印询问卡）；`submit <批次号> [投递单号]` 标记已提交+台账追加行；`paid/reject <批次号>` 标记已到账/已退回（台账回填状态；paid 附归档文件夹名建议；paid/reject 自动私聊发起人闭环）；`regen <批次号>` 重新生成全部交付件；`ledger <批次号> [投递单号]` 手动同步台账 |
 | `接取 [批次号]` | 领取交付包（v49）：锁定后群里 @机器人 回复「接取」= 接最近锁定的未接取批次，登记接取人/接取时间；重复接取幂等 |
+| `/approval-quota` | 项目额度（v104）：留空=总览（占用=已锁定+已提交+已到账，已退回释放）；`set <项目> <额度> [初始已用]` / `unset <项目>` 设置与撤销（资金白名单）；额度输入/重置亦可在运维台 approval 定制窗口操作（SSH 代理调 /api/quota/*） |
 
 指令命名空间统一为 `/approval-*`，与爆米花机的 `/print-*` 等互不冲突。**对话链路遵循 qianli 架构铁律**（除工单接单监听外，所有对话逻辑由对话型机器人触发）：群内消息经 feishu-gateway 统一送至对话型机器人（爆米花机-对话型），由其把 `/approval-*` 转发到本服务 `POST http://localhost:3002/api/chat/command` 并代为回复；审批群交付卡领取词 **「接取」**（裸词，v49）同由 hub 转发并透传 senderName；本服务的消息处理模块仅用于本地调试。
 
@@ -266,6 +272,7 @@ approval-bot/
 │   │   ├── invoiceCollectService.js # 发票采集（校验闸/金额归类/落表/回执打回）
 │   │   ├── invoiceParser.js       # 三通道识别解析（PDF文本/二维码/OCR特征词）
 │   │   ├── invoiceUrgeService.js  # 催发票私聊（回复轮询/回票采集/通讯录兜底/间隔闸/状态过滤/计数升级，支持 dryRun）
+│   │   ├── quotaService.js        # 项目额度（批次表承诺即占用聚合/额度表 upsert/超支预警，v104）
 │   │   ├── ledgerSheetService.js  # 报销台账电子表格同步（submit 追加行/paid·reject 摘要匹配回填）
 │   │   ├── ocrService.js          # 发票 OCR 转录（飞书免费 OCR + 字段提取规则引擎 + 规则持久化热改）
 │   │   ├── urgeStateStore.js      # 催发票状态持久化（JSON 文件，路径可配）

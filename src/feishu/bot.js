@@ -352,6 +352,22 @@ function buildWeeklyFinanceCard(followUp, stats, options = {}) {
     }
   }
 
+  // 7. 项目额度（2026-11-21 曼波定额度功能）：各项目剩余额度，超支 🚨 置顶；未配置跳段
+  const qo = options.quotaOverview;
+  if (qo && qo.items.length) {
+    const qLines = [`**💰 项目额度**（占用=已锁定+已提交+已到账，已退回释放）`];
+    for (const i of qo.items) {
+      const flag = i.overspend ? '🚨' : (i.remaining < i.quota * 0.2 ? '⚠️' : '✅');
+      const detail = `占用 ¥${i.spent.toFixed(2)}（锁${i.locked.toFixed(0)}/提${i.submitted.toFixed(0)}/账${i.paid.toFixed(0)}）${i.initialSpent ? ` 初始已用 ¥${i.initialSpent.toFixed(2)}` : ''}`;
+      qLines.push(`- ${flag} **${stripCardInjection(i.project)}**：剩余 ¥${i.remaining.toFixed(2)} / ¥${i.quota.toFixed(2)} — ${detail}`);
+    }
+    if (qo.unmanaged.length) {
+      qLines.push(`- ℹ️ 未设额度但有消耗：${qo.unmanaged.map(u => `${stripCardInjection(u.project)} ¥${u.spent.toFixed(2)}`).join('、')}（需要管理请设额度）`);
+    }
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: qLines.join('\n') });
+  }
+
   // 底部：本周统计（仅本周结果，不放全量数据）+ 按项目粗分类
   elements.push({ tag: 'hr' });
   const statLines = [
@@ -654,7 +670,7 @@ function abnormalItemLines(abnormalItems, cap = 8) {
  * 先只发批次详情等财务确认——确认（/approval-batch confirm）后才生成交付件并发二维码卡。
  * 无二维码、无附件清单（都还没生成）；要退有 reject 出口。
  */
-function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [], notFullyCollected = [] } = {}) {
+function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0, summary = '', warningCount = 0, missingContent = 0, unCollected = 0, abnormalItems = [], notFullyCollected = [], quotaAlert = null } = {}) {
   const safeProject = stripCardInjection(project);
   const safeSummary = stripCardInjection(summary);
   const safeBatchNo = stripCardInjection(batchNo); // 自动批次号含项目段，消毒后再进卡（P2-3）
@@ -690,6 +706,10 @@ function buildAutoLockNoticeCard({ batchNo, project = '', count = 0, amount = 0,
     }
     if (notFullyCollected.length > 6) lines.push(`- …另有 ${notFullyCollected.length - 6} 个`);
     lines.push(`确认前请与队员核对剩余票：金额加起来等于申请金额即可收齐；按现状制单请自行确认差额可接受`);
+  }
+  // 项目额度超支预警（v104 额度功能）：本批锁定后剩余 < 0，确认前先看额度
+  if (quotaAlert) {
+    lines.push(``, `🚨 **项目额度超支**：${stripCardInjection(quotaAlert.project)} 锁定本批 ¥${Number(amount).toFixed(2)} 后剩余 ¥${quotaAlert.remainingAfter.toFixed(2)}（额度 ¥${quotaAlert.quota.toFixed(2)}，锁定前 ¥${quotaAlert.remainingBefore.toFixed(2)}）——确认前请裁决补额度或调整报销计划`);
   }
 
   return {
