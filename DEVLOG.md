@@ -854,7 +854,7 @@
 - **bitable.deleteRecord 补齐**（此前只有 CRUD 无 D）。
 - **部署注**：本批提交时台式机在校园网（SuperQianLi_5G 不可达）——SFTP 通道不通，**提交与部署分离**：代码与 .env（含 tblDtuU4t74fePSn）随下次在实验室 push 生效；运维台 UI 在 dashboard 仓（index.html 已改，静态文件刷新即生效）。
 
-### v105 · 2026-11-21 · fix（全量审查批，随本提交落地）
+### v105 · 2026-11-21 · 87b91ca · fix（全量审查批）
 **全项目代码审查+修复（曼波令「全面审查全项目代码，寻找 bug 和不通链路并修复」）——四异源工位并行（A催办/B批次台账/C识别采集/D播报接线），17 项发现全部裁决收口**
 - **工位 A（催办链路，deepseek cross-check）**：
   - A1【高危回归】v103「两栏判断废止」过度修正——「发票」栏（Url，审批直附）是干净信号被误杀，47% 直附记录被永久误催发票。修复：新统一判据 `isInvoiceSettled`（直附 || 台账收齐；补交发票栏不再单独算已交——求和制病灶本体保留废止），getFinanceFollowUp/getOverdueInvoices 双消费点接入；
